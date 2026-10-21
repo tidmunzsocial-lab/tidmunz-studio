@@ -1653,14 +1653,24 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             out = out.replace("```json", "").replace("```", "").strip()
             start, end = out.find("{"), out.rfind("}")
             parsed = _json.loads(out[start:end + 1]) if start >= 0 and end > start else {}
-            rows = parsed.get("locations") if isinstance(parsed, dict) else []
+            rows = []
+            if isinstance(parsed, dict):
+                rows = next((parsed.get(key) for key in ("locations", "key_locations", "places", "key_places")
+                             if parsed.get(key) is not None), [])
+            if isinstance(rows, dict):
+                rows = ([dict(value, name=value.get("name") or key) if isinstance(value, dict)
+                         else {"name": key, "story_fact": value} for key, value in rows.items()])
             targets, seen = [], set()
             for row in rows or []:
+                if isinstance(row, str):
+                    row = {"name": row, "story_fact": "สถานที่ที่เลือกจากบทและ Context ให้เห็นเป็นฉาก"}
                 if not isinstance(row, dict):
                     continue
-                name = " ".join(str(row.get("name") or "").split()).strip()
+                name = " ".join(str(row.get("name") or row.get("place") or row.get("location") or
+                                     row.get("สถานที่") or "").split()).strip()
                 location_type = " ".join(str(row.get("type") or "other").split()).strip()
-                story_fact = " ".join(str(row.get("story_fact") or "").split()).strip()
+                story_fact = " ".join(str(row.get("story_fact") or row.get("on_screen_action") or
+                    row.get("event") or row.get("scene") or row.get("action") or row.get("เหตุการณ์") or "").split()).strip()
                 prop_words = ("โต๊ะ", "เตียง", "ประตู", "หน้าต่าง", "เก้าอี้", "ตู้", "กุญแจ", "เครื่องราง", "กระจก", "รถ")
                 # A model sometimes relabels a prop as exterior/room to bypass
                 # the prompt rule.  Names centred on an object are never a
@@ -1683,7 +1693,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     "story_fact": story_fact,
                 })
             if not targets:
-                raise RuntimeError("GPT ไม่พบรายการสถานที่จาก Context")
+                raise RuntimeError("GPT ไม่พบชื่อสถานที่พร้อมเหตุการณ์ใน Context/บท — ตรวจว่า Context มีสถานที่ที่ระบุชื่อและมีฉากเกิดขึ้นจริง")
             bible["targets"] = targets[:10]
             bible["targets_hash"] = discovery_hash
             bible["targets_version"] = 3
