@@ -85,6 +85,8 @@ QWEN_LABEL = "Qwen 2.1 (ComfyUI ในเครื่อง)"
 PER_STAGE_LABEL = "เลือกแยกตามขั้น (ถามครั้งละหัวข้อ)"
 IMAGE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL, "snapgen": SNAPGEN_LABEL,
                          "qwen": QWEN_LABEL, "per_stage": PER_STAGE_LABEL}
+VIDEO_AUTO_SCENE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL,
+                                  "snapgen": SNAPGEN_LABEL + " · พร้อมกันสูงสุด 5 งาน"}
 VIDEO_AUTO_MAXPLUS_MODELS = {
     "maxplus": {"model": MAXPLUS_IMAGE_MODEL, "label": MAXPLUS_IMAGE_LABEL,
                 "quality": "high", "max_references": 16,
@@ -2890,7 +2892,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     return payload
         return None
 
-    def attachments_for(scene):
+    def attachments_for(scene, limit=6):
         """Video flow: the Image page's attachments, matched by name like Image AI does."""
         text = " ".join([scene_prompt(scene), " ".join(scene.get("characters") or []), str(scene.get("location") or ""),
                          str(scene.get("text") or "")])
@@ -2899,7 +2901,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             found = matcher(text)
         else:
             found = match_reference_files(text, attachment_folder())
-        return [str(path) for _name, path in found][:6]
+        paths = [str(path) for _name, path in found]
+        return paths if limit is None else paths[:limit]
 
     def desired_count() -> int:
         if not video_mode:
@@ -3575,13 +3578,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def image_provider_for(stage="images"):
         project = state["project"]
         if video_mode:
-            if stage != "storyboard":
+            if stage == "storyboard":
+                provider = project.get("storyboard_provider", "gpt_web")
+                return provider if provider in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else "gpt_web"
+            if stage != "images":
                 return "gpt_web"
-            provider = project.get("storyboard_provider", "gpt_web")
-            return provider if provider in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else "gpt_web"
-        labels = VIDEO_AUTO_IMAGE_PROVIDER_LABELS if video_mode else IMAGE_PROVIDER_LABELS
+        labels = VIDEO_AUTO_SCENE_PROVIDER_LABELS if video_mode else IMAGE_PROVIDER_LABELS
         supported = tuple(key for key in labels if key != "per_stage")
-        provider = project.get("image_provider", "gpt_web")
+        provider = "per_stage" if video_mode else project.get("image_provider", "gpt_web")
         if provider != "per_stage":
             return provider if provider in supported else "gpt_web"
         choices = project.setdefault("image_stage_providers", {})
@@ -3596,7 +3600,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             win.transient(root)
             win.resizable(False, False)
             tk.Label(win, text=f"ขั้น {title} จะสร้างรูปผ่านอะไร?", font=("TkDefaultFont", 12, "bold")).pack(padx=24, pady=(18, 8))
-            tk.Label(win, text="ใช้กับทุกรูปในขั้นนี้ ถามอีกครั้งเมื่อเปลี่ยนหัวข้อ").pack(padx=24, pady=(0, 12))
+            note = ("ใช้กับฉากที่เหลือในรอบนี้ กดทำต่อครั้งใหม่จะถามอีกครั้ง\n"
+                    "SnapGen ใช้ API Key เดิม · ส่งพร้อมกันสูงสุด 5 งาน · ใช้เครดิตตามรุ่น"
+                    if video_mode else "ใช้กับทุกรูปในขั้นนี้ ถามอีกครั้งเมื่อเปลี่ยนหัวข้อ")
+            tk.Label(win, text=note).pack(padx=24, pady=(0, 12))
 
             def choose(value):
                 answer["provider"] = value
@@ -3605,7 +3612,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             for value, label in labels.items():
                 if value == "per_stage":
                     continue
-                tk.Button(win, text=label, width=38, command=lambda v=value: choose(v)).pack(padx=24, pady=5)
+                tk.Button(win, text=label, width=50 if video_mode else 38,
+                          command=lambda v=value: choose(v)).pack(padx=24, pady=5)
             tk.Button(win, text="หยุดไว้ก่อน", command=win.destroy).pack(pady=(8, 16))
             win.bind("<Destroy>", lambda e: event.set() if e.widget == win else None)
             win.grab_set()
@@ -4795,18 +4803,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         api_context = {"api_key": str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip()}
         if not api_context["api_key"]:
             raise ImageProviderError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
-        required = {c["name"] for c, _ in characters_needing_refs(project.get("context") or {}, scenes)}
+        required = (set() if video_mode else
+                    {c["name"] for c, _ in characters_needing_refs(project.get("context") or {}, scenes)})
         jobs = []
         for i in dict.fromkeys(todo):
             check_stop()
             scene = scenes[i]
-            same = project.get("same_person") or {}
-            shown = list(scene.get("characters") or [])
-            shown += [same[c]["person"] for c in shown if c in same and same[c]["person"] not in shown]
-            missing = [c for c in shown if c in required and c not in refs]
-            if missing:
-                raise ImageProviderError("ยังไม่มีรูปเรฟตัวละคร: " + ", ".join(missing))
-            paths = [refs[c] for c in dict.fromkeys(shown) if c in refs]
+            if video_mode:
+                paths = attachments_for(scene, limit=None)
+            else:
+                same = project.get("same_person") or {}
+                shown = list(scene.get("characters") or [])
+                shown += [same[c]["person"] for c in shown if c in same and same[c]["person"] not in shown]
+                missing = [c for c in shown if c in required and c not in refs]
+                if missing:
+                    raise ImageProviderError("ยังไม่มีรูปเรฟตัวละคร: " + ", ".join(missing))
+                paths = [refs[c] for c in dict.fromkeys(shown) if c in refs]
             board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
             if len(paths) + bool(board) > 10:
                 raise ImageProviderError(f"ฉาก {i + 1} มีไฟล์เรฟเกิน 10 รูป — หยุดก่อนส่ง")
@@ -4880,11 +4892,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         research_ghosts()  # stories analysed before this feature
         images_dir = Path(state["folder"]) / "images"
         images_dir.mkdir(exist_ok=True)
-        refs = character_refs()
+        refs = {} if video_mode else character_refs()
         scenes = project["scenes"]
         todo = indices if indices is not None else [
             i for i, s in enumerate(scenes) if not (s.get("image") and os.path.isfile(s["image"]))]
-        if not video_mode and image_provider_for("images") == "snapgen":
+        if image_provider_for("images") == "snapgen":
             run_snapgen_scenes(todo, scenes, refs, images_dir)
             missing = [i + 1 for i, scene in enumerate(scenes)
                        if not (scene.get("image") and os.path.isfile(scene["image"]))]
@@ -6170,7 +6182,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         existing = character_refs()
         if video_mode:
             scenes = project.get("scenes") or []
-            matched = sorted({Path(p).stem for sc in scenes for p in attachments_for(sc)})
+            matched = sorted({Path(p).stem for sc in scenes for p in attachments_for(sc, limit=None)})
             missing = sum(1 for sc in scenes if not (sc.get("image") and os.path.isfile(sc["image"])))
             todo = [sc for sc in scenes if not (sc.get("clip") and os.path.isfile(sc["clip"]))]
             if missing + len(todo) == 0:
@@ -6181,6 +6193,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                          if any(not (scenes[i].get("image") and os.path.isfile(scenes[i]["image"])) for i in grp)
                          and not all(scenes[i].get("board") and os.path.isfile(scenes[i]["board"]) for i in grp))
             selected_model = VIDEO_AUTO_MAXPLUS_MODELS.get(project.get("storyboard_provider"))
+            scene_provider = VIDEO_AUTO_SCENE_PROVIDER_LABELS.get(
+                (project.get("image_stage_providers") or {}).get("images"),
+                "เลือก GPT Chrome / SnapGen API ก่อนเริ่มสร้างรูปฉาก")
             price_note = ""
             if sheets and selected_model:
                 usd_total = selected_model["estimated_usd"] * sheets
@@ -6192,7 +6207,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 f"วางแผนเสร็จแล้ว\n\nไฟล์แนบที่จะใช้ ({len(matched)}): {', '.join(matched[:15]) or '-'}\n"
                 + (f"สตอรี่ชีต {sheets} รูป (เรียงช็อต ชีตละ 9 ช่อง; ชีตสุดท้ายตามจำนวนที่เหลือ) + " if sheets else "")
                 + f"รูปฉาก {missing} รูป + คลิปวิดีโอ {len(todo)} คลิป\n"
-                + (f"\nรูปฉากจะสร้างผ่าน GPT Web; สตอรี่บอร์ดเลือก {VIDEO_AUTO_IMAGE_PROVIDER_LABELS.get(project.get('storyboard_provider'), GPT_WEB_LABEL)} "
+                + (f"\nรูปฉาก: {scene_provider}; สตอรี่บอร์ดเลือก {VIDEO_AUTO_IMAGE_PROVIDER_LABELS.get(project.get('storyboard_provider'), GPT_WEB_LABEL)} "
                    "แนบแม่แบบตาราง 3x3 และใช้ชีตก่อนหน้าเป็นเรฟความต่อเนื่องตั้งแต่ชีตที่ 2\n" if missing + sheets else "")
                 + price_note
                 + f"   {clip_summary(todo)}\n   (สโลว์×2 = ทำ AI Slow 2x หลังได้คลิป)\n\nเริ่มเลยไหม?")
@@ -6397,6 +6412,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def worker():
             current = None
             try:
+                if video_mode:
+                    project.setdefault("image_stage_providers", {}).pop("images", None)
                 keys = [only] if only else [k for k, _t, _w in stages]
                 confirmed = False
                 for key in keys:
@@ -6588,6 +6605,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def worker():
             before = {i: (project["scenes"][i].get("image"), _mtime(project["scenes"][i].get("image"))) for i in selected}
             try:
+                if video_mode:
+                    project.setdefault("image_stage_providers", {}).pop("images", None)
                 stage_images(selected)
                 if video_mode:
                     for i in selected:
@@ -6661,6 +6680,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def worker():
             try:
+                if video_mode:
+                    project.setdefault("image_stage_providers", {}).pop("images", None)
                 ensure_story_in_history()
                 ensure_continuity()
                 ensure_bodies()
