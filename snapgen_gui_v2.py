@@ -872,9 +872,10 @@ g = {
 }
 exec(code, g)
 tk.Misc.mainloop = _real_mainloop
+GROK_LITE_MODEL = "grok-1.5-lite"
 try:
     _local_model_ids = {
-        "ltx-2.3-local", "ltx-2.5-maestro", "vela-ai-video", "grok-lower",
+        "ltx-2.3-local", "ltx-2.5-maestro", "vela-ai-video", "grok-lower", GROK_LITE_MODEL,
     } | set(SEEDANCE_MODELS)
     _retired_local_model_ids = {"minimax-h3-local", "ltx-2.5-cloud"}
     for _slot_index, _saved_slot in enumerate(_saved_local_slot_configs):
@@ -886,8 +887,10 @@ try:
             _saved_model = "ltx-2.5-maestro"
         if _saved_model == "vela-ai-video":
             _saved_slot = dict(_saved_slot, duration="5")
-        if _saved_model == "grok-lower" and str(_saved_slot.get("duration") or "") not in {"6", "10", "15"}:
+        if _saved_model in ("grok-lower", GROK_LITE_MODEL) and str(_saved_slot.get("duration") or "") not in {"6", "10", "15"}:
             _saved_slot = dict(_saved_slot, duration="6")
+        if _saved_model == GROK_LITE_MODEL:
+            _saved_slot = dict(_saved_slot, resolution="1080p")
         if _saved_model in SEEDANCE_MODELS:
             _resolution, _duration, _aspect = _normalize_seedance_settings(
                 _saved_slot.get("resolution"), _saved_slot.get("duration"), _saved_slot.get("aspect"), _saved_model)
@@ -2751,6 +2754,9 @@ from snapgen_vela_video import (
     find_video_url as _find_vela_video_url,
 )
 from snapgen_grok_lower import (
+    GROK_LITE_LABEL,
+    GROK_LITE_MODEL,
+    GROK_LITE_RESOLUTIONS,
     SUPPORTED_DURATIONS as GROK_LOWER_DURATIONS,
     request as _request_grok_lower,
 )
@@ -2771,6 +2777,7 @@ ALLOWED_VIDEO_MODELS = {
     "grok-3-fast",
     "grok",
     "grok-lower",
+    GROK_LITE_MODEL,
     VELA_VIDEO_MODEL,
     "ltx-2.3-local",
 }
@@ -3369,7 +3376,7 @@ if callable(_core_duration_values_for_model):
             return list(SEEDANCE_DURATIONS[str(model).strip()])
         if str(model or "").strip() == VELA_VIDEO_MODEL:
             return [VELA_VIDEO_DURATION]
-        if str(model or "").strip() == GROK_LOWER_MODEL:
+        if str(model or "").strip() in (GROK_LOWER_MODEL, GROK_LITE_MODEL):
             return list(GROK_LOWER_DURATIONS)
         values = list(_core_duration_values_for_model(model) or [])
         if str(model or "").strip() in (
@@ -3386,10 +3393,12 @@ if callable(_core_duration_values_for_model):
             g["refresh_slot_duration_menu"](_duration_slot)
             _duration_cfg = g["slot_cfg_vars"][_duration_slot]
             if (
-                str(_duration_cfg.get("model").get() or "").strip() == GROK_LOWER_MODEL
+                str(_duration_cfg.get("model").get() or "").strip() in (GROK_LOWER_MODEL, GROK_LITE_MODEL)
                 and str(_duration_cfg.get("duration").get() or "").strip() not in GROK_LOWER_DURATIONS
             ):
                 _duration_cfg["duration"].set(GROK_LOWER_DURATIONS[0])
+            if str(_duration_cfg.get("model").get() or "").strip() == GROK_LITE_MODEL:
+                _duration_cfg["resolution"].set(GROK_LITE_RESOLUTIONS[0])
     except Exception as _duration_patch_error:
         print(f"[SnapGen] LTX duration menu refresh failed: {_duration_patch_error}", flush=True)
 
@@ -3466,8 +3475,9 @@ if callable(_original_generate_one) and not getattr(_original_generate_one, "_sn
         except Exception:
             cfg = None
             model = ""
-        if model not in (GROK_LOWER_MODEL, *SEEDANCE_MODELS) or cfg is None:
+        if model not in (GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS) or cfg is None:
             return _original_generate_one(i, img, prompt)
+        is_grok_lite = model == GROK_LITE_MODEL
         prompt_builder = g.get("prompt_with_camera")
         if callable(prompt_builder):
             prompt = prompt_builder(prompt, cfg)
@@ -3476,6 +3486,9 @@ if callable(_original_generate_one) and not getattr(_original_generate_one, "_sn
             for key in ("resolution", "duration", "aspect", "mode")
             if hasattr(cfg.get(key), "get")
         }
+        if is_grok_lite:
+            values["resolution"] = GROK_LITE_RESOLUTIONS[0]
+            cfg["resolution"].set(GROK_LITE_RESOLUTIONS[0])
         if model in SEEDANCE_MODELS:
             return g["run_json"](_build_seedance_command(
                 g["api_key_var"].get(), model, prompt, img,
@@ -3491,7 +3504,7 @@ if callable(_original_generate_one) and not getattr(_original_generate_one, "_sn
         }.get(values.get("aspect"), values.get("aspect", "landscape"))
         g["append_log"](
             i,
-            "Grok Lower params: "
+            ("Grok Lite params: " if is_grok_lite else "Grok Lower params: ")
             + values.get("resolution", "480p")
             + ", "
             + duration
@@ -3506,6 +3519,7 @@ if callable(_original_generate_one) and not getattr(_original_generate_one, "_sn
             duration,
             aspect,
             values.get("mode", "custom"),
+            model=model,
         )
 
     _generate_one_with_grok_lower._snapgen_grok_lower_wrapper = True
@@ -4118,7 +4132,7 @@ def _add_minimax_h3_to_model_menu(i):
                         LTX23_LOCAL_MODEL,
                         LTX25_MAESTRO_MODEL,
                     ]
-                    paid_values = [VELA_VIDEO_MODEL, GROK_LOWER_MODEL, *SEEDANCE_MODELS]
+                    paid_values = [VELA_VIDEO_MODEL, GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS]
                     current_paid = [
                         value for value in values
                         if value not in grouped_values and value not in retired_values
@@ -4169,6 +4183,10 @@ def _add_minimax_h3_to_model_menu(i):
                         menu.insert_command(2, label=GROK_LOWER_LABEL, command=lambda: model_var.set(GROK_LOWER_MODEL))
 
                     labels = menu_labels()
+                    if GROK_LITE_MODEL not in labels and GROK_LITE_LABEL not in labels:
+                        menu.insert_command(3, label=GROK_LITE_LABEL, command=lambda: model_var.set(GROK_LITE_MODEL))
+
+                    labels = menu_labels()
                     for position, (value, label) in enumerate(SEEDANCE_MODELS.items(), 3):
                         labels = menu_labels()
                         if value in labels and label not in labels:
@@ -4211,9 +4229,12 @@ def _add_minimax_h3_to_model_menu(i):
             elif (
                 resolution_var is not None
                 and tv == str(resolution_var)
-                and str(model_var.get() or "") in (GROK_LOWER_MODEL, *SEEDANCE_MODELS)
+                and str(model_var.get() or "") in (GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS)
             ):
-                resolutions = ("720p",) if model_var.get() in SEEDANCE_MODELS else ("480p", "720p")
+                if str(model_var.get() or "") == GROK_LITE_MODEL:
+                    resolution_var.set(GROK_LITE_RESOLUTIONS[0])
+                resolutions = (GROK_LITE_RESOLUTIONS if model_var.get() == GROK_LITE_MODEL
+                               else (("720p",) if model_var.get() in SEEDANCE_MODELS else ("480p", "720p")))
                 if cls in ("TCombobox", "Combobox"):
                     widget.configure(values=resolutions)
                 else:
@@ -4229,13 +4250,14 @@ def _add_minimax_h3_to_model_menu(i):
                 and tv == str(duration_var)
                 and str(model_var.get() or "") in (
                     GROK_LOWER_MODEL,
+                    GROK_LITE_MODEL,
                     *SEEDANCE_MODELS,
                     LTX23_LOCAL_MODEL,
                     LTX25_MAESTRO_MODEL,
                     LTX23_CLOUD_MODEL,
                 )
             ):
-                if str(model_var.get() or "") in (GROK_LOWER_MODEL, *SEEDANCE_MODELS):
+                if str(model_var.get() or "") in (GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS):
                     durations = SEEDANCE_DURATIONS[model_var.get()] if model_var.get() in SEEDANCE_MODELS else GROK_LOWER_DURATIONS
                     if cls in ("TCombobox", "Combobox"):
                         widget.configure(values=durations)
@@ -4325,7 +4347,7 @@ def _add_minimax_h3_to_model_menu(i):
                         selected_aspect = aspect_var.get()
                         keep_vertical = (
                             str(model_var.get() or "").strip()
-                            in ("veo-2", "veo-3.1-lite", VELA_VIDEO_MODEL, GROK_LOWER_MODEL)
+                            in ("veo-2", "veo-3.1-lite", VELA_VIDEO_MODEL, GROK_LOWER_MODEL, GROK_LITE_MODEL)
                             and str(aspect_var.get() or "").strip() == "9:16"
                         )
                         try:
@@ -4469,7 +4491,7 @@ def _install_actual_video_credit():
                 model_before in ("veo-2", "veo-3.1-lite")
                 and aspect_before == "9:16"
             ) or (
-                model_before == GROK_LOWER_MODEL
+                model_before in (GROK_LOWER_MODEL, GROK_LITE_MODEL)
                 and aspect_before in ("9:16", "1:1")
             ) or (
                 model_before in SEEDANCE_MODELS and aspect_before in SEEDANCE_ASPECTS
@@ -4664,7 +4686,9 @@ def _install_actual_video_credit():
         camera_name = str(cfg.get("camera_movement").get() or "อัตโนมัติ").strip()
         if camera_name != "อัตโนมัติ":
             g["append_log"](i, f"ใช้มุมกล้องจาก Slot: {camera_name}")
-        if model_for_job == GROK_LOWER_MODEL and str(cfg["duration"].get() or "").strip() not in GROK_LOWER_DURATIONS:
+        if model_for_job == GROK_LITE_MODEL:
+            cfg["resolution"].set(GROK_LITE_RESOLUTIONS[0])
+        if model_for_job in (GROK_LOWER_MODEL, GROK_LITE_MODEL) and str(cfg["duration"].get() or "").strip() not in GROK_LOWER_DURATIONS:
             cfg["duration"].set(GROK_LOWER_DURATIONS[0])
         if model_for_job in SEEDANCE_MODELS:
             resolution, duration, aspect = _normalize_seedance_settings(

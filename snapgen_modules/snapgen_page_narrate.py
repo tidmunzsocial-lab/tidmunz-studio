@@ -31,17 +31,32 @@ import threading
 import time
 import tkinter as tk
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 try:
     from .snapgen_seedance_video import MODELS as SEEDANCE_MODELS, auto_clip_settings, scene_references
 except ImportError:
-    from snapgen_seedance_video import MODELS as SEEDANCE_MODELS, auto_clip_settings, scene_references
+    try:
+        from snapgen_seedance_video import MODELS as SEEDANCE_MODELS, auto_clip_settings, scene_references
+    except ImportError:
+        # Narration mode does not need the separate Video Auto/Seedance helpers.
+        SEEDANCE_MODELS = {}
 
 MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
+SIZES_2K = {"16:9": (2560, 1440), "9:16": (1440, 2560)}
+
+
+def narrate_video_size(project):
+    """Keep Narrate exports at 1080p regardless of source-image resolution."""
+    aspect = project.get("aspect", "16:9")
+    return SIZES.get(aspect, SIZES["16:9"])
+
+
 FPS = 25
 CROSSFADE = 0.5
 PLAN_WINDOW = 180.0  # seconds of narration planned per GPT request
@@ -50,6 +65,596 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Heavy work (FFmpeg, Whisper) runs below normal priority so the PC stays usable.
 LOW_PRIORITY = NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
 _ENCODER_CACHE: dict = {}
+SNAPGEN_IMAGE_URL = "https://api.snapgen.ai/uapi/v1/imagen/gpt-image-2.5-lower"
+SNAPGEN_USER_AGENT = "TidmunzStudio/1.0"
+MAXPLUS_IMAGE_BASE = "https://api.maxplus-ai.cc"
+MAXPLUS_IMAGE_URL = MAXPLUS_IMAGE_BASE + "/v1/images/generations"
+MAXPLUS_IMAGE_EDIT_URL = MAXPLUS_IMAGE_BASE + "/v1/images/edits"
+MAXPLUS_ME_URL = MAXPLUS_IMAGE_BASE + "/v1/me"
+MAXPLUS_IMAGE_MODEL = "gpt-image-2.5-flare-4k"
+MAXPLUS_IMAGE_LABEL = "MaxPlus GPT Image 2.5 Flare · 4K"
+MAXPLUS_GPT_IMAGE_2_4K_MODEL = "gpt-image-2-4k"
+MAXPLUS_GPT_IMAGE_2_4K_LABEL = "MaxPlus GPT Image 2 · 4K"
+MAXPLUS_SEEDREAM_5_PRO_2K_MODEL = "doubao-seedream-5-0-pro"
+MAXPLUS_SEEDREAM_5_PRO_2K_LABEL = "MaxPlus Seedream 5.0 Pro · 2K"
+MAXPLUS_API_CONFIG_KEY = "maxplus_image_api_key"
+COMFYUI_URL = os.environ.get("SNAPGEN_COMFYUI_URL", "")
+GPT_WEB_LABEL = "GPT Web (Chrome เดิม)"
+SNAPGEN_LABEL = "SnapGen GPT API · Image 2.5 Lower"
+QWEN_LABEL = "Qwen 2.1 (ComfyUI ในเครื่อง)"
+PER_STAGE_LABEL = "เลือกแยกตามขั้น (ถามครั้งละหัวข้อ)"
+IMAGE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL, "snapgen": SNAPGEN_LABEL,
+                         "qwen": QWEN_LABEL, "per_stage": PER_STAGE_LABEL}
+VIDEO_AUTO_MAXPLUS_MODELS = {
+    "maxplus": {"model": MAXPLUS_IMAGE_MODEL, "label": MAXPLUS_IMAGE_LABEL,
+                "quality": "high", "max_references": 16,
+                "estimated_price": "$5.00 ≈ ฿1.67", "estimated_usd": 5.00,
+                "estimated_thb": 1.67, "resolution": "4K"},
+    "maxplus_gpt_image_2_4k": {"model": MAXPLUS_GPT_IMAGE_2_4K_MODEL,
+                                "label": MAXPLUS_GPT_IMAGE_2_4K_LABEL,
+                                "quality": "high", "max_references": 9,
+                                "estimated_price": "$2.00 ≈ ฿0.67", "estimated_usd": 2.00,
+                                "estimated_thb": 0.67, "resolution": "4K"},
+    "maxplus_seedream_5_pro_2k": {
+        "model": MAXPLUS_SEEDREAM_5_PRO_2K_MODEL,
+        "label": MAXPLUS_SEEDREAM_5_PRO_2K_LABEL,
+        "quality": None, "max_references": 10,
+        "estimated_price": "$2.48 ≈ ฿0.83", "estimated_usd": 2.48,
+        "estimated_thb": 0.83, "resolution": "2K",
+        "size_by_aspect": {
+            "1:1": "2048x2048", "4:3": "2368x1776", "3:4": "1776x2368",
+            "16:9": "2816x1584", "9:16": "1584x2816", "3:2": "2496x1664",
+            "2:3": "1664x2496", "21:9": "3136x1344",
+        },
+    },
+}
+VIDEO_AUTO_IMAGE_PROVIDER_LABELS = {
+    "gpt_web": GPT_WEB_LABEL,
+    **{key: model["label"] for key, model in VIDEO_AUTO_MAXPLUS_MODELS.items()},
+}
+VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS = {
+    "gpt_web": GPT_WEB_LABEL,
+    **{key: f"{model['label']} · {model['estimated_price']}/รูป"
+       for key, model in VIDEO_AUTO_MAXPLUS_MODELS.items()},
+}
+
+
+def is_video_auto_maxplus_provider(provider: str) -> bool:
+    return provider in VIDEO_AUTO_MAXPLUS_MODELS
+
+
+UPSCALE_LABELS = {
+    "qwen": "Qwen 2.1 (เติมรายละเอียด)",
+    "realesrgan": "AI Upscale (เร็ว · คงหน้าเดิม)",
+    "realesrgan_x2": "Real-ESRGAN x2 (อัปสเกลภาพ)",
+    "nomos": "Nomos2 HQ (เน้นพื้นผิว)",
+}
+UPSCALE_MODELS = {
+    "realesrgan": "realesr-general-x4v3.pth",
+    "realesrgan_x2": "RealESRGAN_x2plus.pth",
+    "nomos": "4xNomos2_hq_dat2.pth",
+}
+
+
+class ImageProviderError(RuntimeError):
+    """Stop paid image requests instead of automatically submitting another job."""
+
+
+def _run_image_jobs(jobs, work, completed, check_stop):
+    """Keep at most five requests in flight; drain submitted jobs before raising."""
+    remaining = iter(jobs)
+    pending = {}
+    failure = None
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="snapgen-scene") as pool:
+        while True:
+            if failure is None:
+                try:
+                    check_stop()
+                except Exception as exc:
+                    failure = exc
+            while failure is None and len(pending) < 5:
+                try:
+                    job = next(remaining)
+                except StopIteration:
+                    break
+                pending[pool.submit(work, job)] = job
+            if not pending:
+                break
+            done, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                job = pending.pop(future)
+                try:
+                    result, error = future.result(), None
+                except Exception as exc:
+                    result, error = None, exc
+                    if failure is None:
+                        failure = exc
+                try:
+                    completed(job, result, error)
+                except Exception as exc:
+                    if failure is None:
+                        failure = exc
+    if failure is not None:
+        raise failure
+
+
+def _multipart(fields: dict, files: list[tuple[str, str, bytes]]) -> tuple[bytes, str]:
+    boundary = "----Tidmunz" + str(time.time_ns())
+    chunks = []
+    for key, value in fields.items():
+        chunks.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n"
+                       f"{value}\r\n").encode("utf-8"))
+    for key, filename, data in files:
+        mime = {".png": "image/png", ".webp": "image/webp"}.get(Path(filename).suffix.lower(), "image/jpeg")
+        chunks.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"; filename=\"{Path(filename).name}\"\r\n"
+                       f"Content-Type: {mime}\r\n\r\n").encode("utf-8"))
+        chunks.extend((data, b"\r\n"))
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks), boundary
+
+
+def _image_result(value):
+    if isinstance(value, dict):
+        for key in ("b64_json", "base64_data", "image_base64", "generate_result", "file_download_url", "image_url", "media_url", "url", "image"):
+            item = value.get(key)
+            found = _image_result(item)
+            if found:
+                return found
+        for key in ("data", "images", "result", "output", "generated_image", "generated_images"):
+            found = _image_result(value.get(key))
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _image_result(item)
+            if found:
+                return found
+    elif isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("https://", "http://", "data:image/")):
+            return text
+        if len(text) > 256 and re.fullmatch(r"[A-Za-z0-9+/=]+", text):
+            return text
+    return None
+
+
+def _save_image_result(result, target: Path, api_key: str = "") -> str:
+    if result.startswith("data:image/"):
+        _, encoded = result.split(",", 1)
+        target.write_bytes(base64.b64decode(encoded))
+    elif result.startswith(("https://", "http://")):
+        # Generated images can be hosted on a separate CDN; never forward the account key there.
+        headers = {"User-Agent": SNAPGEN_USER_AGENT}
+        if api_key and urllib.parse.urlparse(result).hostname == "api.snapgen.ai":
+            headers["x-api-key"] = api_key
+        request = urllib.request.Request(result, headers=headers)
+        with urllib.request.urlopen(request, timeout=180) as response:
+            target.write_bytes(response.read())
+    else:
+        target.write_bytes(base64.b64decode(result))
+    return str(target)
+
+
+def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
+                  aspect: str, api_key: str) -> str:
+    if not api_key:
+        raise RuntimeError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
+    files = [("files", p, Path(p).read_bytes()) for p in refs if Path(p).is_file()]
+    # Lower has fixed output settings and does not accept resolution/mode/background.
+    body, boundary = _multipart({"prompt": prompt, "aspect_ratio": aspect}, files)
+    request = urllib.request.Request(
+        SNAPGEN_IMAGE_URL, data=body, method="POST",
+        headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
+                 "Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            raw = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:800]
+        raise RuntimeError(f"SnapGen GPT Image ตอบ HTTP {exc.code}: {detail}") from exc
+    payload = None
+    try:
+        json.loads(raw)
+        response_items = [raw]
+    except ValueError:
+        response_items = raw.splitlines()
+    for line in response_items:
+        line = line.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if not line or line == "[DONE]":
+            continue
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        payload = candidate
+        image = _image_result(candidate)
+        if image:
+            break
+    else:
+        image = _image_result(payload)
+    if not image and isinstance(payload, dict):
+        task_id = next((payload.get(k) for k in ("uuid", "history_uuid", "conversion_uuid", "id") if payload.get(k)), None)
+        if task_id:
+            for _ in range(180):
+                poll = urllib.request.Request(
+                    "https://api.snapgen.ai/uapi/v1/history/" + urllib.parse.quote(str(task_id), safe=""),
+                    headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
+                             "Accept": "application/json"})
+                with urllib.request.urlopen(poll, timeout=60) as response:
+                    payload = json.load(response)
+                image = _image_result(payload)
+                if image:
+                    break
+                status = str(payload.get("status") or "").lower() if isinstance(payload, dict) else ""
+                if status in {"3", "failed", "error", "cancelled", "canceled"}:
+                    code = str(payload.get("error_code") or payload.get("status_desc") or "failed")
+                    detail = str(payload.get("error_message") or "ผู้ให้บริการไม่ได้ระบุสาเหตุ")[:600]
+                    credit = payload.get("used_credit")
+                    billed = f" · ใช้เครดิต {credit}" if credit is not None else ""
+                    raise RuntimeError(f"SnapGen GPT Image สร้างไม่สำเร็จ [{code}]: {detail}"
+                                       f" · History {task_id}{billed}")
+                time.sleep(3)
+    if not image:
+        raise RuntimeError("SnapGen GPT Image ไม่ได้ส่งไฟล์ภาพกลับมา")
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    target = Path(output_dir) / f"{name}_snapgen.png"
+    return _save_image_result(image, target, api_key)
+
+
+def maxplus_image(prompt: str, refs: list[str], output_dir: str, name: str,
+                  aspect: str, api_key: str, model: str = MAXPLUS_IMAGE_MODEL,
+                  quality: str | None = "high", max_references: int = 16,
+                  size: str | None = None) -> str:
+    """Generate one image through MaxPlus, preserving every supplied reference."""
+    if not api_key:
+        raise RuntimeError("ตั้ง MaxPlus API key (pool Gen Image) ก่อน")
+    if len(refs) > max_references:
+        raise RuntimeError(f"MaxPlus {model} รับรูปอ้างอิงได้ไม่เกิน {max_references} รูปต่อคำขอ (ได้รับ {len(refs)})")
+
+    uploaded_references = []
+    total_bytes = 0
+    for raw_path in refs:
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        total_bytes += len(data)
+        if len(data) > 10 * 1024 * 1024:
+            raise RuntimeError(f"รูปอ้างอิง {path.name} เกิน 10 MB")
+        if total_bytes > 25 * 1024 * 1024:
+            raise RuntimeError("รูปอ้างอิงรวมกันเกิน 25 MB")
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            media_type = "image/png"
+        elif data.startswith(b"\xff\xd8\xff"):
+            media_type = "image/jpeg"
+        elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            media_type = "image/webp"
+        else:
+            raise RuntimeError(f"ชนิดไฟล์อ้างอิงไม่รองรับ: {path.name} (รองรับ PNG/JPEG/WebP)")
+        uploaded_references.append((media_type, data))
+
+    body = {
+        "async": True,
+        "channel_slug": "image-gen",
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        # Keep orientation; Seedream requires explicit pixel dimensions for its 2K tier.
+        "size": size or aspect,
+        "response_format": "url",
+    }
+    if quality:
+        body["quality"] = quality
+
+    headers = {"Authorization": f"Bearer {api_key}",
+               "Content-Type": "application/json", "Accept": "application/json",
+               "User-Agent": SNAPGEN_USER_AGENT}
+
+    def request_json(url, payload=None, timeout=600, content_type=None):
+        data = (payload if isinstance(payload, bytes) else
+                json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None)
+        request_headers = dict(headers)
+        if content_type:
+            request_headers["Content-Type"] = content_type
+        request = urllib.request.Request(url, data=data, headers=request_headers, method="POST" if data is not None else "GET")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:800]
+            raise RuntimeError(f"MaxPlus API ตอบ HTTP {exc.code}: {detail}") from exc
+        try:
+            return json.loads(raw)
+        except ValueError as exc:
+            raise RuntimeError("MaxPlus API ส่งผลลัพธ์ที่อ่านไม่ได้") from exc
+
+    request_url = MAXPLUS_IMAGE_URL
+    request_body = body
+    request_content_type = None
+    if uploaded_references:
+        # The MaxPlus guide requires local image files to use multipart /edits.
+        extensions = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+        files = [("images", f"reference-{index:02d}.{extensions[media_type]}", data)
+                 for index, (media_type, data) in enumerate(uploaded_references, 1)]
+        multipart_fields = dict(body, **{"async": "true"})
+        request_body, boundary = _multipart(multipart_fields, files)
+        request_url = MAXPLUS_IMAGE_EDIT_URL
+        request_content_type = f"multipart/form-data; boundary={boundary}"
+
+    payload = request_json(request_url, request_body, content_type=request_content_type)
+    status = str(payload.get("status") or "").lower() if isinstance(payload, dict) else ""
+    task_id = payload.get("id") if isinstance(payload, dict) else None
+    if status in {"failed", "error", "cancelled", "canceled"}:
+        error = payload.get("error") or {}
+        if isinstance(error, dict):
+            detail = error.get("message") or error.get("code") or "ผู้ให้บริการไม่ได้ระบุสาเหตุ"
+        else:
+            detail = error
+        raise RuntimeError(f"MaxPlus สร้างภาพไม่สำเร็จ: {str(detail)[:600]}")
+    image = _image_result(payload)
+    if image is None and task_id and status in {"queued", "processing"}:
+        # MaxPlus requires at least 10 seconds between status reads. Never resubmit a paid job.
+        for _ in range(42):
+            time.sleep(10)
+            status_url = MAXPLUS_IMAGE_BASE + "/v1/images/" + urllib.parse.quote(str(task_id), safe="")
+            payload = request_json(status_url, timeout=60)
+            status = str(payload.get("status") or "").lower() if isinstance(payload, dict) else ""
+            if status in {"failed", "error", "cancelled", "canceled"}:
+                error = payload.get("error") or {}
+                detail = error.get("message") or error.get("code") if isinstance(error, dict) else error
+                raise RuntimeError(f"MaxPlus สร้างภาพไม่สำเร็จ: {str(detail or 'ไม่ทราบสาเหตุ')[:600]}")
+            image = _image_result(payload)
+            if image:
+                break
+        if not image:
+            raise RuntimeError(f"MaxPlus ยังไม่ส่งภาพกลับมา — งาน {task_id} อาจกำลังทำอยู่ ให้ตรวจ History ก่อนลองใหม่")
+    if not image:
+        raise RuntimeError("MaxPlus API ไม่ได้ส่งไฟล์ภาพกลับมา")
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    target = Path(output_dir) / f"{name}_maxplus.png"
+    if image.startswith("data:image/"):
+        _, encoded = image.split(",", 1)
+        target.write_bytes(base64.b64decode(encoded))
+    elif image.startswith("https://"):
+        parsed = urllib.parse.urlparse(image)
+        download_headers = {"User-Agent": SNAPGEN_USER_AGENT}
+        if parsed.hostname == "api.maxplus-ai.cc" or (parsed.hostname or "").endswith(".maxplus-ai.cc"):
+            download_headers["Authorization"] = f"Bearer {api_key}"
+        request = urllib.request.Request(image, headers=download_headers)
+        with urllib.request.urlopen(request, timeout=180) as response:
+            target.write_bytes(response.read())
+    elif image.startswith("http://"):
+        raise RuntimeError("MaxPlus ส่งลิงก์ภาพที่ไม่ปลอดภัย (ต้องเป็น HTTPS)")
+    else:
+        target.write_bytes(base64.b64decode(image))
+    return str(target)
+
+
+def maxplus_account_credit(api_key: str) -> float:
+    """Read the current API-key balance without exposing the key or account profile."""
+    if not api_key:
+        raise RuntimeError("ยังไม่ได้ตั้ง MaxPlus API Key")
+    request = urllib.request.Request(
+        MAXPLUS_ME_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json",
+                 "User-Agent": SNAPGEN_USER_AGENT},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"MaxPlus API ตอบ HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError("อ่านยอด MaxPlus ไม่สำเร็จ") from exc
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        payload = payload["data"]
+    try:
+        return float(payload["credit_usd"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("MaxPlus API ไม่ได้ส่งยอดเครดิตกลับมา") from exc
+
+
+def _comfy_json(path: str, payload=None, base: str | None = None):
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request((base or COMFYUI_URL) + path, data=data,
+        headers={"Content-Type": "application/json"} if data else {})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.load(response)
+
+
+def _comfy_ready(base: str) -> bool:
+    try:
+        _comfy_json("/system_stats", base=base)
+        return True
+    except Exception:
+        return False
+
+
+def _qwen21_base():
+    bases = ([COMFYUI_URL] if COMFYUI_URL else []) + [f"http://127.0.0.1:{p}" for p in (8191, 8188, 8189, 8190)]
+
+    def compatible(url):
+        try:
+            return bool(_comfy_json("/object_info/TextEncodeQwenImage21", base=url).get("TextEncodeQwenImage21"))
+        except Exception:
+            return False
+
+    base = next((url for url in dict.fromkeys(bases) if compatible(url)), None)
+    if not base:
+        runtime = Path("C:/ComfyUI-qwen2k")
+        python = Path("C:/ComfyUI/.venv/Scripts/python.exe")
+        launcher = runtime / "run_snapgen_qwen.py"
+        if launcher.is_file() and python.is_file():
+            log_dir = runtime / "snapgen_logs"
+            log_dir.mkdir(exist_ok=True)
+            with (log_dir / "server.log").open("ab") as log:
+                subprocess.Popen([str(python), "-B", str(launcher)], cwd=str(runtime),
+                                 stdout=log, stderr=log, creationflags=NO_WINDOW)
+            for _ in range(60):
+                if compatible("http://127.0.0.1:8191"):
+                    base = "http://127.0.0.1:8191"
+                    break
+                time.sleep(1)
+        if not base:
+            raise RuntimeError("ยังเปิด runtime Qwen Image 2.1 ไม่สำเร็จ — ต้องมี TextEncodeQwenImage21")
+
+    return base
+
+
+def qwen_generate_image(prompt: str, refs: list[str], output_dir: str, name: str,
+                        aspect: str, high_res: bool = False) -> str:
+    """Generate from fresh noise with optional individual identity/layout references."""
+    import io
+    from PIL import Image
+    if len(refs) > 16:
+        raise ImageProviderError("Qwen รับเรฟได้สูงสุด 16 รูป — หยุดเพื่อไม่ให้เรฟตกหล่น")
+    missing = [str(p) for p in refs if not Path(p).is_file()]
+    if missing:
+        raise ImageProviderError("ไม่พบไฟล์เรฟ Qwen: " + ", ".join(Path(p).name for p in missing))
+    base = _qwen21_base()
+    sizes = ({"16:9": (2560, 1440), "9:16": (1440, 2560), "1:1": (2048, 2048)} if high_res else
+             {"16:9": (1536, 864), "9:16": (864, 1536), "1:1": (1024, 1024)})
+    width, height = sizes.get(aspect, sizes["1:1"])
+
+    def upload(data, filename):
+        body, boundary = _multipart({"type": "input"}, [("image", filename, data)])
+        request = urllib.request.Request(base + "/upload/image", data=body,
+                                         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)["name"]
+
+    canvas = io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(canvas, format="PNG")
+    blank = upload(canvas.getvalue(), f"qwen_canvas_{width}x{height}.png")
+    nodes = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2.1_int8_convrot.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": blank}},
+        "6": {"class_type": "VAEEncode", "inputs": {"pixels": ["4", 0], "vae": ["3", 0]}},
+        "7": {"class_type": "TextEncodeQwenImage21", "inputs": {
+            "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt,
+            "negative_prompt": "wrong identity, mixed faces, distorted anatomy, extra limbs, blurry, text, watermark",
+            "resolution": 1024}},
+        "10": {"class_type": "QwenImage21Cache", "inputs": {"model": ["1", 0], "device": "auto", "dtype": "default"}},
+        "12": {"class_type": "KSampler", "inputs": {"model": ["10", 0], "positive": ["7", 0], "negative": ["7", 1],
+            "latent_image": ["6", 0], "seed": time.time_ns() % 2147483647, "steps": 20, "cfg": 1.0,
+            "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+        "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
+        "14": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": "tidmunz_narrate_qwen/" + name}},
+    }
+    for i, path in enumerate(refs, 1):
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            data = io.BytesIO()
+            image.save(data, format="PNG")
+        filename = upload(data.getvalue(), Path(path).name)
+        node_id = str(20 + i)
+        nodes[node_id] = {"class_type": "LoadImage", "inputs": {"image": filename}}
+        nodes["7"]["inputs"][f"images.image_{i}"] = [node_id, 0]
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    return _run_comfy_2k(base, nodes, output_dir, name, "_qwen")
+
+
+def qwen_image_to_image_2k(source: str, refs: list[str], prompt: str,
+                           aspect: str, output_dir: str, name: str) -> str:
+    base = _qwen21_base()
+
+    def upload(path):
+        body, boundary = _multipart({"type": "input"}, [("image", str(path), Path(path).read_bytes())])
+        request = urllib.request.Request(base + "/upload/image", data=body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return str(json.load(response)["name"])
+
+    width, height = {"16:9": (2560, 1440), "9:16": (1440, 2560), "1:1": (2048, 2048)}.get(aspect, (2048, 2048))
+    reference_paths = [p for p in refs if Path(p).is_file()]
+    if len(reference_paths) > 15:
+        raise RuntimeError("Qwen 2.1 รับรูปต้นฉบับและเรฟได้รวม 16 รูป — หยุดเพื่อไม่ให้เรฟตกหล่น")
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    names = [upload(source)]
+    from PIL import Image
+    for i, path in enumerate(reference_paths, 1):
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1024, 1024))
+            target = Path(output_dir) / f"{name}_qwen_ref_{i:02d}.png"
+            image.save(target)
+        names.append(upload(target))
+    edit_prompt = ("Refine image 1 into a detailed 2K image. Preserve its exact composition, camera, pose, action, "
+                   "clothing and lighting. Keep each character's exact face, age, body and hair from the additional "
+                   "identity references. Do not add or remove people or objects. Refine texture and edges only. "
+                   "Never blend different characters' faces. No text or watermarks.\n\n" + prompt)
+    nodes = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2.1_int8_convrot.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
+        "5": {"class_type": "ImageScale", "inputs": {"image": ["4", 0], "upscale_method": "lanczos", "width": width, "height": height, "crop": "disabled"}},
+        "6": {"class_type": "VAEEncode", "inputs": {"pixels": ["5", 0], "vae": ["3", 0]}},
+        "7": {"class_type": "TextEncodeQwenImage21", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": edit_prompt,
+              "negative_prompt": "different face, different identity, changed clothing, deformed hands, extra people, blurry",
+              "resolution": 0, "images.image_1": ["5", 0]}},
+        "10": {"class_type": "QwenImage21Cache", "inputs": {"model": ["1", 0], "device": "auto", "dtype": "default"}},
+        "12": {"class_type": "KSampler", "inputs": {"model": ["10", 0], "positive": ["7", 0], "negative": ["7", 1],
+               "latent_image": ["6", 0], "seed": time.time_ns() % 2147483647, "steps": 20, "cfg": 1.0,
+               "sampler_name": "euler", "scheduler": "simple", "denoise": 0.24}},
+        "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
+        "14": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": "tidmunz_narrate_2k/" + name}}
+    }
+    for i, filename in enumerate(names[1:], 2):
+        node_id = str(20 + i)
+        nodes[node_id] = {"class_type": "LoadImage", "inputs": {"image": filename}}
+        nodes["7"]["inputs"][f"images.image_{i}"] = [node_id, 0]
+    return _run_comfy_2k(base, nodes, output_dir, name, "_qwen2k")
+
+
+def _run_comfy_2k(base, nodes, output_dir, name, suffix):
+    submitted = _comfy_json("/prompt", {"prompt": nodes, "client_id": "tidmunz-narrate"}, base=base)
+    prompt_id = submitted["prompt_id"]
+    for _ in range(1200):
+        history = _comfy_json("/history/" + urllib.parse.quote(str(prompt_id), safe=""), base=base)
+        entry = history.get(str(prompt_id)) or {}
+        images = [image for output in (entry.get("outputs") or {}).values() for image in output.get("images", [])]
+        if images:
+            item = images[0]
+            query = urllib.parse.urlencode({"filename": item["filename"], "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")})
+            with urllib.request.urlopen(base + "/view?" + query, timeout=120) as response:
+                target = Path(output_dir) / f"{name}{suffix}.png"
+                target.write_bytes(response.read())
+            return str(target)
+        if entry.get("status", {}).get("status_str") == "error":
+            errors = [item for kind, item in entry["status"].get("messages", []) if kind == "execution_error"]
+            detail = str(errors[0].get("exception_message", "")).splitlines()[0][:300] if errors else "ดู log ComfyUI"
+            raise RuntimeError("Local 2K: " + detail)
+        time.sleep(3)
+    raise RuntimeError("รอประมวลผล 2K นานเกินกำหนด — ตรวจคิวใน ComfyUI ก่อนลองใหม่")
+
+
+
+def local_ai_upscale_2k(source: str, aspect: str, output_dir: str, name: str,
+                       model_name: str = "realesr-general-x4v3.pth") -> str:
+    base = _qwen21_base()
+    body, boundary = _multipart({"type": "input"}, [("image", source, Path(source).read_bytes())])
+    request = urllib.request.Request(base + "/upload/image", data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        filename = json.load(response)["name"]
+    width, height = {"16:9": (2560, 1440), "9:16": (1440, 2560), "1:1": (2048, 2048)}.get(aspect, (2048, 2048))
+    nodes = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": filename}},
+        "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": model_name}},
+        "3": {"class_type": "ImageUpscaleWithModel", "inputs": {"image": ["1", 0], "upscale_model": ["2", 0]}},
+        "4": {"class_type": "ImageScale", "inputs": {"image": ["3", 0], "upscale_method": "lanczos", "width": width, "height": height, "crop": "disabled"}},
+        "5": {"class_type": "SaveImage", "inputs": {"images": ["4", 0], "filename_prefix": "tidmunz_narrate_2k/" + name + "_ai"}}
+    }
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    return _run_comfy_2k(base, nodes, output_dir, name, "_ai2k")
 
 # GPU encoders first (NVIDIA, AMD, Intel); CPU x264 limited to 2 threads last.
 _ENCODERS = (
@@ -360,6 +965,76 @@ def looks_like_reference_sheet(path) -> bool:
     sat = sum(max(p) - min(p) for p in border) / len(border)
     # Measured: references spread <= 8.5, saturation <= 16.5; real scenes spread >= 20.
     return spread < 11 and 60 <= mean <= 235 and sat < 22
+
+
+def relink_scene_images(project, folder):
+    """Reconcile canonical scene filenames and replacements with saved scene state."""
+    from PIL import Image
+    restored = []
+    for i, scene in enumerate(project.get("scenes") or []):
+        current = scene.get("image")
+        stem = f"scene_{i + 1:03d}"
+        candidates = [p for p in (Path(folder) / "images").glob(stem + ".*")
+                      if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp") and p.is_file()]
+        if current and Path(current).is_file() and Path(current).stem != stem:
+            candidates = [Path(current)]  # An explicitly selected custom path remains authoritative.
+        try:
+            candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        except OSError:
+            continue  # Explorer may still be moving/replacing one of these files.
+        for path in candidates:
+            try:
+                stat = path.stat()
+                stamp = f"{path.absolute()}|{stat.st_mtime_ns}|{stat.st_size}"
+                if scene.get("image_file_stamp") == stamp:
+                    break
+                with Image.open(path) as image:
+                    image.verify()
+            except (OSError, ValueError, SyntaxError):
+                continue
+            changed = not (current and Path(current).is_file()) or (
+                scene.get("image_file_stamp") is not None and scene["image_file_stamp"] != stamp)
+            scene["image"] = str(path.absolute())
+            scene["image_file_stamp"] = stamp
+            if changed or (current and Path(current).absolute() != path.absolute()):
+                scene.pop("error", None)
+                scene.pop("bad", None)
+                project["images_verified"] = False
+                project.setdefault("done", {}).pop("video", None)
+                restored.append(i + 1)
+            break
+    return restored
+
+
+def import_scene_image(project, folder, index, source):
+    """Install a manual replacement atomically while retaining the previous file."""
+    from PIL import Image, ImageOps
+    if isinstance(source, Image.Image):
+        image = ImageOps.exif_transpose(source).convert("RGB")
+    else:
+        with Image.open(source) as original:
+            image = ImageOps.exif_transpose(original).convert("RGB")
+    target = Path(folder) / "images" / f"scene_{index + 1:03d}.png"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(target.name + f".{time.time_ns()}.tmp")
+    try:
+        image.save(temp, format="PNG")
+        if target.is_file():
+            backups = target.parent / "_replaced"
+            backups.mkdir(exist_ok=True)
+            shutil.copy2(target, backups / f"{target.stem}_{time.time_ns()}{target.suffix}")
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+    scene = project["scenes"][index]
+    stat = target.stat()
+    scene["image"] = str(target.absolute())
+    scene["image_file_stamp"] = f"{target.absolute()}|{stat.st_mtime_ns}|{stat.st_size}"
+    scene.pop("error", None)
+    scene.pop("bad", None)
+    project["images_verified"] = False
+    project.setdefault("done", {}).pop("video", None)
+    return str(target.absolute())
 
 
 def local_image_problems(scenes, aspect) -> dict:
@@ -687,6 +1362,13 @@ def limit_scenes(scenes: list, target: int, duration: float) -> list:
 
 
 VIDEO_AUTO_MODEL = "grok-lower"
+VIDEO_GROK_LOWER_MODEL = "grok-lower"
+VIDEO_GROK_LITE_MODEL = "grok-1.5-lite"
+VIDEO_MODEL_LABELS = {
+    "auto": "อัตโนมัติ (Grok / Vela)",
+    VIDEO_GROK_LOWER_MODEL: "Grok Lower · 1080p",
+    VIDEO_GROK_LITE_MODEL: "Grok Lite · 1080p",
+}
 VIDEO_CHEAP_MODEL = "vela-ai-video"
 GROK_CLIP_SECONDS = (6, 10, 15)  # lengths grok-lower accepts; AI Slow 2x doubles a clip
 VELA_CLIP_SECONDS = 5  # vela-ai-video only makes 5 s
@@ -739,7 +1421,11 @@ def assign_clips(scenes: list, duration: float, economy: bool = False) -> None:
 
 
 def clip_label(scene: dict) -> str:
-    model = SEEDANCE_MODELS.get(scene.get("clip_model")) or ("vela" if scene.get("clip_model") == VIDEO_CHEAP_MODEL else "grok")
+    clip_model = scene.get("clip_model")
+    model = (SEEDANCE_MODELS.get(clip_model) or
+             ("Grok Lite" if clip_model == VIDEO_GROK_LITE_MODEL else
+              "Grok Lower" if clip_model == VIDEO_GROK_LOWER_MODEL else
+              "vela" if clip_model == VIDEO_CHEAP_MODEL else "Grok"))
     return f"{model} {scene.get('clip_seconds', '?')}วิ" + (" สโลว์×2" if scene.get("clip_slow") else "")
 
 
@@ -846,6 +1532,207 @@ def transition_into(previous: dict | None, scene: dict) -> str:
         return chosen
     before, now = str((previous or {}).get("location") or "").strip(), str(scene.get("location") or "").strip()
     return "fadeblack" if before and now and before != now else "dissolve"
+
+
+def narrate_render_plan(project, width, height):
+    """Frame-aligned bodies and boundaries; motion keeps its original shot offset."""
+    import hashlib
+    scenes = project.get("scenes") or []
+    if not scenes:
+        raise RuntimeError("ยังไม่มีฉากสำหรับตัดต่อ")
+    total = round(float(project["duration"]) * FPS)
+    starts = [0] + [round(float(s["start"]) * FPS) for s in scenes[1:]] + [total]
+    intervals = [b - a for a, b in zip(starts, starts[1:])]
+    if any(n <= 0 for n in intervals):
+        raise RuntimeError("เวลาฉากต้องเรียงจากน้อยไปมากและไม่ซ้ำกัน")
+    kinds = [transition_into(scenes[i - 1] if i else None, s) for i, s in enumerate(scenes)]
+    incoming = [0] + [min(round(TRANSITIONS[kinds[i]][1] * FPS), intervals[i - 1], intervals[i])
+                       for i in range(1, len(scenes))]
+    full = [n + (incoming[i + 1] if i + 1 < len(scenes) else 0) for i, n in enumerate(intervals)]
+    style = STYLES.get(project.get("style_mode") or "ปกติ", STYLES["ปกติ"])
+    film = bool(project.get("film", style.get("film", False)))
+    sources, hashes = [], []
+    for i, scene in enumerate(scenes):
+        source = Path(scene.get("image") or "")
+        if not source.is_file():
+            raise RuntimeError(f"ฉาก {i + 1} ยังไม่มีรูป — เลือกหรือวางรูปก่อนตัดต่อ")
+        sources.append(str(source.absolute()))
+        hashes.append(hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def piece_filter(i, offset, count):
+        motion = "still" if style["still"] else scenes[i].get("motion", "zoom_in")
+        if style.get("zoom_only"):
+            motion = ("zoom_in", "zoom_out")[i % 2]
+        vf = zoompan_filter(motion, full[i], width, height,
+                            steady=bool(style.get("zoom_only")), film=film)
+        vf = re.sub(r"\bon\b", f"(on+{offset})", vf)
+        return vf.replace(f":d={full[i]}:", f":d={count}:")
+
+    pieces = []
+    for i, scene in enumerate(scenes):
+        count = incoming[i]
+        if count:
+            pieces.append({"id": f"transition_{i:04d}", "scene": i, "start": starts[i], "frames": count,
+                "inputs": sources[i - 1:i + 1], "hashes": hashes[i - 1:i + 1],
+                "filters": [piece_filter(i - 1, intervals[i - 1], count), piece_filter(i, 0, count)],
+                "effect": TRANSITIONS[kinds[i]][0]})
+        count = intervals[i] - incoming[i]
+        if count:
+            pieces.append({"id": f"body_{i:04d}", "scene": i, "start": starts[i] + incoming[i], "frames": count,
+                "inputs": [sources[i]], "hashes": [hashes[i]], "filters": [piece_filter(i, incoming[i], count)]})
+    assert sum(p["frames"] for p in pieces) == total
+    return pieces
+
+
+def render_narrate_cached(project, folder, ffmpeg, force=False, log=None, progress=None, check_stop=None):
+    """Persist independent scene/boundary clips and join them without video encoding."""
+    import hashlib
+    import uuid
+    from concurrent.futures import as_completed
+    log, progress, check_stop = log or (lambda _m: None), progress or (lambda _f, _m: None), check_stop or (lambda: None)
+    folder = Path(folder).absolute()
+    audio = Path(project.get("audio") or "").absolute()
+    if not audio.is_file():
+        raise RuntimeError("ไม่พบไฟล์เสียงบรรยาย — เลือกไฟล์เสียงก่อนตัดต่อ")
+    cache = folder / "_render_cache"
+    cache.mkdir(exist_ok=True)
+    width, height = narrate_video_size(project)
+    pieces = narrate_render_plan(project, width, height)
+    encoder_label, encoder_args = video_encoder(ffmpeg)
+    encode = [*encoder_args, "-bf", "0", "-pix_fmt", "yuv420p", "-r", str(FPS), "-video_track_timescale", "12800"]
+    manifest_path = cache / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("version") != 1:
+            manifest = {"version": 1, "pieces": {}}
+    except (OSError, ValueError):
+        manifest = {"version": 1, "pieces": {}}
+    records = manifest.setdefault("pieces", {})
+    subtitle = ""
+    if project.get("subtitles"):
+        segments = json.loads((folder / "transcript.json").read_text(encoding="utf-8"))
+        subtitle = build_ass(segments, width, height)
+        (cache / "subs.ass").write_text(subtitle, encoding="utf-8")
+        fonts = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+        if fonts.is_dir():
+            shutil.copytree(fonts, cache / "fonts", dirs_exist_ok=True)
+    sub_hash = hashlib.sha256(subtitle.encode("utf-8")).hexdigest()
+    ffstat = Path(ffmpeg).stat()
+    version = [1, str(ffmpeg), ffstat.st_size, ffstat.st_mtime_ns, width, height, FPS, encode, sub_hash]
+    for piece in pieces:
+        spec = [version, piece["hashes"], piece["filters"], piece["frames"], piece.get("effect"),
+                piece["start"] if subtitle else None]
+        piece["signature"] = hashlib.sha256(json.dumps(spec, ensure_ascii=False).encode("utf-8")).hexdigest()
+        piece["file"] = cache / (piece["id"] + ".mp4")
+
+    def reusable(piece):
+        old = records.get(piece["id"], {})
+        try:
+            stat = piece["file"].stat()
+            return (not force and old.get("signature") == piece["signature"] and
+                    old.get("size") == stat.st_size and old.get("mtime_ns") == stat.st_mtime_ns and stat.st_size > 0)
+        except OSError:
+            return False
+
+    todo = [p for p in pieces if not reusable(p)]
+    body_count = sum(p["id"].startswith("body") for p in todo)
+    transition_count = len(todo) - body_count
+    log(f"{'เรนเดอร์ใหม่ทั้งหมด' if force else 'อัปเดตเฉพาะที่แก้'}: ทำใหม่ {body_count} ฉาก / "
+        f"{transition_count} รอยต่อ · ใช้แคช {len(pieces) - len(todo)} ส่วน · {width}×{height} · {encoder_label}")
+    progress(0, f"ทำใหม่ {body_count} ฉาก / {transition_count} รอยต่อ · ใช้ส่วนเดิม {len(pieces) - len(todo)} ส่วน")
+    manifest_lock = threading.Lock()
+
+    def save_manifest():
+        temp = manifest_path.with_suffix(".tmp")
+        temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, manifest_path)
+
+    def run(args):
+        check_stop()
+        proc = subprocess.Popen([str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                                 "-filter_threads", "1", "-filter_complex_threads", "1", *args],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=str(cache),
+                                creationflags=LOW_PRIORITY)
+        while True:
+            try:
+                _out, error = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                try:
+                    check_stop()
+                except BaseException:
+                    proc.terminate()
+                    proc.communicate()
+                    raise
+        if proc.returncode:
+            raise RuntimeError("FFmpeg: " + error.decode("utf-8", "replace")[-1000:])
+
+    def render_piece(piece):
+        check_stop()
+        temp = cache / (piece["id"] + "." + uuid.uuid4().hex + ".partial.mp4")
+        args = []
+        for source in piece["inputs"]:
+            args += ["-i", source]
+        if "effect" in piece:
+            graph = (f"[0:v]{piece['filters'][0]},setpts=PTS-STARTPTS[a];"
+                     f"[1:v]{piece['filters'][1]},setpts=PTS-STARTPTS[b];"
+                     f"[a][b]xfade=transition={piece['effect']}:duration={piece['frames'] / FPS:.8f}:offset=0[v]")
+        else:
+            graph = f"[0:v]{piece['filters'][0]}[v]"
+        if subtitle:
+            graph += (f";[v]setpts=PTS+{piece['start'] / FPS:.8f}/TB,ass=subs.ass:fontsdir=fonts,"
+                      "setpts=PTS-STARTPTS[out]")
+        else:
+            graph += ";[v]null[out]"
+        try:
+            run([*args, "-filter_complex", graph, "-map", "[out]", "-an", "-frames:v", str(piece["frames"]),
+                 *encode, str(temp)])
+            if [hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in piece["inputs"]] != piece["hashes"]:
+                raise RuntimeError("ไฟล์รูปเปลี่ยนระหว่างตัดต่อ — รอวางไฟล์ให้เสร็จแล้วกดอัปเดตเฉพาะที่แก้")
+            os.replace(temp, piece["file"])
+            stat = piece["file"].stat()
+            with manifest_lock:
+                records[piece["id"]] = {"signature": piece["signature"], "size": stat.st_size,
+                                        "mtime_ns": stat.st_mtime_ns, "frames": piece["frames"]}
+                save_manifest()
+        finally:
+            temp.unlink(missing_ok=True)
+
+    workers = min(2, max(1, (os.cpu_count() or 4) // 3))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {pool.submit(render_piece, p): p for p in todo}
+        for n, future in enumerate(as_completed(pending), 1):
+            try:
+                future.result()
+            except BaseException:
+                for queued in pending:
+                    queued.cancel()
+                raise
+            progress(0.9 * n / max(1, len(todo)), f"ทำส่วนที่เปลี่ยน {n}/{len(todo)} · ใช้ส่วนเดิม {len(pieces) - len(todo)} ส่วน")
+    check_stop()
+    concat = cache / "concat.txt"
+    concat.write_text("".join("file '" + str(p["file"]).replace("\\", "/").replace("'", "'\\''") +
+                             f"'\nduration {p['frames'] / FPS:.8f}\n" for p in pieces), encoding="utf-8")
+    name = safe_name(Path(project.get("script") or folder.name).stem)
+    final = folder / f"{name}_เล่าภาพ_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
+    temp_final = final.with_name(final.stem + ".partial.mp4")
+    progress(0.94, "ประกอบคลิปที่เก็บไว้และใส่เสียง — ไม่เข้ารหัสภาพทั้งเรื่องซ้ำ")
+    try:
+        run(["-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(audio),
+             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+             "-t", f"{sum(p['frames'] for p in pieces) / FPS:.8f}", "-movflags", "+faststart", str(temp_final)])
+        os.replace(temp_final, final)
+    finally:
+        temp_final.unlink(missing_ok=True)
+    manifest["last_output"] = str(final)
+    manifest["stats"] = {"scenes_rendered": body_count, "transitions_rendered": transition_count,
+                         "pieces_reused": len(pieces) - len(todo), "force": bool(force)}
+    save_manifest()
+    project["last_video"] = str(final)
+    project["last_video_size"] = [width, height]
+    project["last_render_stats"] = manifest["stats"]
+    log(f"✓ วิดีโอเสร็จ: {final}")
+    return str(final)
 
 
 def xfade_graph(lengths: list, fade: float = CROSSFADE, kinds: list | None = None) -> tuple[str, float]:
@@ -1319,11 +2206,15 @@ def apply_continuity(scenes: list, entries, numbers: list | None = None) -> None
 BOARD_CELLS = 9  # one storyboard sheet = 3 x 3 panels, each the video's own shape
 
 
-def board_groups(scenes: list, direction: dict | None) -> list:
-    """Scene indices per storyboard sheet: one director sequence per sheet (split above 9 panels).
+def board_groups(scenes: list, direction: dict | None, pack_in_order: bool = False) -> list:
+    """Return scene indices per storyboard sheet.
 
-    Shots without a director sequence (older plans) go in runs of up to 9.
+    Video Auto packs consecutive shots into full 3x3 sheets; Narrate keeps its
+    existing director-sequence grouping.
     """
+    if pack_in_order:
+        return [list(range(start, min(start + BOARD_CELLS, len(scenes))))
+                for start in range(0, len(scenes), BOARD_CELLS)]
     sequence_of = {}
     for k, seq in enumerate((direction or {}).get("sequences") or []):
         try:
@@ -1343,6 +2234,22 @@ def board_groups(scenes: list, direction: dict | None) -> list:
     return groups
 
 
+def previous_board_sheet(board_dir: Path, first_shot: int) -> str | None:
+    """Find the latest saved storyboard sheet that ends before this sheet."""
+    candidates = []
+    for candidate in board_dir.glob("sheet_*.png"):
+        try:
+            start_text, end_text = candidate.stem.split("_", 1)[1].split("-", 1)
+            start, end = int(start_text), int(end_text)
+        except (IndexError, ValueError):
+            continue
+        if start < first_shot and end < first_shot:
+            candidates.append((end, candidate))
+    if not candidates:
+        return None
+    return str(max(candidates, key=lambda item: item[0])[1])
+
+
 def crop_board(sheet_path, count: int, out_paths: list, inset: float = 0.03) -> None:
     """Cut panels 1..count (left to right, top to bottom) out of a 3 x 3 storyboard sheet."""
     from PIL import Image
@@ -1357,7 +2264,35 @@ def crop_board(sheet_path, count: int, out_paths: list, inset: float = 0.03) -> 
             sheet.crop(box).save(out_paths[k])
 
 
-def board_request(numbered: list, aspect: str, live_action: bool = True) -> str:
+def ensure_board_template(path, aspect: str) -> str:
+    """Create a blank, exact 3 x 3 image grid for image models to fill as a storyboard."""
+    from PIL import Image, ImageDraw
+
+    try:
+        ratio_w, ratio_h = (int(part) for part in str(aspect).split(":", 1))
+        if ratio_w <= 0 or ratio_h <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        ratio_w, ratio_h = 16, 9
+    scale = max(1, 512 // max(ratio_w, ratio_h))
+    cell_w, cell_h = ratio_w * scale, ratio_h * scale
+    width, height = cell_w * 3, cell_h * 3
+    image = Image.new("RGB", (width, height), (248, 248, 248))
+    draw = ImageDraw.Draw(image)
+    line = (96, 96, 96)
+    for index in (1, 2):
+        x, y = index * cell_w, index * cell_h
+        draw.line((x, 0, x, height - 1), fill=line, width=6)
+        draw.line((0, y, width - 1, y), fill=line, width=6)
+    draw.rectangle((0, 0, width - 1, height - 1), outline=line, width=8)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    image.save(target, format="PNG")
+    return str(target)
+
+
+def board_request(numbered: list, aspect: str, live_action: bool = True,
+                  grid_template: bool = False, prior_sheet: bool = False) -> str:
     """One storyboard sheet: a 3 x 3 grid, panel k = the k-th listed shot, in story order.
 
     ``live_action`` False (เล่าภาพ): the sheet follows the story's chosen style instead of film realism.
@@ -1368,16 +2303,37 @@ def board_request(numbered: list, aspect: str, live_action: bool = True) -> str:
         + (f" | สภาพต่อเนื่อง: {s['continuity']}" if s.get("continuity") else "")
         for k, (n, s) in enumerate(numbered, 1))
     empty = BOARD_CELLS - len(numbered)
+    separators = "คั่นด้วยเส้นบางตามแม่แบบ" if grid_template else "คั่นด้วยเส้นขาวบางๆ"
+    if grid_template:
+        reference_rule = (
+            "รูปอ้างอิงรูปแรกคือแม่แบบตารางเปล่า 3x3: คงขอบภาพและเส้นแบ่งตรงตำแหน่งเดิม ช่องเท่ากัน "
+            "ห้ามครอป ขยับ เอียง หรือเปลี่ยนสัดส่วนตาราง เติมภาพเฉพาะภายในแต่ละช่อง. "
+        )
+        if prior_sheet:
+            reference_rule += (
+                "รูปอ้างอิงรูปที่สองคือสตอรี่ชีตช่วงก่อนหน้า ใช้เป็นข้อมูลความต่อเนื่องของเรื่อง "
+                "ใบหน้า/รูปลักษณ์ตัวละคร และสไตล์ภาพเท่านั้น ห้ามคัดลอกช่องหรือเหตุการณ์จากชีตก่อน "
+                "แต่ละช่องใหม่ต้องยึดช็อตและคำบรรยายที่กำหนดไว้ด้านล่าง. "
+                "รูปอ้างอิงที่เหลือใช้เป็นหน้าตา/รูปร่างของตัวละครและสถานที่เท่านั้น. "
+            )
+        else:
+            reference_rule += "รูปอ้างอิงที่เหลือใช้เป็นหน้าตา/รูปร่างของตัวละครและสถานที่เท่านั้น. "
+    else:
+        reference_rule = "รูปที่แนบมาใช้เป็นหน้าตา/รูปร่างของตัวละครและสถานที่เท่านั้น. "
     return (
         "วาดสตอรี่บอร์ดภาพยนตร์ 1 รูป เป็นตาราง 3 แถว x 3 คอลัมน์ ช่องเท่ากันทุกช่อง "
-        f"แต่ละช่องเป็นภาพ{shape} คั่นด้วยเส้นขาวบางๆ เรียงช่องจากซ้ายไปขวา บนลงล่าง ตามลำดับช็อตด้านล่าง "
-        "ทุกช่องเป็นช็อตต่อเนื่องของหนังเรื่องเดียวกัน: ตัวละครหน้าตาเหมือนกันทุกช่อง สภาพตัวละคร (บาดแผล เลือด ความเปียก ร่างที่เปลี่ยน) "
-        "ต่อเนื่องจากช่องก่อน แสงและโทนสีต่อเนื่องกัน ทิศทางจอสอดคล้องกัน. "
+        f"แต่ละช่องเป็นภาพ{shape} {separators} เรียงช่องจากซ้ายไปขวา บนลงล่าง ตามลำดับช็อตด้านล่าง "
+        + ("ทุกช่องต้องทำตามพรอมต์ของช็อตนั้น แม้สถานที่ เวลา แสง และเหตุการณ์จะเปลี่ยนได้ตามแผน. "
+           "รักษาหน้าตาและรูปลักษณ์ของตัวละครให้ตรงกัน ใช้ภาพยนตร์สมจริงและสไตล์ภาพโดยรวมให้สม่ำเสมอ; "
+           "ต่อเนื่องด้านสภาพตัวละครและทิศทางจอเฉพาะเมื่อพรอมต์ระบุว่าเป็นเหตุการณ์ต่อเนื่อง. " if live_action else
+           "ทุกช่องเป็นช็อตต่อเนื่องของเรื่องเดียวกัน: ตัวละครหน้าตาเหมือนกันทุกช่อง สภาพตัวละคร "
+           "ต่อเนื่องจากช่องก่อน แสงและโทนสีต่อเนื่องกัน ทิศทางจอสอดคล้องกัน. ")
         + ("ภาพสมจริงแบบภาพนิ่งจากภาพยนตร์ไลฟ์แอ็กชัน ไม่ใช่การ์ตูน ไม่มีตัวหนังสือ ไม่มีตัวเลขในภาพ. " if live_action
            else "ทุกช่องใช้สไตล์ภาพเดียวกันตามที่ระบุท้ายคำสั่ง ไม่มีตัวหนังสือ ไม่มีตัวเลขในภาพ. ")
         + SCOPE_RULE
         + (f"ช่องท้ายสุด {empty} ช่องที่ไม่มีช็อต ให้เป็นสีดำล้วน. " if empty > 0 else "")
-        + "รูปที่แนบมาใช้เป็นหน้าตา/รูปร่างของตัวละครและสถานที่เท่านั้น.\n\n" + lines
+        + reference_rule
+        + "\n\n" + lines
     )
 
 
@@ -1771,9 +2727,60 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     video_mode = mode == "video"
     stages = VIDEO_STAGES if video_mode else STAGES
     work_dir_name = "วิดีโอออโต้" if video_mode else "เล่าภาพ"
+    render_action_label = "ต่อวิดีโอใหม่" if video_mode else "อัปเดตเฉพาะที่แก้"
     bg = box.cget("bg")
 
     state = {"project": None, "folder": None, "busy": False, "stop": False, "lock": threading.RLock()}
+    maxplus_key_cache = [""]
+    maxplus_key_button = None
+
+    def _config_api():
+        loader = runtime.get("load_config") or g.get("load_config")
+        saver = runtime.get("save_config") or g.get("save_config")
+        return loader if callable(loader) else None, saver if callable(saver) else None
+
+    def _maxplus_api_key():
+        configured = str(os.environ.get("MAXPLUS_API_KEY") or maxplus_key_cache[0] or "").strip()
+        if configured:
+            return configured
+        loader, _saver = _config_api()
+        if loader:
+            try:
+                config = loader() or {}
+                if isinstance(config, dict):
+                    configured = str(config.get(MAXPLUS_API_CONFIG_KEY) or "").strip()
+                    maxplus_key_cache[0] = configured
+            except Exception:
+                pass
+        return configured
+
+    def set_maxplus_api_key():
+        value = simpledialog.askstring(
+            "ตั้ง MaxPlus API Key",
+            "วาง API key ที่ผูกกับ pool Gen Image ใน MaxPlus Dashboard\n"
+            "คีย์จะถูกบันทึกในตั้งค่าโปรแกรม และช่องนี้จะไม่แสดงคีย์เดิม",
+            parent=page, show="*",
+        )
+        if value is None or not value.strip():
+            return
+        loader, saver = _config_api()
+        if not saver:
+            messagebox.showerror("MaxPlus", "บันทึก API key ผ่านการตั้งค่าโปรแกรมไม่ได้", parent=page)
+            return
+        try:
+            config = loader() if loader else {}
+            if not isinstance(config, dict):
+                config = {}
+            config[MAXPLUS_API_CONFIG_KEY] = value.strip()
+            saver(config)
+            maxplus_key_cache[0] = value.strip()
+            if maxplus_key_button is not None:
+                maxplus_key_button.config(text="MaxPlus Key ✓")
+            refresh_maxplus_credit()
+            messagebox.showinfo("MaxPlus", "บันทึก MaxPlus API Key แล้ว", parent=page)
+        except Exception:
+            messagebox.showerror("MaxPlus", "บันทึก API key ไม่สำเร็จ ตรวจสิทธิ์เขียนไฟล์ตั้งค่า", parent=page)
+
     script_var = tk.StringVar(value="ลากไฟล์มาวาง หรือกดเลือก (.docx / .txt)")
     audio_var = tk.StringVar(value="ลากไฟล์มาวาง หรือกดเลือก (.wav / .mp3 / .m4a)")
     aspect_var = tk.StringVar(value="16:9")
@@ -1783,7 +2790,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     review_var = tk.BooleanVar(value=False)
     film_var = tk.BooleanVar(value=True)  # เล่าภาพ เรื่องผี: old film look on the video
     economy_var = tk.BooleanVar(value=True)  # ออโต้: Slow 2x on every shot, longer shots, about half the credit
-    video_model_var = tk.StringVar(value="อัตโนมัติ (Grok / Vela)")
+    video_model_var = tk.StringVar(value=VIDEO_MODEL_LABELS["auto"])
+    image_provider_var = tk.StringVar(value=GPT_WEB_LABEL)
+    maxplus_credit_var = tk.StringVar(value="MaxPlus คงเหลือ: —")
+    maxplus_model_info_var = tk.StringVar(value="")
+    qwen_2k_var = tk.BooleanVar(value=False)
+    upscale_provider_var = tk.StringVar(value=UPSCALE_LABELS["qwen"])
     stage_var = tk.StringVar(value="พร้อม")
 
     def economy_on() -> bool:
@@ -1860,9 +2872,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         _model, _seconds, aspect = slot_settings()
         count = desired_count()
         folder = attachment_folder()
-        model_info = (video_model_var.get() + " · ฉาก 1 + Ref ไม่เกิน 3 รูป"
-                      if video_model_var.get() in SEEDANCE_MODELS.values()
-                      else "GPT เลือกต่อช็อต: grok-lower 6/10 วิ หรือ vela 5 วิ (+สโลว์ 2x)")
+        selected = next((key for key, label in VIDEO_MODEL_LABELS.items()
+                         if label == video_model_var.get()), "auto")
+        selected = next((key for key, label in SEEDANCE_MODELS.items()
+                         if label == video_model_var.get()), selected)
+        if selected in SEEDANCE_MODELS:
+            model_info = video_model_var.get() + " · ฉาก 1 + Ref ไม่เกิน 3 รูป"
+        elif selected in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
+            model_info = video_model_var.get() + " · ทุกฉาก · 6/10/15 วิ"
+        else:
+            model_info = "อัตโนมัติ: GPT เลือก Grok/Vela ตามช็อต"
         clip_info_var.set(f"ไฟล์แนบ: {Path(folder).name if folder else 'ยังไม่ได้เลือก (เลือกที่หน้ารูป AI)'} · "
                           + model_info
                           + (f" → ประมาณ {count} คลิป" if count else ""))
@@ -1883,6 +2902,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     options = tk.Frame(box, bg=bg)
     options.pack(fill="x", padx=8, pady=2)
+    checkbox_parent = options
     clip_info_var = tk.StringVar(value="")
     if video_mode:
         aspect_var.set(slot_settings()[2])
@@ -1894,20 +2914,111 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if state.get("project") is not None:
                 state["project"]["economy"] = bool(economy_var.get())
                 save_project()
-        tk.Checkbutton(options, text="สโลว์ประหยัด (ทุกช็อตสโลว์ 2x ช็อตยาว ตัดน้อย)", variable=economy_var,
-                       command=economy_changed, bg=bg).pack(side="left", padx=(0, 10))
+        video_controls = tk.Frame(box, bg=bg)
+        video_controls.pack(fill="x", padx=8, pady=(0, 2))
+        checkbox_parent = video_controls
+        tk.Checkbutton(video_controls, text="ประหยัด (สโลว์ 2× · ตัดน้อย)", variable=economy_var,
+                       command=economy_changed, bg=bg).pack(side="left", padx=(0, 14))
         def video_model_changed(_event=None):
             project = state.get("project")
             if project is not None:
-                project["video_model"] = next((key for key, label in SEEDANCE_MODELS.items()
-                                               if label == video_model_var.get()), "auto")
+                selected = next((key for key, label in VIDEO_MODEL_LABELS.items()
+                                 if label == video_model_var.get()), None)
+                project["video_model"] = selected or next((key for key, label in SEEDANCE_MODELS.items()
+                                                            if label == video_model_var.get()), "auto")
                 save_project()
             refresh_clip_info()
+
+        def refresh_maxplus_model_info():
+            provider = next((key for key, label in VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.items()
+                             if label == image_provider_var.get()), None)
+            model = VIDEO_AUTO_MAXPLUS_MODELS.get(provider)
+            if model:
+                maxplus_model_info_var.set(
+                    f"ราคาโดยประมาณ {model['estimated_price']}/รูป · {model['resolution']} · "
+                    "ราคาอ้างอิงจากหน้า MaxPlus ล่าสุด อาจเปลี่ยนได้")
+            else:
+                maxplus_model_info_var.set("เลือกรุ่น MaxPlus ในเมนูเพื่อดูราคาโดยประมาณต่อรูป")
+
+        credit_refresh_lock = threading.Lock()
+        credit_refresh_state = {"pending": False, "again": False}
+
+        def refresh_maxplus_credit():
+            key = _maxplus_api_key()
+            if not key:
+                ui(maxplus_credit_var.set, "MaxPlus คงเหลือ: ตั้ง API Key")
+                return
+            with credit_refresh_lock:
+                if credit_refresh_state["pending"]:
+                    credit_refresh_state["again"] = True
+                    return
+                credit_refresh_state["pending"] = True
+                credit_refresh_state["again"] = False
+            ui(maxplus_credit_var.set, "MaxPlus คงเหลือ: กำลังอ่าน…")
+
+            def worker():
+                try:
+                    credit = maxplus_account_credit(key)
+                    label = f"MaxPlus คงเหลือ: ${credit:,.2f}"
+                except Exception:
+                    label = "MaxPlus คงเหลือ: เช็กไม่ได้"
+                with credit_refresh_lock:
+                    again = credit_refresh_state["again"]
+                    credit_refresh_state["again"] = False
+                    credit_refresh_state["pending"] = False
+
+                def update_label():
+                    if key != _maxplus_api_key():
+                        maxplus_credit_var.set("MaxPlus คงเหลือ: คีย์เปลี่ยนแล้ว")
+                        refresh_maxplus_credit()
+                        return
+                    maxplus_credit_var.set(label)
+                    if again:
+                        root.after(300, refresh_maxplus_credit)
+                ui(update_label)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        image_provider_row = tk.Frame(box, bg=bg)
+        image_provider_row.pack(fill="x", padx=8, pady=(1, 3))
+        tk.Label(image_provider_row, text="สตอรี่บอร์ดผ่าน", bg=bg).pack(side="left")
+        provider_menu = ttk.Combobox(
+            image_provider_row, textvariable=image_provider_var, width=60, state="readonly",
+            values=tuple(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.values()))
+        provider_menu.pack(side="left", padx=6)
+
+        def video_image_provider_changed(_event=None):
+            refresh_maxplus_model_info()
+            project = state.get("project")
+            if project is None:
+                return
+            if state["busy"]:
+                image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(
+                    project.get("storyboard_provider"), GPT_WEB_LABEL))
+                refresh_maxplus_model_info()
+                return
+            project["storyboard_provider"] = {v: k for k, v in VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.items()}.get(
+                image_provider_var.get(), "gpt_web")
+            save_project()
+
+        provider_menu.bind("<<ComboboxSelected>>", video_image_provider_changed)
+        maxplus_key_button = tk.Button(
+            image_provider_row,
+            text="MaxPlus Key ✓" if _maxplus_api_key() else "ตั้ง MaxPlus Key",
+            command=set_maxplus_api_key, relief="flat", bg="#E2E8F0", fg="#0F172A", cursor="hand2")
+        maxplus_key_button.pack(side="left", padx=4)
+        tk.Label(image_provider_row, textvariable=maxplus_credit_var, bg=bg, fg="#475569").pack(side="left", padx=6)
+        tk.Button(image_provider_row, text="รีเฟรช", command=refresh_maxplus_credit,
+                  relief="flat", bg="#E2E8F0", fg="#0F172A", cursor="hand2").pack(side="left", padx=(0, 4))
+        tk.Label(box, textvariable=maxplus_model_info_var, bg=bg, fg="#475569", anchor="w").pack(
+            fill="x", padx=10, pady=(0, 3))
+        refresh_maxplus_model_info()
+
         model_row = tk.Frame(box, bg=bg)
         model_row.pack(fill="x", padx=8, pady=2)
         tk.Label(model_row, text="โมเดลวิดีโอ", bg=bg).pack(side="left")
-        model_menu = ttk.Combobox(model_row, textvariable=video_model_var, width=24, state="readonly",
-                                  values=("อัตโนมัติ (Grok / Vela)", *SEEDANCE_MODELS.values()))
+        model_menu = ttk.Combobox(model_row, textvariable=video_model_var, width=29, state="readonly",
+                                  values=(*VIDEO_MODEL_LABELS.values(), *SEEDANCE_MODELS.values()))
         model_menu.pack(side="left", padx=6)
         model_menu.bind("<<ComboboxSelected>>", video_model_changed)
     else:
@@ -1916,6 +3027,48 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tk.Label(options, text="จำนวนรูปทั้งเรื่อง", bg=bg).pack(side="left")
         ttk.Combobox(options, textvariable=count_var, values=IMAGE_COUNTS, width=5, state="readonly").pack(side="left", padx=4)
         tk.Label(options, text="รูปฉาก (+ รูปตัวละครตามเรื่อง)", bg=bg).pack(side="left", padx=(0, 14))
+        provider_row = tk.Frame(box, bg=bg)
+        provider_row.pack(fill="x", padx=8, pady=(1, 3))
+        tk.Label(provider_row, text="สร้างรูปผ่าน", bg=bg).pack(side="left")
+        provider_menu = ttk.Combobox(provider_row, textvariable=image_provider_var, width=29, state="readonly",
+                                     values=tuple(IMAGE_PROVIDER_LABELS.values()))
+        provider_menu.pack(side="left", padx=6)
+
+        def image_provider_changed(_event=None):
+            if state.get("project") is not None:
+                if state["busy"]:
+                    image_provider_var.set(IMAGE_PROVIDER_LABELS.get(
+                        state["project"].get("image_provider"), GPT_WEB_LABEL))
+                    return
+                state["project"]["image_provider"] = {v: k for k, v in IMAGE_PROVIDER_LABELS.items()}.get(
+                    image_provider_var.get(), "gpt_web")
+                if state["project"]["image_provider"] == "per_stage":
+                    state["project"]["image_stage_providers"] = {}
+                save_project()
+
+        def qwen_2k_changed():
+            if state.get("project") is not None:
+                state["project"]["qwen_2k"] = bool(qwen_2k_var.get())
+                save_project()
+
+        provider_menu.bind("<<ComboboxSelected>>", image_provider_changed)
+        tk.Checkbutton(provider_row, text="สร้าง 2K ในเครื่อง", variable=qwen_2k_var,
+                       command=qwen_2k_changed, bg=bg).pack(side="left", padx=4)
+        upscale_menu = ttk.Combobox(provider_row, textvariable=upscale_provider_var, width=23,
+                                   values=tuple(UPSCALE_LABELS.values()), state="readonly")
+        upscale_menu.pack(side="left", padx=4)
+
+        def upscale_provider_changed(_event=None):
+            if state.get("project") is not None:
+                if state["busy"]:
+                    upscale_provider_var.set(UPSCALE_LABELS.get(state["project"].get("upscale_provider"), UPSCALE_LABELS["qwen"]))
+                    return
+                state["project"]["upscale_provider"] = next(k for k, v in UPSCALE_LABELS.items() if v == upscale_provider_var.get())
+                save_project()
+
+        upscale_menu.bind("<<ComboboxSelected>>", upscale_provider_changed)
+        tk.Button(provider_row, text="ลองรูปตัวละคร 1 รูป", command=lambda: start_pipeline(
+            only="characters", character_limit=1)).pack(side="right", padx=4)
     tk.Label(options, text="สไตล์", bg=bg).pack(side="left")
     ttk.Combobox(options, textvariable=style_var, values=list(STYLES), width=9, state="readonly").pack(side="left", padx=(4, 14))
     if not video_mode:
@@ -1926,8 +3079,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 save_project()
         tk.Checkbutton(options, text="ฟิลเตอร์ฟิล์มเก่า", variable=film_var,
                        command=film_changed, bg=bg).pack(side="left", padx=(0, 14))
-    tk.Checkbutton(options, text="ใส่ซับไตเติล", variable=subtitle_var, bg=bg).pack(side="left", padx=(0, 10))
-    tk.Checkbutton(options, text="หยุดให้ตรวจแผนก่อนสร้างรูป", variable=review_var, bg=bg).pack(side="left")
+    tk.Checkbutton(checkbox_parent, text="ใส่ซับไตเติล", variable=subtitle_var, bg=bg).pack(side="left", padx=(0, 14))
+    tk.Checkbutton(checkbox_parent, text="หยุดให้ตรวจแผนก่อนสร้างรูป", variable=review_var, bg=bg).pack(side="left")
 
     # ── run row ──
     run_row = tk.Frame(box, bg=bg)
@@ -1957,15 +3110,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         stage_labels[key] = label
 
     log_box = make_log_box(box)
+    log_box.configure(height=1)
     log_box.pack(side="bottom", fill="x", padx=8, pady=(2, 6))
 
     # ── scenes table ──
     table_tools = tk.Frame(box, bg=bg)
     table_tools.pack(fill="x", padx=8)
-    tk.Label(table_tools, text="ฉาก (ดับเบิลคลิกเพื่อแก้พรอมต์)", bg=bg, fg="#334155").pack(side="left")
-    make_styled_button(table_tools, "SECONDARY", "ต่อวิดีโอใหม่", command=lambda: start_pipeline(only="video")).pack(side="right")
-    make_styled_button(table_tools, "SECONDARY", "สร้างรูปใหม่ช็อตที่เลือก", command=lambda: regenerate_selected()).pack(side="right", padx=6)
-    make_styled_button(table_tools, "DANGER", "🛠 แก้ช็อตที่มีปัญหา" if video_mode else "🛠 แก้รูปที่มีปัญหา",
+    tk.Label(table_tools, text="ฉาก", bg=bg, fg="#334155").pack(side="left", padx=(0, 6))
+    if not video_mode:
+        tk.Label(table_tools, text="ส่งออก 1080p", bg=bg, fg="#64748B").pack(side="left", padx=(0, 4))
+        make_styled_button(table_tools, "SUCCESS", "เฉพาะที่แก้",
+                           command=lambda: render_video_selected(force=False)).pack(side="left", padx=2)
+        make_styled_button(table_tools, "SECONDARY", "ทั้งหมด",
+                           command=lambda: render_video_selected(force=True)).pack(side="left", padx=2)
+    if video_mode:
+        make_styled_button(table_tools, "SECONDARY", "ต่อวิดีโอใหม่", command=lambda: start_pipeline(only="video")).pack(side="right")
+    make_styled_button(table_tools, "SECONDARY", "เจนช็อตใหม่" if video_mode else "เจนรูปใหม่", command=lambda: regenerate_selected()).pack(side="right", padx=4)
+    make_styled_button(table_tools, "DANGER", "🛠 แก้ช็อตพัง" if video_mode else "🛠 แก้รูปพัง",
                        command=lambda: fix_problem_selected()).pack(side="right", padx=6)
     if video_mode:
         make_styled_button(table_tools, "SUCCESS", "🎬 เจนวิดีโอใหม่ช็อตที่เลือก",
@@ -1974,18 +3135,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                            command=lambda: review_clips_selected()).pack(side="right", padx=6)
         make_styled_button(table_tools, "SECONDARY", "🐢 ทำสโลว์ใหม่",
                            command=lambda: reslow_selected()).pack(side="right", padx=6)
-    make_styled_button(table_tools, "PRIMARY", "GPT ช่วยแก้ prompt", command=lambda: refine_selected()).pack(side="right", padx=6)
-    make_styled_button(table_tools, "DANGER", "เริ่มประวัติ GPT ใหม่", command=lambda: reset_history()).pack(side="right")
+    make_styled_button(table_tools, "PRIMARY", "แก้ prompt", command=lambda: refine_selected()).pack(side="right", padx=4)
+    make_styled_button(table_tools, "DANGER", "รีเซ็ต GPT", command=lambda: reset_history()).pack(side="right")
     table_frame = tk.Frame(box, bg=bg)
-    table_frame.pack(fill="both", expand=True, padx=8, pady=4)
-    # The picture preview takes its own fixed column first, so a long table never pushes it off screen.
-    preview_box = tk.Frame(table_frame, bg="#F1F5F9", width=320)
+    table_frame.pack(fill="both", expand=True, padx=8, pady=2)
+    # Give the selected image a useful viewing width while the table takes the remaining space.
+    preview_box = tk.Frame(table_frame, bg="#F1F5F9", width=420)
     preview_box.pack(side="right", fill="y", padx=(8, 0))
     preview_box.pack_propagate(False)
     preview = tk.Label(preview_box, bg="#F1F5F9", text="เลือกฉากเพื่อดูรูป")
     preview.pack(fill="both", expand=True)
     columns = ("no", "time", "chars", "prompt", "status")
-    table = ttk.Treeview(table_frame, columns=columns, show="headings", height=10, selectmode="extended")
+    table = ttk.Treeview(table_frame, columns=columns, show="headings", height=12, selectmode="extended")
     table.tag_configure("bad", foreground="#DC2626")
     for key, title, width in (("no", "#", 44), ("time", "เวลา", 64),
                               ("chars", "ไฟล์แนบที่ใช้ (ตัวละคร/สถานที่)" if video_mode else "ตัวละคร", 220 if video_mode else 170),
@@ -2009,6 +3170,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def ui(fn, *args):
         root.after(0, lambda: fn(*args))
+
+    if video_mode:
+        root.after(0, refresh_maxplus_credit)
 
     def export_root() -> Path:
         value = runtime.get("EXPORT_ROOT") or g.get("EXPORT_ROOT")
@@ -2064,7 +3228,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         try:
             project = json.loads((folder / "project.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            project = {"version": 2, "conversation": {}, "done": {}, "scenes": []}
+            project = {"version": 2, "conversation": {}, "done": {}, "scenes": [],
+                       "image_provider": "gpt_web", "qwen_2k": False}
             log("เรื่องใหม่ — จะเปิดประวัติ GPT ใหม่ของเรื่องนี้เมื่อกดเริ่ม")
         else:
             log("เปิดงานเดิมของเรื่องนี้ — ทำต่อในประวัติ GPT เดิม")
@@ -2078,6 +3243,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def show_project(folder, project):
         state["folder"] = str(folder)
         state["project"] = project
+        if not video_mode:
+            restored = relink_scene_images(project, folder)
+            if restored:
+                save_project()
+                log("พบรูปที่ทำเสร็จแล้ว — เชื่อมฉาก " + ", ".join(map(str, restored)))
+        if not video_mode:
+            project.setdefault("image_provider", "gpt_web")
+            project.setdefault("qwen_2k", False)
+            project.setdefault("upscale_provider", "qwen")
+        else:
+            project.setdefault("image_provider", "gpt_web")
+            legacy_stage = (project.get("image_stage_providers") or {}).get("storyboard")
+            legacy_provider = project.get("image_provider")
+            if project.get("storyboard_provider") not in VIDEO_AUTO_IMAGE_PROVIDER_LABELS:
+                project["storyboard_provider"] = (
+                    legacy_stage if legacy_stage in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else
+                    legacy_provider if legacy_provider in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else "gpt_web")
         try:
             last_project_file().write_text(str(folder), encoding="utf-8")
         except OSError:
@@ -2090,7 +3272,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         subtitle_var.set(bool(project.get("subtitles", subtitle_var.get())))
         if video_mode:
             economy_var.set(bool(project.get("economy", True)))
-            video_model_var.set(SEEDANCE_MODELS.get(project.get("video_model"), "อัตโนมัติ (Grok / Vela)"))
+            image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(
+                project.get("storyboard_provider"), GPT_WEB_LABEL))
+            refresh_maxplus_model_info()
+            video_model = str(project.get("video_model") or "auto")
+            video_model_var.set(VIDEO_MODEL_LABELS.get(video_model, SEEDANCE_MODELS.get(
+                video_model, VIDEO_MODEL_LABELS["auto"])))
+        else:
+            image_provider_var.set(IMAGE_PROVIDER_LABELS.get(
+                project.get("image_provider"), GPT_WEB_LABEL))
+            qwen_2k_var.set(bool(project.get("qwen_2k", False)))
+            upscale_provider_var.set(UPSCALE_LABELS.get(project.get("upscale_provider"), UPSCALE_LABELS["qwen"]))
         film_var.set(bool(project.get("film", STYLES.get(project.get("style_mode") or "ปกติ", {}).get("film", False))))
         style_var.set(project.get("style_mode") if project.get("style_mode") in STYLES else last_style())
         save_project()
@@ -2186,6 +3378,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     # ── display ──
     def refresh_table():
+        selected, focused, scroll = table.selection(), table.focus(), table.yview()
         table.delete(*table.get_children())
         for i, scene in enumerate((state["project"] or {}).get("scenes", [])):
             image = scene.get("image")
@@ -2214,6 +3407,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             table.insert("", "end", iid=str(i), tags=("bad",) if scene.get("bad") or scene.get("error") or redo else (), values=(
                 i + 1, fmt_time(scene.get("start")), who,
                 scene.get("prompt", "").replace("\n", " "), status))
+        kept = [iid for iid in selected if table.exists(iid)]
+        if kept:
+            table.selection_set(kept)
+        if focused and table.exists(focused):
+            table.focus(focused)
+        if scroll:
+            table.yview_moveto(scroll[0])
 
     def refresh_stages(active=None):
         done = (state["project"] or {}).get("done", {})
@@ -2328,15 +3528,129 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             message = "".join(str(p.get("text") or "") if isinstance(p, dict) else str(p) for p in message)
         return str(message)
 
-    def make_image(prompt, refs, out_dir, name, aspect, board=None, identity=False):
-        imgmod = runtime.get("_imgmod") or g.get("_imgmod")
-        if imgmod is None:
-            raise RuntimeError("ระบบสร้างรูปยังไม่พร้อม")
+    def image_provider_for(stage="images"):
         project = state["project"]
+        if video_mode:
+            if stage != "storyboard":
+                return "gpt_web"
+            provider = project.get("storyboard_provider", "gpt_web")
+            return provider if provider in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else "gpt_web"
+        labels = VIDEO_AUTO_IMAGE_PROVIDER_LABELS if video_mode else IMAGE_PROVIDER_LABELS
+        supported = tuple(key for key in labels if key != "per_stage")
+        provider = project.get("image_provider", "gpt_web")
+        if provider != "per_stage":
+            return provider if provider in supported else "gpt_web"
+        choices = project.setdefault("image_stage_providers", {})
+        if choices.get(stage) in supported:
+            return choices[stage]
+        answer, event = {}, threading.Event()
+        title = {"characters": "รูปตัวละคร", "storyboard": "สตอรี่ชีต", "images": "รูปฉาก"}.get(stage, "รูปฉาก")
+
+        def ask():
+            win = tk.Toplevel(page)
+            win.title(f"เลือกผู้สร้างรูป — {title}")
+            win.transient(root)
+            win.resizable(False, False)
+            tk.Label(win, text=f"ขั้น {title} จะสร้างรูปผ่านอะไร?", font=("TkDefaultFont", 12, "bold")).pack(padx=24, pady=(18, 8))
+            tk.Label(win, text="ใช้กับทุกรูปในขั้นนี้ ถามอีกครั้งเมื่อเปลี่ยนหัวข้อ").pack(padx=24, pady=(0, 12))
+
+            def choose(value):
+                answer["provider"] = value
+                win.destroy()
+
+            for value, label in labels.items():
+                if value == "per_stage":
+                    continue
+                tk.Button(win, text=label, width=38, command=lambda v=value: choose(v)).pack(padx=24, pady=5)
+            tk.Button(win, text="หยุดไว้ก่อน", command=win.destroy).pack(pady=(8, 16))
+            win.bind("<Destroy>", lambda e: event.set() if e.widget == win else None)
+            win.grab_set()
+
+        root.after(0, ask)
+        event.wait()
+        if not answer.get("provider"):
+            raise Stopped()
+        choices[stage] = answer["provider"]
+        save_project()
+        log(f"{title}: เลือก {labels[answer['provider']]}")
+        return answer["provider"]
+
+    def generate_via_snapgen(prompt, refs, out_dir, name, aspect, api_context=None):
+        keyvar = runtime.get("api_key_var") or g.get("api_key_var")
+        api_key = (api_context["api_key"] if api_context is not None else
+                   str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip())
+        fetch = None if api_context is not None else (runtime.get("fetch_available_credit") or g.get("fetch_available_credit"))
+
+        def balance():
+            try:
+                return float(str(fetch()).replace(",", "")) if callable(fetch) else None
+            except Exception:
+                return None
+
+        before = balance()
+        log(f"{name}: SnapGen GPT API · Image 2.5 Lower · แนบไฟล์ {len(refs)} รูป"
+            + (f" · เครดิตก่อน {before:g}" if before is not None else ""))
+        try:
+            image = snapgen_image(prompt, refs, str(out_dir), name, aspect, api_key)
+        except Exception as exc:
+            # A timed-out request may already be processing; do not auto-submit another paid job.
+            raise ImageProviderError(f"SnapGen API: {exc} — ตรวจ History ก่อนลองใหม่") from exc
+        if api_context is not None:
+            return image  # Overlapping balance deltas cannot measure one image's charge.
+        after = balance()
+        measured = before - after if before is not None and after is not None else None
+        state["project"]["last_snapgen_image_credit"] = {"name": name, "before": before,
+                                                           "after": after, "deducted": measured}
+        save_project()
+        if measured is not None and measured > 0:
+            log(f"{name}: เครดิตหักจริง {measured:g} ({before:g} → {after:g})")
+        else:
+            log(f"{name}: ได้รูปแล้ว แต่ยังยืนยันเครดิตที่หักไม่ได้ — ดูยอดใน SnapGen History")
+        return image
+
+    def generate_via_maxplus(prompt, refs, out_dir, name, aspect, provider="maxplus"):
+        key = _maxplus_api_key()
+        if not key:
+            raise ImageProviderError("ยังไม่ได้ตั้ง MaxPlus API Key (pool Gen Image) — กดตั้ง MaxPlus Key ก่อนเริ่ม")
+        model = VIDEO_AUTO_MAXPLUS_MODELS.get(provider, VIDEO_AUTO_MAXPLUS_MODELS["maxplus"])
+        log(f"{name}: {model['label']} · แนบไฟล์ {len(refs)} รูป")
+        sizes = model.get("size_by_aspect") or {}
+        size = sizes.get(aspect) if sizes else aspect
+        if not size:
+            raise ImageProviderError(f"MaxPlus {model['label']} ยังไม่รองรับสัดส่วน {aspect}")
+        try:
+            return maxplus_image(prompt, refs, str(out_dir), name, aspect, key,
+                                 model=model["model"], quality=model["quality"],
+                                 max_references=model["max_references"], size=size)
+        except Exception as exc:
+            # A timeout can mean the paid request is still running; never submit it again automatically.
+            raise ImageProviderError(f"{model['label']}: {exc} — ตรวจ MaxPlus History ก่อนลองใหม่") from exc
+        finally:
+            refresh_maxplus_credit()
+
+    def make_image(prompt, refs, out_dir, name, aspect, board=None, identity=False, api_context=None,
+                   grid_template=False):
+        imgmod = runtime.get("_imgmod") or g.get("_imgmod")
+        project = state["project"]
+        provider = "snapgen" if api_context is not None else image_provider_for(state.get("active_image_stage", "images"))
+        if imgmod is None and provider not in ("snapgen", "qwen") and not is_video_auto_maxplus_provider(provider):
+            raise RuntimeError("ระบบสร้างรูปยังไม่พร้อม")
+        identity_refs = list(refs)
         if board:
             # Image 1 = this shot's storyboard panel (layout to follow), then identity references.
-            refs = [board, *refs][:6]
-        encoded = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in refs]
+            refs = [board, *refs] if provider in ("snapgen", "qwen") or is_video_auto_maxplus_provider(provider) else [board, *refs][:6]
+        if provider == "snapgen" and len(refs) > 10:
+            raise ImageProviderError("ฉากนี้มีไฟล์เรฟเกิน 10 รูปที่ API รองรับ — หยุดก่อนส่งเพื่อไม่ให้เรฟตัวละครตกหล่น")
+        if provider == "qwen" and len(refs) > 16:
+            raise ImageProviderError("Qwen รับเรฟได้สูงสุด 16 รูป — หยุดเพื่อไม่ให้เรฟตกหล่น")
+        if is_video_auto_maxplus_provider(provider):
+            max_refs = VIDEO_AUTO_MAXPLUS_MODELS[provider]["max_references"]
+            if len(refs) > max_refs:
+                raise ImageProviderError(
+                    f"{VIDEO_AUTO_MAXPLUS_MODELS[provider]['label']} รับรูปอ้างอิงได้สูงสุด {max_refs} รูปต่อคำขอ "
+                    "(รวมสตอรี่บอร์ด) — เอารูปแนบบางส่วนออก หรือเลือก GPT Web"
+                )
+        encoded = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in refs if Path(p).is_file()]
         if board:
             prompt += (
                 "\n\nImage 1 is the STORYBOARD PANEL of this shot: follow its composition, camera angle, framing, "
@@ -2347,6 +3661,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 "No panel borders, no shot numbers, no text."
                 + ("\nOther attached images are ONLY each character's identity (face, body, outfit):\n"
                    + "\n".join(f"Image {i}: {Path(p).stem}" for i, p in enumerate(refs[1:], 2)) if len(refs) > 1 else ""))
+        elif grid_template:
+            prompt += (
+                "\n\nImage 1 is the blank 3x3 storyboard grid template. Preserve its exact outer frame, "
+                "aspect ratio, straight dividers and nine equal cells; fill the cells only. Do not crop, rotate, "
+                "tilt, move or redraw the grid."
+                + ("\nImages 2 onward are character and location identity references only:\n"
+                   + "\n".join(f"Image {i}: {Path(p).stem}" for i, p in enumerate(refs[1:], 2))
+                   if len(refs) > 1 else "")
+            )
         elif refs and identity:
             # A character's other form (e.g. their ghost): a reference picture of the same person.
             prompt += ("\n\nThe attached image is the SAME PERSON in normal form: keep the exact face, facial "
@@ -2366,23 +3689,80 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         # and, once it held a few dozen, every new picture there took 3-8 minutes (the page and GPT re-read
         # it all). A short chat still lets GPT see the previous few shots; faces stay consistent through
         # the attached references and the look written into the prompt.
-        chat_state = project.setdefault("image_chat", {})
+        chat_state = project.setdefault("image_chat", {}) if provider == "gpt_web" else {}
         if int(chat_state.get("count") or 0) >= IMAGES_PER_CHAT:
             chat_state.clear()
-        out = imgmod.generate_image(
-            prompt, output_dir=str(out_dir), name_hint=name, is_edit=bool(encoded),
-            ref_images=encoded or None, aspect_ratio=aspect, save_sidecar=False,
-            conversation_state=chat_state, conversation_save_fn=save_project,
-        )
-        chat_state["count"] = int(chat_state.get("count") or 0) + 1
-        save_project()
+
+        def generate_base(temporary=False):
+            if provider == "qwen":
+                log(f"{name}: Qwen 2.1 ในเครื่อง · แนบไฟล์ {len(refs)} รูป · ไม่ใช้เครดิต SnapGen")
+                try:
+                    return qwen_generate_image(prompt, refs, str(out_dir), name, aspect,
+                                               high_res=bool(project.get("qwen_2k")))
+                except Exception as exc:
+                    raise ImageProviderError(f"Qwen สร้างรูปไม่สำเร็จ: {exc}") from exc
+            if provider == "snapgen":
+                signature = hashlib.sha256((prompt + "\n" + aspect).encode("utf-8") + b"".join(
+                    hashlib.sha256(Path(p).read_bytes()).digest() for p in refs if Path(p).is_file())).hexdigest()
+                cached = (project.get("image_bases") or {}).get(name) or {}
+                if cached.get("signature") == signature and Path(cached.get("file") or "").is_file():
+                    log(f"{name}: ใช้ภาพฐาน API ที่เก็บไว้ — ไม่ส่งคำขอสร้างรูปซ้ำ")
+                    return cached["file"]
+                image = generate_via_snapgen(prompt, refs, out_dir, name, aspect, api_context=api_context)
+                with state["lock"]:
+                    project.setdefault("image_bases", {})[name] = {"signature": signature, "file": image}
+                    save_project()
+                return image
+            if is_video_auto_maxplus_provider(provider):
+                signature = hashlib.sha256((provider + "\n" + prompt + "\n" + aspect).encode("utf-8") + b"".join(
+                    hashlib.sha256(Path(p).read_bytes()).digest() for p in refs if Path(p).is_file())).hexdigest()
+                cached = (project.get("image_bases") or {}).get(name) or {}
+                if cached.get("signature") == signature and Path(cached.get("file") or "").is_file():
+                    log(f"{name}: ใช้ภาพฐาน MaxPlus ที่เก็บไว้ — ไม่ส่งคำขอสร้างรูปซ้ำ")
+                    return cached["file"]
+                image = generate_via_maxplus(prompt, refs, out_dir, name, aspect, provider)
+                with state["lock"]:
+                    project.setdefault("image_bases", {})[name] = {"signature": signature, "file": image}
+                    save_project()
+                return image
+            image = imgmod.generate_image(
+                prompt, output_dir=str(out_dir), name_hint=name, is_edit=bool(encoded),
+                ref_images=encoded or None, aspect_ratio=aspect, save_sidecar=False,
+                conversation_state=chat_state, conversation_save_fn=save_project, temporary_chat=temporary,
+            )
+            chat_state["count"] = int(chat_state.get("count") or 0) + 1
+            save_project()
+            return image
+
+        def maybe_qwen(image):
+            if provider == "qwen":
+                return image  # Native output already uses the requested size.
+            if not video_mode and project.get("qwen_2k"):
+                if project.get("upscale_provider") in UPSCALE_MODELS:
+                    try:
+                        return local_ai_upscale_2k(image, aspect, str(out_dir), name,
+                                                   UPSCALE_MODELS[project["upscale_provider"]])
+                    except Exception as exc:
+                        raise ImageProviderError(f"AI Upscale 2K ไม่สำเร็จ: {exc} — ภาพ API เก็บอยู่ที่ {image}") from exc
+                if len(identity_refs) > 2:
+                    log(f"{name}: Qwen 2.1 แนบเรฟตัวละครแยกไฟล์ครบ {len(identity_refs)} รูป")
+                try:
+                    return qwen_image_to_image_2k(image, identity_refs, prompt, aspect, str(out_dir), name)
+                except Exception as exc:
+                    if provider == "snapgen":
+                        raise ImageProviderError(f"Qwen 2K ไม่สำเร็จ: {exc} — ภาพ API เก็บอยู่ที่ {image}") from exc
+                    raise
+            return image
+
+        out = maybe_qwen(generate_base())
         if hashlib.md5(Path(out).read_bytes()).hexdigest() in old:
+            if provider in ("snapgen", "qwen") or is_video_auto_maxplus_provider(provider):
+                labels = VIDEO_AUTO_IMAGE_PROVIDER_LABELS if video_mode else IMAGE_PROVIDER_LABELS
+                raise ImageProviderError(f"{labels.get(provider, provider)} ส่งภาพซ้ำ — เก็บภาพไว้แล้ว ตรวจผลก่อนสั่งสร้างใหม่")
             # An old picture came back (GPT drew nothing new): ask once more in another fresh chat.
             log(f"{name}: ได้รูปเก่าซ้ำกลับมา — สร้างใหม่ในแชตใหม่")
             Path(out).unlink(missing_ok=True)
-            out = imgmod.generate_image(
-                prompt, output_dir=str(out_dir), name_hint=name, is_edit=bool(encoded),
-                ref_images=encoded or None, aspect_ratio=aspect, save_sidecar=False, temporary_chat=True)
+            out = maybe_qwen(generate_base(temporary=True))
             if hashlib.md5(Path(out).read_bytes()).hexdigest() in old:
                 Path(out).unlink(missing_ok=True)
                 raise RuntimeError("GPT ส่งรูปเก่าซ้ำกลับมา ไม่ได้สร้างรูปใหม่")
@@ -2392,6 +3772,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 old.unlink(missing_ok=True)
         if Path(out).resolve() != target.resolve():
             shutil.move(str(out), str(target))
+        if provider == "snapgen" or is_video_auto_maxplus_provider(provider):
+            with state["lock"]:
+                project.get("image_bases", {}).pop(name, None)
+                save_project()
         return str(target)
 
     def error_cause(exc) -> str:
@@ -2407,7 +3791,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             check_stop()
             try:
                 return action()
-            except Stopped:
+            except (Stopped, ImageProviderError):
                 raise
             except Exception as exc:
                 last = exc
@@ -2682,7 +4066,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         try:
             reply = with_retries("ค้นข้อมูลผี", lambda: parse_json_reply(chat(ghost_research_request(script))))
             ghosts = [g_ for g_ in reply.get("ghosts") or [] if isinstance(g_, dict) and g_.get("name") and g_.get("look")]
-        except (Stopped, HistoryLost, RateLimited):
+        except (Stopped, HistoryLost, RateLimited, ImageProviderError):
             raise
         except Exception as exc:
             log(f"ค้นข้อมูลผีไม่สำเร็จ ใช้ข้อมูลผีไทยในโปรแกรมแทน: {exc}")
@@ -2837,7 +4221,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                             log(f"{name}: ไม่ใส่ในรูปตั้งแต่ต้นเรื่อง (เกิดทีหลัง) — {str(item['later']).strip()[:120]}")
                             # The later change now lives only in the continuity record: build it again (text only).
                             project["continuity_done"] = False
-            except (Stopped, HistoryLost, RateLimited):
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                 raise
             except Exception as exc:
                 log(f"ทำรูปลักษณ์ตอนต้นเรื่องไม่สำเร็จ ({str(exc)[:120]}) — ใช้คำบรรยายตัวละครเดิม")
@@ -2866,7 +4250,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     form, person = str(item.get("form") or "").strip(), str(item.get("person") or "").strip()
                     if form in names and person in names and form != person:
                         found[form] = {"person": person, "how": str(item.get("how") or "").strip()}
-            except (Stopped, HistoryLost, RateLimited):
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                 raise
             except Exception as exc:
                 log(f"หาร่างอื่นของตัวละครไม่สำเร็จ ({str(exc)[:120]}) — ทำรูปตัวละครแยกกันตามเดิม")
@@ -2883,7 +4267,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tied = set(project.get("form_refs") or [])
         return [f for f, v in same.items() if f in existing and f not in tied and v["person"] in existing]
 
-    def stage_characters():
+    def stage_characters(limit=None):
         project = state["project"]
         ensure_story_in_history()
         ensure_base_looks()
@@ -2899,6 +4283,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             log(f"ทำรูป {form} ใหม่จากหน้าของ {same[form]['person']} (รูปเดิมเก็บเป็น _สำรอง)")
         todo = [c for c in characters if c["name"] not in existing]
         todo.sort(key=lambda c: c["name"] in same)  # each person before their other forms
+        if limit:
+            todo = todo[:limit]
         for n, character in enumerate(todo, 1):
             check_stop()
             name = character["name"]
@@ -2913,8 +4299,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 + "".join(f"ลักษณะผีตามความเชื่อไทย (ต้องวาดตามนี้): {look}. "
                           for _n, look in find_ghosts(name, project.get("ghosts") or []))
                 +
-                "ภาพเต็มตัวยืนตรง หันหน้าเข้ากล้อง เห็นหน้าชัด พื้นหลังสีเทาเรียบ แสงสม่ำเสมอ ไม่มีวัตถุอื่น "
-                + style_text()
+                "ภาพเรฟตัวละครสำหรับยึดหน้าตา รูปร่าง และเครื่องแต่งกาย ไม่ใช่ภาพฉากในเรื่อง. "
+                "ภาพถ่ายสมจริงเต็มตัวยืนตรง หันหน้าเข้ากล้อง เห็นใบหน้าและศีรษะถึงเท้าชัดครบ "
+                "พื้นหลังสตูดิโอสีขาวล้วน ไม่มีฉาก สถานที่ เฟอร์นิเจอร์ หรือของตกแต่ง "
+                "มีเฉพาะเครื่องแต่งกายและสิ่งของประจำตัวที่ระบุในรูปลักษณ์เท่านั้น. "
+                "แสงขาวกลางนุ่มสม่ำเสมอ สมดุลแสงขาวเป็นกลาง เปิดเผยรายละเอียดหน้า ผิว ผม และเนื้อผ้าชัด "
+                "แสดงสีผิว สีผม สีตา และสีเสื้อผ้าจริงของตัวละครตามคำบรรยาย ไม่ย้อมสีภาพ. "
+                "ห้ามฟิลเตอร์สี โทนหนัง โทนผี แสงสีเขียว/ฟ้า แสงดราม่า เงามืด หมอก ออร่า "
+                "แสงเรือง เอฟเฟกต์หลอน ขอบมืด ตัวหนังสือ และลายน้ำ. "
+                "หากคำบรรยายกล่าวถึงบรรยากาศ สถานที่ หรือแสงสีของฉาก ให้ละเว้นสิ่งเหล่านั้นในรูปเรฟนี้ "
+                "แต่คงอัตลักษณ์ เชื้อชาติ อายุ ลักษณะร่างกาย ชุด และสีที่เป็นลักษณะจริงของตัวละคร "
+                "รวมถึงกายวิภาคเฉพาะของร่างผีหรือสิ่งมีชีวิตตามบท ห้ามเปลี่ยนให้เป็นคนละตัวละคร."
             )
             with_retries(f"รูปตัวละคร {name}",
                          lambda p=prompt, nm=safe_name(name), r=base_ref: make_image(
@@ -2923,7 +4318,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 project.setdefault("form_refs", []).append(name)
                 save_project()
             log(f"✓ รูปตัวละคร {name}" + (f" (หน้าเดียวกับ {base['person']})" if base_ref else ""))
-        log(f"✓ รูปตัวละครครบ {len(characters)} ตัว ตามที่ปรากฏในฉาก (เปลี่ยนรูปได้ที่ {refs_dir})")
+        if limit:
+            log(f"✓ ทดลองสร้างรูปตัวละคร {len(todo)} รูป (ไฟล์อยู่ที่ {refs_dir})")
+        else:
+            log(f"✓ รูปตัวละครครบ {len(characters)} ตัว ตามที่ปรากฏในฉาก (เปลี่ยนรูปได้ที่ {refs_dir})")
 
     def check_script_matches_audio():
         """Stop before GPT or picture credits when the script and the narration are different stories."""
@@ -3146,7 +4544,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         era = ((project.get("context") or {}).get("story") or {}).get("era") or ""
         try:
             reply = with_retries("ใบร่างกายตัวละคร", lambda: parse_json_reply(chat(bodies_request(names, era))), attempts=2)
-        except (Stopped, HistoryLost, RateLimited):
+        except (Stopped, HistoryLost, RateLimited, ImageProviderError):
             raise
         except Exception as exc:
             state["bodies_failed"] = True  # not again this run; pictures still get the built-in bodies
@@ -3233,10 +4631,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         log(f"✓ บันทึกความต่อเนื่อง: {count} ช็อตมีสภาพที่ต้องต่อเนื่อง (เช่น บาดแผล) — ใส่ในคำสั่งรูปและคลิปให้อัตโนมัติ")
 
     def stage_storyboard():
-        """Draw the shots as storyboard sheets (one per sequence, 3 x 3), then cut each sheet into panels.
+        """Draw ordered storyboard sheets, then cut each sheet into panels.
 
-        Each shot's picture is later drawn from its own panel, so the sheet's
-        continuity (same faces, wounds, light, screen direction) carries over.
+        Video Auto packs up to nine shots per sheet; Narrate retains sequence
+        grouping. Each final scene image is still generated from its own panel.
         """
         project = state["project"]
         check_script_matches_audio()
@@ -3247,13 +4645,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         board_dir = Path(state["folder"]) / "storyboard"
         board_dir.mkdir(exist_ok=True)
         people = {} if video_mode else character_refs()  # เล่าภาพ: the story's own character pictures
-        groups = [grp for grp in board_groups(scenes, project.get("direction"))
+        all_groups = board_groups(scenes, project.get("direction"), pack_in_order=video_mode)
+        groups = [grp for grp in all_groups
                   if any(not (scenes[i].get("image") and os.path.isfile(scenes[i]["image"])) for i in grp)]
         groups = [grp for grp in groups if not all(scenes[i].get("board") and os.path.isfile(scenes[i]["board"]) for i in grp)
                   and not any(scenes[i].get("board_skipped") for i in grp)]
         if not groups:
             log("สตอรี่ชีต: ไม่มีช็อตที่ต้องวาดรูปใหม่ — ข้าม")
             return
+        aspect = str(project.get("aspect") or "16:9")
+        grid_template = (ensure_board_template(
+            board_dir / f"_grid_{aspect.replace(':', '-')}.png", aspect) if video_mode else None)
         for k, grp in enumerate(groups, 1):
             check_stop()
             first, last = grp[0] + 1, grp[-1] + 1
@@ -3264,15 +4666,39 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                          [people[c] for c in scenes[i].get("characters") or [] if c in people])
                 refs += [p for p in found if p not in refs]
             name = f"sheet_{first:03d}-{last:03d}"
+            provider = image_provider_for("storyboard")
+            previous_sheet = previous_board_sheet(board_dir, first) if video_mode else None
+            sheet_refs = [grid_template] if grid_template else []
+            if previous_sheet:
+                sheet_refs.append(previous_sheet)
+            sheet_refs.extend(refs)
+            if is_video_auto_maxplus_provider(provider):
+                max_refs = VIDEO_AUTO_MAXPLUS_MODELS[provider]["max_references"]
+            else:
+                max_refs = 16
+            if is_video_auto_maxplus_provider(provider) and len(sheet_refs) > max_refs:
+                omitted = len(sheet_refs) - max_refs
+                log(
+                    f"สตอรี่ชีต {first}–{last}: {VIDEO_AUTO_MAXPLUS_MODELS[provider]['label']} "
+                    f"รับแม่แบบและเรฟได้ {max_refs} รูป — ไม่แนบเรฟเพิ่มอีก {omitted} รูป "
+                    "(เก็บแม่แบบตารางและชีตก่อนหน้าไว้ก่อน)"
+                )
+                sheet_refs = sheet_refs[:max_refs]
+            if video_mode and provider == "gpt_web" and len(sheet_refs) > 6:
+                log(f"สตอรี่ชีต {first}–{last}: GPT Web รับแม่แบบและเรฟได้ 6 รูป — ไม่แนบเรฟเพิ่มอีก {len(sheet_refs) - 6} รูป")
+                sheet_refs = sheet_refs[:6]
 
-            def draw(grp=grp, refs=refs, name=name):
+            def draw(grp=grp, refs=sheet_refs, name=name):
                 return with_retries(f"สตอรี่ชีต ช็อต {first}–{last}", lambda: make_image(
-                    board_request([(i + 1, scenes[i]) for i in grp], project["aspect"], live_action=video_mode)
+                    board_request([(i + 1, scenes[i]) for i in grp], project["aspect"],
+                                  live_action=video_mode, grid_template=bool(grid_template),
+                                  prior_sheet=bool(previous_sheet))
                     + "\n" + style_text(),
-                    refs[:6], board_dir, name, project["aspect"]))
+                    refs if provider in ("snapgen", "qwen") or is_video_auto_maxplus_provider(provider) else refs[:6],
+                    board_dir, name, project["aspect"], grid_template=bool(grid_template)))
             try:
                 sheet = draw()
-            except (Stopped, HistoryLost, RateLimited):
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                 raise
             except Exception as exc:
                 # Usually ChatGPT refused the sheet (a violent beat): GPT rewrites these shots' prompts
@@ -3290,7 +4716,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                             log(f"GPT แก้ prompt ช็อต {i + 1} ไม่สำเร็จ ({str(fix_exc)[:120]}) — ใช้ prompt เดิม")
                 try:
                     sheet = draw()
-                except (Stopped, HistoryLost, RateLimited):
+                except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                     raise
                 except Exception as again:
                     # A sheet is only a layout guide: never stop the story for it.
@@ -3319,6 +4745,87 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         except tk.TclError:
             pass
 
+    def run_snapgen_scenes(todo, scenes, refs, images_dir):
+        project = state["project"]
+        keyvar = runtime.get("api_key_var") or g.get("api_key_var")
+        api_context = {"api_key": str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip()}
+        if not api_context["api_key"]:
+            raise ImageProviderError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
+        required = {c["name"] for c, _ in characters_needing_refs(project.get("context") or {}, scenes)}
+        jobs = []
+        for i in dict.fromkeys(todo):
+            check_stop()
+            scene = scenes[i]
+            same = project.get("same_person") or {}
+            shown = list(scene.get("characters") or [])
+            shown += [same[c]["person"] for c in shown if c in same and same[c]["person"] not in shown]
+            missing = [c for c in shown if c in required and c not in refs]
+            if missing:
+                raise ImageProviderError("ยังไม่มีรูปเรฟตัวละคร: " + ", ".join(missing))
+            paths = [refs[c] for c in dict.fromkeys(shown) if c in refs]
+            board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
+            if len(paths) + bool(board) > 10:
+                raise ImageProviderError(f"ฉาก {i + 1} มีไฟล์เรฟเกิน 10 รูป — หยุดก่อนส่ง")
+            jobs.append((i, scene_prompt(scene), paths, board))
+        if not jobs:
+            return
+        fetch = runtime.get("fetch_available_credit") or g.get("fetch_available_credit")
+
+        def balance():
+            try:
+                return float(str(fetch()).replace(",", "")) if callable(fetch) else None
+            except Exception:
+                return None
+
+        before = balance()
+        log(f"SnapGen API: สร้างรูปฉากพร้อมกันสูงสุด 5 งาน · รอทำ {len(jobs)} ฉาก"
+            " · เครดิตต่อรูปตรวจจาก History (ยอดบัญชีเปลี่ยนพร้อมกัน)")
+        finished = 0
+        started = time.time()
+
+        def work(job):
+            i, prompt, paths, board = job
+            return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}",
+                              project["aspect"], board=board, api_context=api_context)
+
+        def completed(job, image, error):
+            nonlocal finished
+            i = job[0]
+            if error is None and job[2] and looks_like_reference_sheet(image):
+                error = ImageProviderError(f"ฉาก {i + 1} คล้ายรูปเรฟพื้นหลังเรียบ — เก็บรูปไว้ ตรวจผลก่อนสร้างใหม่")
+            with state["lock"]:
+                if image:
+                    scenes[i]["image"] = image
+                if error is not None:
+                    scenes[i]["error"] = str(error)[:600]
+                else:
+                    scenes[i].pop("error", None)
+                    scenes[i].pop("bad", None)
+                save_project()
+            finished += 1
+            remaining = (time.time() - started) / finished * (len(jobs) - finished)
+            set_progress("images", finished / len(jobs),
+                         f"API พร้อมกันสูงสุด 5 งาน · เสร็จ {finished}/{len(jobs)} (ฉากที่ {i + 1})"
+                         + (f" · เหลือประมาณ {int(remaining // 60)} นาที" if finished < len(jobs) else ""))
+            ui(refresh_table)
+            if error is None:
+                log(f"✓ ฉาก {i + 1} บันทึกแล้ว")
+                ui(follow_shot, i)
+            else:
+                log(f"❌ ฉาก {i + 1}: {error}")
+                raise error
+
+        try:
+            _run_image_jobs(jobs, work, completed, check_stop)
+        finally:
+            after = balance()
+            measured = before - after if before is not None and after is not None else None
+            with state["lock"]:
+                project["last_snapgen_batch_credit"] = {"before": before, "after": after, "balance_change": measured}
+                save_project()
+            if measured is not None:
+                log(f"คิว API 5 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
+
     def stage_images(indices=None):
         project = state["project"]
         check_script_matches_audio()
@@ -3333,6 +4840,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         scenes = project["scenes"]
         todo = indices if indices is not None else [
             i for i, s in enumerate(scenes) if not (s.get("image") and os.path.isfile(s["image"]))]
+        if not video_mode and image_provider_for("images") == "snapgen":
+            run_snapgen_scenes(todo, scenes, refs, images_dir)
+            missing = [i + 1 for i, scene in enumerate(scenes)
+                       if not (scene.get("image") and os.path.isfile(scene["image"]))]
+            if missing:
+                raise ImageProviderError(f"ยังขาดรูปฉาก {', '.join(map(str, missing[:15]))} — ตรวจผลก่อนทำต่อ")
+            log(f"✓ รูปครบ {len(scenes)} ฉาก")
+            if indices is None:
+                verify_images()
+            return
         started, failures_in_row = time.time(), 0
         for n, i in enumerate(todo, 1):
             check_stop()
@@ -3349,12 +4866,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 shown = list(scene.get("characters") or [])
                 # A ghost form also gets its person's picture, so the face stays the same person.
                 shown += [same[c]["person"] for c in shown if c in same and same[c]["person"] not in shown]
-                ref_paths = [refs[c] for c in shown if c in refs][:4]
+                if image_provider_for("images") in ("snapgen", "qwen"):
+                    required = {c["name"] for c, _ in characters_needing_refs(project.get("context") or {}, scenes)}
+                    missing_refs = [c for c in shown if c in required and c not in refs]
+                    if missing_refs:
+                        raise ImageProviderError("ยังไม่มีรูปเรฟตัวละคร: " + ", ".join(missing_refs))
+                    ref_paths = [refs[c] for c in dict.fromkeys(shown) if c in refs]
+                else:
+                    ref_paths = [refs[c] for c in shown if c in refs][:4]
             try:
                 board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
                 scene["image"] = with_retries(f"ฉาก {i + 1}", lambda: make_image(
                     scene_prompt(scene), ref_paths, images_dir, f"scene_{i + 1:03d}", project["aspect"], board=board))
                 if ref_paths and looks_like_reference_sheet(scene["image"]):
+                    if image_provider_for("images") in ("qwen", "maxplus"):
+                        save_project()
+                        raise ImageProviderError(f"ฉาก {i + 1} คล้ายรูปเรฟ — เก็บภาพไว้ ตรวจผลก่อนสร้างใหม่ เพื่อไม่ส่ง API ซ้ำอัตโนมัติ")
                     # The picture came back as a copy of a reference (plain backdrop): draw the scene again
                     # without attachments so every shot is a real scene picture.
                     log(f"ฉาก {i + 1} ออกมาเหมือนรูปอ้างอิง (พื้นหลังเรียบ) — สร้างฉากใหม่")
@@ -3364,7 +4891,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 scene.pop("error", None)
                 scene.pop("bad", None)
                 failures_in_row = 0
-            except (Stopped, HistoryLost, RateLimited):
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                 raise
             except Exception as exc:
                 if scene.get("refine_count", 0) < 2:
@@ -3384,7 +4911,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         ui(refresh_table)
                         ui(follow_shot, i)
                         continue
-                    except (Stopped, HistoryLost, RateLimited):
+                    except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                         raise
                     except Exception as retry_exc:
                         exc = retry_exc
@@ -3600,12 +5127,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             raise RuntimeError(f"ยังไม่มีคลิปช็อต {', '.join(str(i + 1) for i in missing[:20])} — "
                                "กด ▶ ทำต่อ เพื่อเจนคลิปที่ขาดก่อน แล้วค่อยตัดต่อ")
 
-    def stage_video():
+    def stage_video(force=False):
+        if not video_mode:
+            render_narrate_cached(state["project"], state["folder"], ffmpeg_path(), force=force,
+                                  log=log, progress=lambda f, msg: set_progress("video", f, msg), check_stop=check_stop)
+            save_project()
+            return
         if not state["project"].get("images_verified"):
             verify_images()
         project, folder = state["project"], Path(state["folder"])
         ffmpeg = ffmpeg_path()
-        width, height = SIZES.get(project["aspect"], SIZES["16:9"])
+        width, height = (SIZES.get(project["aspect"], SIZES["16:9"]) if video_mode
+                         else narrate_video_size(project))
+        log(f"ส่งออกวิดีโอ {width}×{height}")
         scenes = project["scenes"]
         if video_mode:
             relink_or_report_missing_clips(scenes, folder)
@@ -3714,6 +5248,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(folder / "_preview", ignore_errors=True)
         project["last_video"] = str(final)
+        project["last_video_size"] = [width, height]
         log(f"✓ วิดีโอเสร็จ: {final}")
 
     def update_preview():
@@ -3789,7 +5324,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         value = runtime.get("EXPORT_VIDEO") or g.get("EXPORT_VIDEO")
         return Path(str(value)) if value else export_root() / "video"
 
-    def set_slot_config(cfg, model, duration, aspect):
+    def set_slot_config(cfg, model, duration, aspect, resolution=None):
         """Set the Slot's model, length and picture shape (Tk thread).
 
         Changing the model makes the Slot queue an idle reset of its shape to
@@ -3801,6 +5336,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             page.update_idletasks()
         cfg["duration"].set(duration)
         cfg["aspect"].set(aspect)
+        if resolution and hasattr(cfg.get("resolution"), "set"):
+            cfg["resolution"].set(resolution)
 
     def motion_items(indices):
         scenes = state["project"]["scenes"]
@@ -3853,7 +5390,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 content += [{"type": "image_url", "image_url": {"url": image_data_url(scenes[i]["image"])}} for i in batch]
                 try:
                     reply = parse_json_reply(chat(content))
-                except (Stopped, HistoryLost, RateLimited):
+                except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                     raise
                 except Exception as exc:
                     # Pictures could not be sent: for the rest of this run write from the script and image prompt.
@@ -3977,7 +5514,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                                anchor=story_anchor(index) + seen + reported, request=clip_prompt(scene))
                 try:
                     reply = gpt_look(question)
-                except (Stopped, HistoryLost, RateLimited):
+                except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                     raise
                 except Exception as first:
                     # A ChatGPT hiccup (page reloading, a busy tab) is common: one more try before giving up.
@@ -3986,7 +5523,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     time.sleep(15)
                     check_stop()
                     reply = gpt_look(question)
-            except (Stopped, HistoryLost, RateLimited):
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                 raise
             except Exception as exc:
                 text = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else str(exc)
@@ -4008,7 +5545,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not english:
             try:  # GPT sometimes leaves "english" empty: ask for the translation alone (text only)
                 english = str(gpt_look(TRANSLATE_REQUEST.format(request=clip_prompt(scene))).get("english") or "").strip()
-            except (Stopped, HistoryLost, RateLimited):
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                 raise
             except Exception:
                 english = ""
@@ -4099,7 +5636,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         pass
                 elif answer == "pass" and cuts:
                     until = None  # a camera cut inside the same scene: GPT says keep it all
-        except (Stopped, HistoryLost, RateLimited):
+        except (Stopped, HistoryLost, RateLimited, ImageProviderError):
             raise
         except LookupError:
             pass
@@ -4315,6 +5852,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                                attachment_folder())
             seedance_refs = scene_references(scene, candidates)
             log(f"ช็อต {index + 1}: {SEEDANCE_MODELS[selected_model]} · รูปฉาก 1 + Ref {len(seedance_refs)} รูป")
+        elif selected_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
+            dialogue = bool(scene.get("dialogue"))
+            _, seconds, slow = pick_clip(
+                float(scene.get("shot_seconds") or VIDEO_AUTO_AVG_SECONDS),
+                (economy_on() or bool(scene.get("slow"))) and not dialogue,
+                False,
+                1.0 if dialogue else CLIP_STRETCH,
+            )
+            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = selected_model, seconds, slow
         elif scene.get("clip_model") in SEEDANCE_MODELS:
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
                 float(scene.get("shot_seconds") or VIDEO_AUTO_AVG_SECONDS),
@@ -4348,9 +5894,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             runtime["show_error"] = lambda title, msg="", *a, **k: errors.append(f"{title}: {msg}")
             # This shot's own model / length / Slow 2x (chosen at planning time).
             cfg = runtime["slot_cfg_vars"][slot_index]
-            set_slot_config(cfg, scene.get("clip_model") or VIDEO_AUTO_MODEL,
+            clip_model = scene.get("clip_model") or VIDEO_AUTO_MODEL
+            set_slot_config(cfg, clip_model,
                             str(scene.get("clip_seconds") or GROK_CLIP_SECONDS[0]),
-                            state["project"].get("aspect") or "16:9")
+                            state["project"].get("aspect") or "16:9",
+                            "1080p" if clip_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL) else None)
             runtime["_ai_slow2x_override"] = bool(scene.get("clip_slow"))
             dialogue_var = cfg.get("dialogue")
             if hasattr(dialogue_var, "set") and not scene.get("dialogue"):
@@ -4458,7 +6006,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         try:
             return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i),
                                 attempts=1 if scene.get("clip_model") == VIDEO_CHEAP_MODEL else 2)
-        except (Stopped, HistoryLost, RateLimited):
+        except (Stopped, HistoryLost, RateLimited, ImageProviderError):
             raise
         except Exception as exc:
             if (state["project"] or {}).get("video_model") in SEEDANCE_MODELS:
@@ -4491,7 +6039,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 failures_in_row = 0
                 try:
                     review_clip(scene, i)  # checker 2: pass / use only the first part / should be made again
-                except (Stopped, HistoryLost, RateLimited):
+                except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                     raise
                 except Exception as exc:  # a check must never stop the clips
                     log(f"ตรวจคลิปช็อต {i + 1} ไม่ได้: {str(exc)[:200]}")
@@ -4501,7 +6049,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     update_preview()
                 except Exception as exc:  # a preview must never stop the clips
                     log(f"ทำตัวอย่างไม่ได้: {str(exc)[:200]}")
-            except (Stopped, HistoryLost, RateLimited):
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                 raise
             except Exception as exc:
                 scene["clip_error"] = str(exc)[:300]
@@ -4516,6 +6064,50 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                    "plan": stage_plan, "storyboard": stage_storyboard, "images": stage_images,
                    "motion": stage_motion, "clips": stage_clips, "video": stage_video}
 
+    def render_video_selected(force=False):
+        project = state["project"]
+        if state["busy"]:
+            return
+        if not project or not project.get("scenes"):
+            messagebox.showinfo("เล่าภาพ", "เปิดโปรเจกต์ที่มีรูปฉากก่อน", parent=page)
+            return
+        if force:
+            if not messagebox.askyesno("เรนเดอร์ใหม่ทั้งหมด",
+                    "ทำวิดีโอทุกฉากและทุกรอยต่อใหม่จากรูปที่มีอยู่ โดยไม่ใช้แคช\n"
+                    "ไม่สร้างรูป AI ใหม่ และเก็บวิดีโอไฟล์เดิมไว้\n\nเริ่มเลยไหม?", parent=page):
+                return
+        elif not (Path(state["folder"]) / "_render_cache" / "manifest.json").is_file():
+            if not messagebox.askyesno("สร้างแคชครั้งแรก",
+                    "โปรเจกต์นี้ยังไม่มีแคชจากระบบใหม่ ต้องเรนเดอร์ครั้งแรกหนึ่งรอบ\n"
+                    "ครั้งถัดไปจะทำเฉพาะฉากและรอยต่อที่เปลี่ยน ไม่สร้างรูป AI ใหม่\n\nเริ่มเลยไหม?", parent=page):
+                return
+        relink_scene_images(project, state["folder"])
+        project.update({"film": bool(film_var.get()), "subtitles": bool(subtitle_var.get()), "aspect": desired_aspect(),
+                        "style_mode": style_var.get() if style_var.get() in STYLES else "ปกติ"})
+        project.setdefault("done", {}).pop("video", None)
+        save_project()
+        state["busy"], state["stop"] = True, False
+        start_btn.config(state="disabled")
+
+        def worker():
+            try:
+                stage_video(force=force)
+                project["done"]["video"] = True
+                set_progress("video", 1, "วิดีโอเสร็จแล้ว — กดเปิดวิดีโอ")
+            except Stopped:
+                log("⏸ หยุดแล้ว — ส่วนที่ทำเสร็จเก็บไว้ กดอัปเดตเฉพาะที่แก้เพื่อทำต่อ")
+            except Exception as exc:
+                log(f"❌ ตัดต่อ: {exc}")
+                ui(detail_var.set, str(exc)[:200])
+            finally:
+                save_project()
+                state["busy"] = False
+                ui(lambda: start_btn.config(state="normal"))
+                ui(refresh_all)
+                if project["done"].get("video"):
+                    ui(lambda: (bar.configure(value=100), stage_var.set("วิดีโอเสร็จแล้ว — กดเปิดวิดีโอ")))
+        threading.Thread(target=worker, daemon=True).start()
+
     # ── control ──
     def ask_on_ui(title, message) -> bool:
         """Ask a yes/no question from the worker thread and wait for the answer."""
@@ -4528,7 +6120,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         event.wait()
         return bool(answer.get("yes"))
 
-    def confirm_credits() -> bool:
+    def confirm_credits(character_limit=None) -> bool:
         """Shown after planning (text only, no image credits), with exact numbers."""
         project = state["project"]
         existing = character_refs()
@@ -4541,15 +6133,25 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 return True
             assign_clips(scenes, float(project["duration"]), economy_on())
             apply_selected_video_model(project)
-            sheets = sum(1 for grp in board_groups(scenes, project.get("direction"))
+            sheets = sum(1 for grp in board_groups(scenes, project.get("direction"), pack_in_order=video_mode)
                          if any(not (scenes[i].get("image") and os.path.isfile(scenes[i]["image"])) for i in grp)
                          and not all(scenes[i].get("board") and os.path.isfile(scenes[i]["board"]) for i in grp))
+            selected_model = VIDEO_AUTO_MAXPLUS_MODELS.get(project.get("storyboard_provider"))
+            price_note = ""
+            if sheets and selected_model:
+                usd_total = selected_model["estimated_usd"] * sheets
+                thb_total = selected_model["estimated_thb"] * sheets
+                price_note = (f"\nราคาอ้างอิง {selected_model['estimated_price']}/รูป × {sheets} ชีต "
+                              f"รวมประมาณ ${usd_total:.2f} ≈ ฿{thb_total:.2f} (ราคาอาจเปลี่ยนได้)\n")
             return ask_on_ui(
                 "ออโต้ — ยืนยันใช้เครดิต",
                 f"วางแผนเสร็จแล้ว\n\nไฟล์แนบที่จะใช้ ({len(matched)}): {', '.join(matched[:15]) or '-'}\n"
-                + (f"สตอรี่ชีต {sheets} รูป (ตามซีเควนซ์ ชีตละไม่เกิน 9 ช็อต) + " if sheets else "")
+                + (f"สตอรี่ชีต {sheets} รูป (เรียงช็อต ชีตละ 9 ช่อง; ชีตสุดท้ายตามจำนวนที่เหลือ) + " if sheets else "")
                 + f"รูปฉาก {missing} รูป + คลิปวิดีโอ {len(todo)} คลิป\n"
-                f"   {clip_summary(todo)}\n   (สโลว์×2 = ทำ AI Slow 2x หลังได้คลิป)\n\nเริ่มเลยไหม?")
+                + (f"\nรูปฉากจะสร้างผ่าน GPT Web; สตอรี่บอร์ดเลือก {VIDEO_AUTO_IMAGE_PROVIDER_LABELS.get(project.get('storyboard_provider'), GPT_WEB_LABEL)} "
+                   "แนบแม่แบบตาราง 3x3 และใช้ชีตก่อนหน้าเป็นเรฟความต่อเนื่องตั้งแต่ชีตที่ 2\n" if missing + sheets else "")
+                + price_note
+                + f"   {clip_summary(todo)}\n   (สโลว์×2 = ทำ AI Slow 2x หลังได้คลิป)\n\nเริ่มเลยไหม?")
         ensure_same_person()  # text only: a ghost of a known person is drawn from that person's face
         remake = set(forms_to_remake(existing))
         new_refs = [(c, n) for c, n in characters_needing_refs(project.get("context") or {}, project.get("scenes") or [])
@@ -4561,6 +6163,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                      and not all(scenes[i].get("board") and os.path.isfile(scenes[i]["board"]) for i in grp)
                      and not any(scenes[i].get("board_skipped") for i in grp))
         total = len(new_refs) + sheets + missing
+        if character_limit:
+            new_refs = new_refs[:character_limit]
+            sheets = missing = 0
+            total = len(new_refs)
         if total == 0:
             return True
         people = "\n".join(f"   • {c['name']} — อยู่ใน {n} ฉาก" for c, n in new_refs[:20]) or "   (มีครบแล้ว)"
@@ -4569,6 +6175,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         groups = [c["name"] for c in (project.get("context") or {}).get("characters", []) if is_group_character(c)]
         quota = ("\n⚠ เกิน 120 รูป จะใช้มากกว่า 1 วัน (หยุดรอเมื่อโควตาหมด แล้วกดทำต่อได้)" if total > 120
                  else "\nChatGPT สร้างรูปได้ประมาณ 120 รูปต่อวัน ถ้าโควตาหมดระหว่างทาง โปรแกรมจะหยุดรอ แล้วกดทำต่อได้")
+        if project.get("image_provider") == "snapgen":
+            quota = (f"\nสร้างรูปผ่าน SnapGen GPT API · Image 2.5 Lower (720p ตายตัว)"
+                     f"\nราคาตามเอกสาร 2 เครดิต/รูป รวมประมาณ {total * 2} เครดิตก่อนส่วนลด"
+                     "\nโปรแกรมบันทึกยอดเครดิตก่อน–หลังแต่ละรูป")
+        elif project.get("image_provider") == "qwen":
+            quota = ("\nสร้างรูปด้วย Qwen 2.1 ใน ComfyUI บนเครื่องนี้ ไม่ใช้เครดิต SnapGen"
+                     "\nแนบเรฟตามฉากเหมือนเดิม ประมวลผลทีละรูปตามคิว GPU")
+        elif project.get("image_provider") == "per_stage":
+            quota = ("\nเลือกผู้สร้างรูปแยกตามหัวข้อ: รูปตัวละคร / สตอรี่ชีต / รูปฉาก"
+                     "\nเลือกได้ GPT Chrome / SnapGen API / Qwen ในเครื่อง"
+                     "\nขั้นที่เลือก API: ราคาในเอกสาร 2 เครดิต/รูปก่อนส่วนลด และบันทึกเครดิตก่อน–หลัง")
         return ask_on_ui(
             "เล่าภาพ — ยืนยันใช้เครดิต",
             f"วางแผนเสร็จแล้ว จะสร้างรูปทั้งหมด {total} รูป\n\n"
@@ -4624,10 +6241,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         dialog.wait_window()
         return result["value"]
 
-    def start_pipeline(only=None):
+    def start_pipeline(only=None, character_limit=None):
         project = state["project"]
         if state["busy"]:
             return
+        if project and not video_mode:
+            restored = relink_scene_images(project, state["folder"])
+            if restored:
+                save_project()
+                refresh_table()
+                log("ใช้รูปเดิมที่มีอยู่แล้ว — ฉาก " + ", ".join(map(str, restored)))
         state["history_renewed"] = False  # a lost chat may be replaced once per run
         if not project or not project.get("script"):
             messagebox.showinfo("เล่าภาพ", "เลือกไฟล์บทก่อน", parent=page)
@@ -4736,22 +6359,31 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     current = key
                     if project["done"].get(key) and key != "video":
                         continue
+                    if key in ("characters", "storyboard", "images"):
+                        state["active_image_stage"] = key
+                        image_provider_for(key)
                     if key in ("characters", "storyboard", "images") and not confirmed:
-                        if not confirm_credits():
+                        if not confirm_credits(character_limit=character_limit):
                             log("⏸ ยังไม่สร้างรูป — แผนฉากยังอยู่ แก้แล้วกดเริ่มเพื่อทำต่อได้")
                             ui(stage_var.set, "รอยืนยันก่อนสร้างรูป")
                             return
                         confirmed = True
                     ui(refresh_stages, key)
                     log(f"▶ {dict((k, t) for k, t, _w in stages)[key]}")
-                    STAGE_FUNCS[key]()
-                    project["done"][key] = True
+                    if key == "characters" and character_limit:
+                        stage_characters(limit=character_limit)
+                    else:
+                        STAGE_FUNCS[key]()
+                        project["done"][key] = True
                     save_project()
                     ui(refresh_stages)
                     if key == "plan" and review_var.get() and not only:
                         set_progress("plan", 1.0, "หยุดให้ตรวจแผน — แก้พรอมต์ได้ แล้วกดเริ่มเพื่อทำต่อ")
                         log("⏸ แผนพร้อมแล้ว ตรวจ/แก้ แล้วกด ▶ เริ่ม เพื่อสร้างรูปต่อ")
                         return
+                if character_limit:
+                    ui(stage_var.set, "ลองรูปตัวละครแล้ว — กดทำต่อเพื่อทำขั้นที่เหลือ")
+                    return
                 ui(lambda: (bar.configure(value=100), stage_var.set("เสร็จแล้ว 100%")))
                 ui(detail_var.set, f"วิดีโอ: {project.get('last_video', '')}")
                 notify = g.get("_snapgen_notify_done")
@@ -4771,6 +6403,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             finally:
                 save_project()
                 state["busy"] = False
+                state.pop("active_image_stage", None)
                 ui(lambda: start_btn.config(state="normal", text="▶ ทำต่อ"))
                 ui(refresh_all)
         threading.Thread(target=worker, daemon=True).start()
@@ -4928,7 +6561,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         if (project["scenes"][i].get("image"), _mtime(project["scenes"][i].get("image"))) != before[i]]
                 failed = [i + 1 for i in selected if i + 1 not in made]
                 if made:
-                    log(f"สร้างรูปใหม่เสร็จ: ช็อต {', '.join(map(str, made))} — กด 'ต่อวิดีโอใหม่' เพื่อทำวิดีโออีกรอบ")
+                    log(f"สร้างรูปใหม่เสร็จ: ช็อต {', '.join(map(str, made))} — กด '{render_action_label}' เพื่อทำวิดีโออีกรอบ")
                 if failed:
                     log(f"❌ ยังไม่ได้รูปใหม่: ช็อต {', '.join(map(str, failed))} — ดูข้อความ error ด้านบน")
         threading.Thread(target=worker, daemon=True).start()
@@ -5024,7 +6657,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         ui(stage_var.set, "แก้คำสั่งแล้ว ยังไม่เจนวิดีโอ")
                         return
                     remake_clips(selected)
-                log("✓ แก้ช็อตเสร็จ — กด 'ต่อวิดีโอใหม่' เพื่อรวมวิดีโออีกรอบ")
+                log(f"✓ แก้ช็อตเสร็จ — กด '{render_action_label}' เพื่อรวมวิดีโออีกรอบ")
             except Exception as exc:
                 log(f"❌ แก้ช็อตไม่สำเร็จ: {exc}")
             finally:
@@ -5092,10 +6725,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 imgmod = runtime.get("_imgmod") or g.get("_imgmod")
                 current = scene["image"]
                 ensure_bodies()
+                provider = image_provider_for("images")
                 # Image 1 = the picture to change; image 2 = its storyboard panel (layout); then identities.
                 board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
                 refs = [p for p in (attachments_for(scene) if video_mode else
-                                    [character_refs().get(c) for c in scene.get("characters") or []]) if p][:3]
+                                    [character_refs().get(c) for c in scene.get("characters") or []]) if p]
+                if provider not in ("qwen", "maxplus"):
+                    refs = refs[:3]
                 prompt = (f"แก้ไขรูปที่ 1 (รูปเดิมของช็อตนี้) เฉพาะจุดนี้: {wish}\n"
                           "คงองค์ประกอบ ตัวละคร มุมกล้อง แสง และสไตล์เดิมทั้งหมด เปลี่ยนเฉพาะสิ่งที่สั่ง ภาพเดียวเต็มเฟรม ไม่มีตัวหนังสือ.\n"
                           "รูปนี้ต้องยังเป็นช็อตเดิมของเรื่องเดิม: ตัวละครเป็นคน/สิ่งมีชีวิตเดิม หน้าตาและรูปร่างเดิม "
@@ -5105,12 +6741,36 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                              if board else "")
                           + ("\n" + "\n".join(f"รูปที่ {k}: หน้าตา/รูปร่าง/ชุดของ {Path(p).stem} เท่านั้น"
                                                for k, p in enumerate(refs, 3 if board else 2)) if refs else ""))
-                out = with_retries(f"แก้ฉาก {index + 1}", lambda: imgmod.generate_image(
-                    prompt, output_dir=str(Path(current).parent), name_hint=f"scene_{index + 1:03d}_edit", is_edit=True,
-                    ref_images=[base64.b64encode(Path(p).read_bytes()).decode("ascii")
-                                for p in [current, *([board] if board else []), *refs]],
-                    aspect_ratio=project["aspect"], save_sidecar=False,
-                    conversation_state=project.setdefault("conversation", {}), conversation_save_fn=save_project))
+                edit_refs = [current, *([board] if board else []), *refs]
+                if provider == "maxplus" and len(edit_refs) > 5:
+                    raise ImageProviderError(
+                        f"แก้ฉาก {index + 1}: MaxPlus รับรูปอ้างอิงได้สูงสุด 5 รูป (รวมรูปเดิมและสตอรี่บอร์ด)"
+                    )
+                if provider == "qwen":
+                    log(f"แก้ฉาก {index + 1}: Qwen 2.1 ในเครื่อง · แนบไฟล์ {len(edit_refs)} รูป")
+                    out = qwen_generate_image(prompt, edit_refs, str(Path(current).parent),
+                                              f"scene_{index + 1:03d}_edit", project["aspect"],
+                                              high_res=bool(project.get("qwen_2k")))
+                elif provider == "snapgen":
+                    out = generate_via_snapgen(prompt, edit_refs, Path(current).parent,
+                                               f"scene_{index + 1:03d}_edit", project["aspect"])
+                    if project.get("qwen_2k"):
+                        if project.get("upscale_provider") in UPSCALE_MODELS:
+                            out = local_ai_upscale_2k(out, project["aspect"], str(Path(current).parent),
+                                                     f"scene_{index + 1:03d}_edit",
+                                                     UPSCALE_MODELS[project["upscale_provider"]])
+                        else:
+                            out = qwen_image_to_image_2k(out, refs, prompt, project["aspect"],
+                                                        str(Path(current).parent), f"scene_{index + 1:03d}_edit")
+                elif provider == "maxplus":
+                    out = generate_via_maxplus(prompt, edit_refs, Path(current).parent,
+                                               f"scene_{index + 1:03d}_edit", project["aspect"])
+                else:
+                    out = with_retries(f"แก้ฉาก {index + 1}", lambda: imgmod.generate_image(
+                        prompt, output_dir=str(Path(current).parent), name_hint=f"scene_{index + 1:03d}_edit", is_edit=True,
+                        ref_images=[base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in edit_refs],
+                        aspect_ratio=project["aspect"], save_sidecar=False,
+                        conversation_state=project.setdefault("conversation", {}), conversation_save_fn=save_project))
                 target = Path(current).with_suffix(Path(out).suffix or ".png")
                 Path(current).unlink(missing_ok=True)
                 shutil.move(str(out), str(target))
@@ -5184,16 +6844,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         scenes = (state["project"] or {}).get("scenes") or []
         if not selection or int(selection[0]) >= len(scenes):
             return
+        if not video_mode and not state["busy"]:
+            if relink_scene_images(state["project"], state["folder"]):
+                save_project()
+                refresh_table()
         image = scenes[int(selection[0])].get("image")
-        if scenes[int(selection[0])].get("error"):
-            preview.config(image="", text="เจนไม่ได้:\n" + error_reason(scenes[int(selection[0])]["error"]), wraplength=280)
-            return
         if not image or not os.path.isfile(image):
             preview.config(image="", text=scenes[int(selection[0])].get("error") or "ยังไม่มีรูป", wraplength=280)
             return
         try:
             from PIL import Image, ImageTk
-            pic = Image.open(image)
+            with Image.open(image) as original:
+                pic = original.convert("RGB")
             # Fit the preview column (portrait pictures use its height).
             pic.thumbnail((max(120, preview_box.winfo_width() - 8), max(120, preview_box.winfo_height() - 8)))
             photo = ImageTk.PhotoImage(pic)
@@ -5201,6 +6863,80 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             preview.image = photo
         except Exception as exc:
             preview.config(image="", text=f"เปิดรูปไม่ได้: {exc}")
+
+    def use_scene_image(source=None):
+        selected = table.selection()
+        if state["busy"]:
+            messagebox.showinfo("เล่าภาพ", "หยุดงานและรอให้เสร็จก่อนเปลี่ยนรูป", parent=page)
+            return
+        if not state["project"] or len(selected) != 1:
+            messagebox.showinfo("เล่าภาพ", "เลือกฉากเดียวในตารางก่อนวางหรือเปลี่ยนรูป", parent=page)
+            return
+        if source is None:
+            source = filedialog.askopenfilename(parent=page, title="เลือกรูปแทนฉากที่เลือก",
+                filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp")])
+            if not source:
+                return
+        index = int(selected[0])
+        try:
+            with state["lock"]:
+                import_scene_image(state["project"], state["folder"], index, source)
+                save_project()
+            refresh_all()
+            show_preview()
+            log(f"ใช้รูปใหม่ฉาก {index + 1} แล้ว — เก็บบทและตัวละครของฉากเดิมครบ")
+        except Exception as exc:
+            messagebox.showerror("เล่าภาพ", f"รับรูปใหม่ไม่สำเร็จ: {exc}", parent=page)
+
+    def paste_scene_image(_event=None):
+        from PIL import Image, ImageGrab
+        try:
+            clip = ImageGrab.grabclipboard()
+            if isinstance(clip, (list, tuple)):
+                clip = next((p for p in clip if Path(p).suffix.lower() in
+                             (".png", ".jpg", ".jpeg", ".webp", ".bmp")), None)
+            if clip is None or not isinstance(clip, (Image.Image, str)):
+                messagebox.showinfo("เล่าภาพ", "คลิปบอร์ดยังไม่มีรูปหรือไฟล์รูป", parent=page)
+            else:
+                use_scene_image(clip)
+        except Exception as exc:
+            messagebox.showerror("เล่าภาพ", f"วางรูปไม่สำเร็จ: {exc}", parent=page)
+        return "break"
+
+    def reload_scene_images():
+        if state["project"] and not state["busy"]:
+            with state["lock"]:
+                changed = relink_scene_images(state["project"], state["folder"])
+                if changed:
+                    save_project()
+            refresh_all()
+            show_preview()
+
+    if not video_mode:
+        image_tools = tk.Frame(preview_box, bg="#F1F5F9")
+        image_tools.pack(side="bottom", fill="x")
+        for title, action in (("เลือกรูป", use_scene_image), ("วางรูป", paste_scene_image),
+                              ("โหลดใหม่", reload_scene_images)):
+            tk.Button(image_tools, text=title, command=action).pack(side="left", expand=True, fill="x")
+        table.bind("<Control-v>", paste_scene_image)
+        preview.bind("<Control-v>", paste_scene_image)
+        enable_drop(preview_box, use_scene_image)
+
+        def watch_scene_images():
+            try:
+                if state["project"] and not state["busy"]:
+                    with state["lock"]:
+                        changed = relink_scene_images(state["project"], state["folder"])
+                        if changed:
+                            save_project()
+                    if changed:
+                        refresh_all()
+                        show_preview()
+            except OSError:
+                pass  # A file may be in the middle of a copy; retry on the next tick.
+            finally:
+                page.after(1500, watch_scene_images)
+        page.after(1500, watch_scene_images)
 
     def run_redraw_queue():
         queue = state.get("redraw_queue") or []

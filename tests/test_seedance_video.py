@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "snapgen_modules"))
 import snapgen_seedance_video as S
+import snapgen_grok_lower as G
 from snapgen_mobile_controller import MobileController
 
 
@@ -114,6 +115,7 @@ def test_saved_slot_restores_seedance_instead_of_recovered_default():
              for model in S.MODELS]
     slots = [{key: Var("old") for key in item} for item in saved]
     ns = {"_saved_local_slot_configs": saved, "g": {"slot_cfg_vars": slots},
+          "GROK_LITE_MODEL": G.GROK_LITE_MODEL,
           "SEEDANCE_MODELS": S.MODELS, "_normalize_seedance_settings": S.normalize_settings}
     exec(compile(ast.Module(body=[block], type_ignores=[]), "launcher-startup", "exec"), ns)
     assert [{key: var.get() for key, var in item.items()} for item in slots] == saved
@@ -130,7 +132,8 @@ def test_dispatch_sends_seedance_references_and_leaves_grok_route(tmp_path):
          "run_json": lambda cmd, **kw: calls.append(cmd) or {"uuid": "test-job"}}
     node = next(node for node in ast.walk(launcher_tree()) if isinstance(node, ast.FunctionDef)
                 and node.name == "_generate_one_with_grok_lower")
-    ns = dict(g=g, GROK_LOWER_MODEL="grok-lower", SEEDANCE_MODELS=S.MODELS,
+    ns = dict(g=g, GROK_LOWER_MODEL="grok-lower", GROK_LITE_MODEL=G.GROK_LITE_MODEL,
+              SEEDANCE_MODELS=S.MODELS,
               _video_submit_context=SimpleNamespace(seedance_references=refs),
               _build_seedance_command=S.build_command, _original_generate_one=lambda *args: "old-route")
     exec(compile(ast.Module(body=[node], type_ignores=[]), "dispatch", "exec"), ns)
@@ -155,7 +158,12 @@ def test_auto_model_selection_save_then_restart_load(tmp_path):
     ns = dict(state=state, Path=Path, json=json, os=__import__("os"), SEEDANCE_MODELS=S.MODELS,
               video_model_var=Var(S.MODELS["sd-2-5-lower"]), project_path=lambda: tmp_path / "project.json",
               refresh_clip_info=lambda: None, last_project_file=lambda: tmp_path / "last.txt", video_mode=True,
-              STYLES={}, last_style=lambda: "ปกติ", refresh_all=lambda: None)
+              STYLES={}, last_style=lambda: "ปกติ", refresh_all=lambda: None,
+              VIDEO_MODEL_LABELS={"auto": "อัตโนมัติ (Grok / Vela)"},
+              VIDEO_AUTO_IMAGE_PROVIDER_LABELS={"gpt_web": "GPT Web"},
+              VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS={"gpt_web": "GPT Web"},
+              GPT_WEB_LABEL="GPT Web", image_provider_var=Var("GPT Web"),
+              refresh_maxplus_model_info=lambda: None)
     for key, value in dict(script_var="", audio_var="", aspect_var="16:9", count_var="36", subtitle_var=False,
                            economy_var=True, film_var=False, style_var="ปกติ").items():
         ns[key] = Var(value)
@@ -178,6 +186,8 @@ def test_desktop_menu_uses_each_model_capabilities():
         menus = {key: tk.OptionMenu(root, var, var.get()) for key, var in cfg.items()}
         g = {"slot_cfg_vars": [cfg]}
         ns = dict(g=g, root=root, SEEDANCE_MODELS=S.MODELS, SEEDANCE_DURATIONS=S.DURATIONS,
+                  GROK_LITE_MODEL=G.GROK_LITE_MODEL, GROK_LITE_LABEL=G.GROK_LITE_LABEL,
+                  GROK_LITE_RESOLUTIONS=G.GROK_LITE_RESOLUTIONS,
                   SEEDANCE_ASPECTS=S.ASPECTS, _normalize_seedance_settings=S.normalize_settings,
                   GROK_LOWER_DURATIONS=("6", "10", "15"), VIDEO_AUTO_ASPECT="อัตโนมัติ",
                   VIDEO_AUTO_ASPECT_LABEL="อัตโนมัติ (ตามรูป)")
