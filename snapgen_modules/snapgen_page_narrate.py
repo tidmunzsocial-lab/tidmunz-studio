@@ -7019,13 +7019,34 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         state["active_image_stage"] = "images"
         project.setdefault("identity_repairs_pending", {})[str(index)] = record
         save_project()
-        start_btn.config(state="disabled")
+        bar.configure(value=0)
+        stage_var.set(f"กำลังแก้เรฟช็อต {index + 1} — รอเลือกผู้สร้างรูป")
+        detail_var.set("กำลังเปิดตัวเลือก GPT Web (Chrome) / SnapGen API — กรุณาเลือกหนึ่งรายการ")
+        start_btn.config(state="disabled", text="⏳ กำลังแก้เรฟ…")
+        outcome = {"stage": "", "detail": "", "request_started": False}
         def worker():
             try:
                 check_stop()
                 log(f"แก้เรฟช็อต {index + 1}: {record['character']} · {Path(record['reference']).name} · ส่ง Context ตัวละครครบ")
+                provider = image_provider_for("images")
+                provider_labels = VIDEO_AUTO_SCENE_PROVIDER_LABELS if video_mode else IMAGE_PROVIDER_LABELS
+                provider_label = provider_labels.get(provider, provider)
+                provider_wait = {
+                    "gpt_web": "กำลังรอ GPT Web ผ่าน Chrome ส่งรูปกลับ — ดูสถานะ Chrome ด้านล่างได้",
+                    "snapgen": "กำลังรอ SnapGen API สร้างและส่งรูปกลับ",
+                    "qwen": "กำลังรอ Qwen ในเครื่องสร้างรูปเสร็จ",
+                    "maxplus": "กำลังรอ MaxPlus API สร้างและส่งรูปกลับ",
+                    "maxplus_gpt_image_2_4k": "กำลังรอ MaxPlus API สร้างและส่งรูปกลับ",
+                    "maxplus_seedream_5_pro_2k": "กำลังรอ MaxPlus API สร้างและส่งรูปกลับ",
+                }.get(provider, "กำลังรอผู้สร้างรูปส่งผลกลับ")
+                ui(lambda: (stage_var.set(f"แก้เรฟช็อต {index + 1} · {provider_label}"),
+                            detail_var.set(provider_wait),
+                            start_btn.config(text="⏳ รอผลแก้เรฟ…")))
+                log(f"แก้เรฟช็อต {index + 1}: เลือก {provider_label} — {provider_wait}")
+                check_stop()
                 images_dir = Path(state["folder"]) / "images"
                 images_dir.mkdir(parents=True, exist_ok=True)
+                outcome["request_started"] = True
                 out = make_image(scene_prompt(scene), [record["reference"]], images_dir,
                                  name, project["aspect"], board=source, identity_repair=record)
                 if scene.get("image") != source or file_digest(source) != source_digest:
@@ -7041,16 +7062,30 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 project["images_verified"] = False
                 project["identity_repairs_pending"].pop(str(index), None)
                 log(f"✓ แก้เรฟช็อต {index + 1} ได้รูปใหม่แล้ว — ตรวจภาพก่อนกดสร้างคลิป; เก็บรูป/คลิปเดิมไว้ในประวัติ")
+                outcome.update(stage=f"แก้เรฟช็อต {index + 1} เสร็จแล้ว", detail="รูปใหม่บันทึกแล้ว ตรวจภาพก่อนกดสร้างคลิป")
             except Stopped:
-                log("หยุดแก้เรฟ — รูปและคลิปเดิมยังอยู่")
+                if outcome["request_started"]:
+                    log("หยุดแก้เรฟ — รูปและคลิปเดิมยังอยู่; คำขอที่ส่งแล้วอาจยังทำงาน ตรวจผลก่อนส่งซ้ำ")
+                    outcome.update(stage=f"หยุดแก้เรฟช็อต {index + 1}",
+                                   detail="คำขอที่ส่งแล้วอาจยังทำงาน ตรวจผลก่อนส่งซ้ำ; รูปเดิมยังอยู่")
+                else:
+                    log("ยกเลิกแก้เรฟก่อนส่งรูป — ยังไม่ได้ส่งคำขอและรูปเดิมยังอยู่")
+                    outcome.update(stage=f"ยกเลิกแก้เรฟช็อต {index + 1}", detail="ยังไม่ได้ส่งคำขอสร้างรูป")
             except Exception as exc:
                 log(f"❌ แก้เรฟช็อต {index + 1}: {exc}")
+                outcome.update(stage=f"แก้เรฟช็อต {index + 1} ไม่สำเร็จ — ตรวจข้อความ error ก่อนทำต่อ",
+                               detail=str(exc)[:240])
             finally:
                 save_project()
                 state["busy"] = False
                 state.pop("active_image_stage", None)
-                ui(lambda: start_btn.config(state="normal", text="▶ ทำต่อ"))
-                ui(refresh_all)
+                def finish_ui():
+                    refresh_all()
+                    if outcome["stage"]:
+                        stage_var.set(outcome["stage"])
+                        detail_var.set(outcome["detail"])
+                    start_btn.config(state="normal", text="▶ ทำต่อ")
+                ui(finish_ui)
         threading.Thread(target=worker, daemon=True).start()
 
     def regenerate_selected(only=None, ask=True):
