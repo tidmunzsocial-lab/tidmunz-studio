@@ -61,11 +61,13 @@ def chooser_scope(tmp_path, answers):
     state = {"project": {"done": {}, "storyboard_provider": "maxplus_gpt_image_2_4k",
                          "scenes": [{"image": "keep-existing.png"}]}, "busy": True}
     scope = dict(vars(N), state=state, video_mode=True, page=None,
+                 refresh_snapgen_credit_warning=lambda: None,
                  tk=SimpleNamespace(Toplevel=Window, Label=Widget, Button=Button),
                  root=SimpleNamespace(after=lambda delay, fn: fn()), log=logs.append)
     scope["save_project"] = lambda: (tmp_path / "project.json").write_text(
         json.dumps(state["project"]), encoding="utf-8")
     load(scope, "image_provider_for")
+    load(scope, "confirm_snapgen_credit_warning")
     return scope, dialogs, logs
 
 
@@ -81,8 +83,10 @@ def test_stop_resume_and_restart_ask_once_per_run_and_keep_storyboard(tmp_path):
                  refresh_all=lambda: None, ui=lambda fn, *a: fn(*a), g={},
                  stage_var=Widget(), detail_var=Widget(), bar=Widget(), start_btn=Widget())
     worker = load(scope, "worker", "start_pipeline")
+    scope["state"]["snapgen_credit_acceptance"] = {"ceiling": 999}
     assert scope["image_provider_for"]("storyboard") == "maxplus_gpt_image_2_4k"
     worker()
+    assert "snapgen_credit_acceptance" not in scope["state"]
     assert seen == ["snapgen"] * 8 and len(dialogs) == 1
     restored = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
     assert restored["image_stage_providers"]["images"] == "snapgen"
@@ -119,7 +123,8 @@ def batch_scope(tmp_path, count=12):
                  save_project=lambda: (tmp_path / "project.json").write_text(json.dumps(project)),
                  looks_like_reference_sheet=lambda image: False, set_progress=noop, log=noop,
                  ui=lambda fn, *args: fn(*args), refresh_table=noop, follow_shot=noop,
-                 image_provider_for=lambda stage: "snapgen", verify_images=noop)
+                 image_provider_for=lambda stage: "snapgen", verify_images=noop,
+                 refresh_snapgen_credit_warning=noop)
     for name in ("check_script_matches_audio", "ensure_story_in_history", "ensure_continuity",
                  "ensure_bodies", "research_ghosts"):
         scope[name] = noop
@@ -178,7 +183,7 @@ def test_video_auto_sends_real_snapgen_multipart_with_panel_first(tmp_path, monk
     requests = []
     def reply(request, **kwargs):
         requests.append(request)
-        return io.BytesIO(json.dumps({"image": "data:image/png;base64," +
+        return io.BytesIO(json.dumps({"used_credit": 1, "image": "data:image/png;base64," +
                          base64.b64encode(generated).decode("ascii")}).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     scope["stage_images"]()

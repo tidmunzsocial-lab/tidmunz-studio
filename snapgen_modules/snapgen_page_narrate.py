@@ -38,6 +38,10 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 try:
+    from .snapgen_credit_guard import image_billing, image_response_items, record_image_billing, credit_consent_required, credit_warning_text
+except ImportError:
+    from snapgen_credit_guard import image_billing, image_response_items, record_image_billing, credit_consent_required, credit_warning_text
+try:
     from .snapgen_seedance_video import MODELS as SEEDANCE_MODELS, auto_clip_settings, scene_references
 except ImportError:
     try:
@@ -156,6 +160,11 @@ def _run_image_jobs(jobs, work, completed, check_stop):
                     failure = exc
             while failure is None and len(pending) < 5:
                 try:
+                    check_stop()
+                except Exception as exc:
+                    failure = exc
+                    break
+                try:
                     job = next(remaining)
                 except StopIteration:
                     break
@@ -238,7 +247,7 @@ def _save_image_result(result, target: Path, api_key: str = "") -> str:
 
 
 def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
-                  aspect: str, api_key: str) -> str:
+                  aspect: str, api_key: str, on_credit=None) -> str:
     if not api_key:
         raise RuntimeError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
     files = [("files", p, Path(p).read_bytes()) for p in refs if Path(p).is_file()]
@@ -248,36 +257,34 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
         SNAPGEN_IMAGE_URL, data=body, method="POST",
         headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
                  "Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    payload = None
+    image = None
+    billing = {"task_id": None, "used_credit": None}
+
+    def report_credit(value, final=False):
+        nonlocal billing
+        found = image_billing(value, billing["task_id"])
+        if found["used_credit"] == 0 and not final and not _image_result(value):
+            found["used_credit"] = None  # Queued jobs may report zero before billing.
+        if found["used_credit"] is not None:
+            if on_credit and found != billing:
+                on_credit(found)
+            billing = found
+        elif found["task_id"]:
+            billing["task_id"] = found["task_id"]
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
-            raw = response.read().decode("utf-8", "replace")
+            for candidate in image_response_items(response):
+                payload = candidate
+                report_credit(payload)
+                image = _image_result(candidate)
+                if image:
+                    break
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:800]
         raise RuntimeError(f"SnapGen GPT Image ตอบ HTTP {exc.code}: {detail}") from exc
-    payload = None
-    try:
-        json.loads(raw)
-        response_items = [raw]
-    except ValueError:
-        response_items = raw.splitlines()
-    for line in response_items:
-        line = line.strip()
-        if line.startswith("data:"):
-            line = line[5:].strip()
-        if not line or line == "[DONE]":
-            continue
-        try:
-            candidate = json.loads(line)
-        except ValueError:
-            continue
-        payload = candidate
-        image = _image_result(candidate)
-        if image:
-            break
-    else:
-        image = _image_result(payload)
     if not image and isinstance(payload, dict):
-        task_id = next((payload.get(k) for k in ("uuid", "history_uuid", "conversion_uuid", "id") if payload.get(k)), None)
+        task_id = billing["task_id"]
         if task_id:
             for _ in range(180):
                 poll = urllib.request.Request(
@@ -286,6 +293,7 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
                              "Accept": "application/json"})
                 with urllib.request.urlopen(poll, timeout=60) as response:
                     payload = json.load(response)
+                report_credit(payload)
                 image = _image_result(payload)
                 if image:
                     break
@@ -300,6 +308,18 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
                 time.sleep(3)
     if not image:
         raise RuntimeError("SnapGen GPT Image ไม่ได้ส่งไฟล์ภาพกลับมา")
+    if on_credit and billing["used_credit"] is None:
+        if billing["task_id"]:
+            try:
+                poll = urllib.request.Request(
+                    "https://api.snapgen.ai/uapi/v1/history/" + urllib.parse.quote(billing["task_id"], safe=""),
+                    headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT, "Accept": "application/json"})
+                with urllib.request.urlopen(poll, timeout=15) as response:
+                    report_credit(json.load(response), final=True)
+            except (OSError, ValueError):
+                pass  # Keep the paid image; unknown billing requires explicit consent.
+        if billing["used_credit"] is None:
+            on_credit(billing)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     target = Path(output_dir) / f"{name}_snapgen.png"
     return _save_image_result(image, target, api_key)
@@ -2854,6 +2874,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 if not (scene.get("clip") and os.path.isfile(scene["clip"])):
                     scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = auto_clip_settings(model, scene)
     detail_var = tk.StringVar(value="")
+    credit_warning_var = tk.StringVar(value="")
 
     def slot_settings():
         """(model, clip seconds, aspect) from the Slot the auto mode drives."""
@@ -3148,6 +3169,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     bar.pack(fill="x")
     tk.Label(progress_row, textvariable=stage_var, bg=bg, fg="#0F172A", font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill="x", pady=(4, 0))
     tk.Label(progress_row, textvariable=detail_var, bg=bg, fg="#475569", anchor="w").pack(fill="x")
+    credit_warning_label = tk.Label(progress_row, textvariable=credit_warning_var, bg=bg,
+                                   fg="#B91C1C", anchor="w", justify="left", wraplength=1050)
     stage_row = tk.Frame(box, bg=bg)
     stage_row.pack(fill="x", padx=8, pady=(2, 4))
     stage_labels = {}
@@ -3288,6 +3311,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return export_root() / work_dir_name / "_last_project.txt"
 
     def show_project(folder, project):
+        state.pop("snapgen_credit_acceptance", None)
         state["folder"] = str(folder)
         state["project"] = project
         if not video_mode:
@@ -3335,6 +3359,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         save_project()
         refresh_all()
         refresh_clip_info()
+
+        refresh_snapgen_credit_warning()
 
     def load_saved_project(folder, quiet=False) -> bool:
         """Reopen a story's work folder (project.json) as it was, without needing the script file."""
@@ -3575,6 +3601,70 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             message = "".join(str(p.get("text") or "") if isinstance(p, dict) else str(p) for p in message)
         return str(message)
 
+    def refresh_snapgen_credit_warning():
+        project = state.get("project") or {}
+        warning = project.get("snapgen_credit_warning")
+        if warning:
+            text = credit_warning_text(warning)
+            if not credit_consent_required(project, state.get("snapgen_credit_acceptance")):
+                text += "\nยอมรับค่าใช้จ่ายเฉพาะรอบทำงานนี้แล้ว"
+            credit_warning_var.set(text)
+            credit_warning_label.pack(fill="x", pady=(4, 0))
+        else:
+            credit_warning_var.set("")
+            credit_warning_label.pack_forget()
+
+    def confirm_snapgen_credit_warning():
+        project = state["project"]
+        if not credit_consent_required(project, state.get("snapgen_credit_acceptance")):
+            return "snapgen"
+        answer, event = {}, threading.Event()
+
+        def ask():
+            warning = project["snapgen_credit_warning"]
+            win = tk.Toplevel(page)
+            win.title("SnapGen — ยืนยันเครดิตก่อนทำต่อ")
+            win.transient(root)
+            win.resizable(False, False)
+            tk.Label(win, text=credit_warning_text(warning), fg="#B91C1C", wraplength=600,
+                     justify="left", font=("TkDefaultFont", 11, "bold")).pack(padx=24, pady=(20, 10))
+            tk.Label(win, text="งาน API ที่ส่งไปแล้วอาจหักเครดิตต่อได้ กดทำต่อไม่ข้ามคำเตือนนี้\n"
+                     "GPT Chrome ใช้ช่องทางเดิมของโปรแกรม", justify="left").pack(padx=24, pady=8)
+            consent = tk.BooleanVar(master=win, value=False)
+
+            def choose(provider):
+                if provider == "snapgen":
+                    if not consent.get():
+                        return
+                    state["snapgen_credit_acceptance"] = {
+                        "ceiling": warning.get("used_credit") or 0,
+                        "allow_unknown": warning.get("used_credit") is None or bool(warning.get("unverified")),
+                    }
+                answer["provider"] = provider
+                refresh_snapgen_credit_warning()
+                win.destroy()
+
+            cost = warning.get("used_credit")
+            consent_text = ("ฉันอ่านแล้ว และยอมรับให้ API ทำต่อในรอบนี้ทั้งที่ยังยืนยันราคาต่อรูปไม่ได้"
+                            if cost is None or warning.get("unverified") else
+                            f"ฉันอ่านแล้ว และยอมรับราคา {cost:g} เครดิตต่อรูป สำหรับรอบนี้")
+            api = tk.Button(win, text="ยอมรับและใช้ SnapGen API ต่อ", state="disabled", width=42,
+                            command=lambda: choose("snapgen"))
+            tk.Checkbutton(win, text=consent_text, variable=consent,
+                           command=lambda: api.config(state="normal" if consent.get() else "disabled")).pack(padx=24, pady=8)
+            api.pack(padx=24, pady=5)
+            tk.Button(win, text="เปลี่ยนเป็น GPT Chrome", width=42,
+                      command=lambda: choose("gpt_web")).pack(padx=24, pady=5)
+            tk.Button(win, text="หยุดไว้ก่อน", command=win.destroy).pack(pady=(8, 16))
+            win.bind("<Destroy>", lambda e: event.set() if e.widget == win else None)
+            win.grab_set()
+
+        root.after(0, ask)
+        event.wait()
+        if not answer.get("provider"):
+            raise Stopped()
+        return answer["provider"]
+
     def image_provider_for(stage="images"):
         project = state["project"]
         if video_mode:
@@ -3590,6 +3680,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return provider if provider in supported else "gpt_web"
         choices = project.setdefault("image_stage_providers", {})
         if choices.get(stage) in supported:
+            if video_mode and choices[stage] == "snapgen" and credit_consent_required(
+                    project, state.get("snapgen_credit_acceptance")):
+                choices[stage] = confirm_snapgen_credit_warning()
+                save_project()
             return choices[stage]
         answer, event = {}, threading.Event()
         title = {"characters": "รูปตัวละคร", "storyboard": "สตอรี่ชีต", "images": "รูปฉาก"}.get(stage, "รูปฉาก")
@@ -3622,12 +3716,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         event.wait()
         if not answer.get("provider"):
             raise Stopped()
+        if video_mode and answer["provider"] == "snapgen":
+            answer["provider"] = confirm_snapgen_credit_warning()
         choices[stage] = answer["provider"]
         save_project()
         log(f"{title}: เลือก {labels[answer['provider']]}")
         return answer["provider"]
 
     def generate_via_snapgen(prompt, refs, out_dir, name, aspect, api_context=None):
+        if video_mode and credit_consent_required(state["project"], state.get("snapgen_credit_acceptance")):
+            raise ImageProviderError(credit_warning_text(state["project"]["snapgen_credit_warning"]))
         keyvar = runtime.get("api_key_var") or g.get("api_key_var")
         api_key = (api_context["api_key"] if api_context is not None else
                    str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip())
@@ -3642,8 +3740,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         before = balance()
         log(f"{name}: SnapGen GPT API · Image 2.5 Lower · แนบไฟล์ {len(refs)} รูป"
             + (f" · เครดิตก่อน {before:g}" if before is not None else ""))
+        def on_credit(record):
+            with state["lock"]:
+                warning = record_image_billing(state["project"], name, record)
+                save_project()
+            if record["used_credit"] is not None:
+                log(f"{name}: เครดิตงานนี้จาก History {record['task_id'] or '-'} = {record['used_credit']:g}")
+            if warning:
+                ui(refresh_snapgen_credit_warning)
+
         try:
-            image = snapgen_image(prompt, refs, str(out_dir), name, aspect, api_key)
+            image = snapgen_image(prompt, refs, str(out_dir), name, aspect, api_key,
+                                  **({"on_credit": on_credit} if video_mode else {}))
         except Exception as exc:
             # A timed-out request may already be processing; do not auto-submit another paid job.
             raise ImageProviderError(f"SnapGen API: {exc} — ตรวจ History ก่อนลองใหม่") from exc
@@ -4839,7 +4947,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         finished = 0
         started = time.time()
 
+        def check_batch_stop():
+            check_stop()
+            if video_mode and credit_consent_required(project, state.get("snapgen_credit_acceptance")):
+                raise ImageProviderError(credit_warning_text(project["snapgen_credit_warning"]))
+
         def work(job):
+            check_batch_stop()
             i, prompt, paths, board = job
             return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}",
                               project["aspect"], board=board, api_context=api_context)
@@ -4872,7 +4986,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 raise error
 
         try:
-            _run_image_jobs(jobs, work, completed, check_stop)
+            _run_image_jobs(jobs, work, completed, check_batch_stop)
         finally:
             after = balance()
             measured = before - after if before is not None and after is not None else None
@@ -6413,6 +6527,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             current = None
             try:
                 if video_mode:
+                    state.pop("snapgen_credit_acceptance", None)
+                    ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                 keys = [only] if only else [k for k, _t, _w in stages]
                 confirmed = False
@@ -6606,6 +6722,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             before = {i: (project["scenes"][i].get("image"), _mtime(project["scenes"][i].get("image"))) for i in selected}
             try:
                 if video_mode:
+                    state.pop("snapgen_credit_acceptance", None)
+                    ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                 stage_images(selected)
                 if video_mode:
@@ -6681,6 +6799,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def worker():
             try:
                 if video_mode:
+                    state.pop("snapgen_credit_acceptance", None)
+                    ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                 ensure_story_in_history()
                 ensure_continuity()

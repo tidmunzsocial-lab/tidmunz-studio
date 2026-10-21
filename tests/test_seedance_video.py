@@ -163,7 +163,7 @@ def test_auto_model_selection_save_then_restart_load(tmp_path):
               VIDEO_AUTO_IMAGE_PROVIDER_LABELS={"gpt_web": "GPT Web"},
               VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS={"gpt_web": "GPT Web"},
               GPT_WEB_LABEL="GPT Web", image_provider_var=Var("GPT Web"),
-              refresh_maxplus_model_info=lambda: None)
+              refresh_maxplus_model_info=lambda: None, refresh_snapgen_credit_warning=lambda: None)
     for key, value in dict(script_var="", audio_var="", aspect_var="16:9", count_var="36", subtitle_var=False,
                            economy_var=True, film_var=False, style_var="ปกติ").items():
         ns[key] = Var(value)
