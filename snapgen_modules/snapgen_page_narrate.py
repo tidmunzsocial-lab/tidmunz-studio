@@ -1733,6 +1733,8 @@ def render_narrate_cached(project, folder, ffmpeg, force=False, log=None, progre
     for piece in pieces:
         spec = [version, piece["hashes"], piece["filters"], piece["frames"], piece.get("effect"),
                 piece["start"] if subtitle else None]
+        if "effect" in piece:
+            spec.append("xfade-cfr-v1")
         piece["signature"] = hashlib.sha256(json.dumps(spec, ensure_ascii=False).encode("utf-8")).hexdigest()
         piece["file"] = cache / (piece["id"] + ".mp4")
 
@@ -1785,8 +1787,9 @@ def render_narrate_cached(project, folder, ffmpeg, force=False, log=None, progre
         for source in piece["inputs"]:
             args += ["-i", source]
         if "effect" in piece:
-            graph = (f"[0:v]{piece['filters'][0]},setpts=PTS-STARTPTS[a];"
-                     f"[1:v]{piece['filters'][1]},setpts=PTS-STARTPTS[b];"
+            normalize = f"setpts=PTS-STARTPTS,fps={FPS},settb=1/{FPS}"
+            graph = (f"[0:v]{piece['filters'][0]},{normalize}[a];"
+                     f"[1:v]{piece['filters'][1]},{normalize}[b];"
                      f"[a][b]xfade=transition={piece['effect']}:duration={piece['frames'] / FPS:.8f}:offset=0[v]")
         else:
             graph = f"[0:v]{piece['filters'][0]}[v]"
@@ -1854,12 +1857,16 @@ def xfade_graph(lengths: list, fade: float = CROSSFADE, kinds: list | None = Non
     """
     if len(lengths) == 1:
         return "[0:v]null[vout]", lengths[0]
-    parts, label, elapsed = [], "[0:v]", lengths[0]
+    # Normalize before xfade, not only at the encoder: setpts / some decoders
+    # can leave an unspecified input frame rate (1/0) on other FFmpeg builds.
+    parts = [f"[{i}:v]setpts=PTS-STARTPTS,fps={FPS},settb=1/{FPS},format=yuv420p[n{i}]"
+             for i in range(len(lengths))]
+    label, elapsed = "[n0]", lengths[0]
     for i in range(1, len(lengths)):
         out = "[vout]" if i == len(lengths) - 1 else f"[x{i}]"
         effect, seconds = TRANSITIONS.get((kinds or [])[i] if kinds and i < len(kinds) else "", ("fade", fade))
         offset = max(0.0, elapsed - seconds)
-        parts.append(f"{label}[{i}:v]xfade=transition={effect}:duration={seconds}:offset={offset:.3f}{out}")
+        parts.append(f"{label}[n{i}]xfade=transition={effect}:duration={seconds}:offset={offset:.3f}{out}")
         label = out
         elapsed = offset + lengths[i]
     return ";".join(parts), elapsed
