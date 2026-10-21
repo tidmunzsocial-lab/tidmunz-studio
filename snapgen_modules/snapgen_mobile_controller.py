@@ -93,7 +93,12 @@ class MobileController:
         path = Path(path).resolve()
         if not path.is_file() or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".mkv", ".webm"}:
             return None
-        key = hashlib.sha256(str(path).encode()).hexdigest()[:24]
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        identity = f"{path}\0{stat_result.st_size}\0{stat_result.st_mtime_ns}"
+        key = hashlib.sha256(identity.encode()).hexdigest()[:24]
         with self.lock:
             self.media[key] = path
         return {"id": key, "name": path.name, "url": "/media/" + key,
@@ -714,6 +719,20 @@ class MobileController:
                 return auto["start"]()
             if action == "auto_stop":
                 return auto["stop"]()
+            if action == "auto_repair_options":
+                options = auto["repair_options"](data.get("shot"))
+                for character in options.get("characters", []):
+                    for reference in character.get("references", []):
+                        media = self.register_media(reference.pop("path", ""))
+                        reference.update(media or {})
+                return options
+            if action == "auto_identity_repair":
+                reference = self.resolve_media(data.get("reference_id", ""))
+                return auto["repair_identity"](
+                    data.get("shot"), data.get("character"), str(reference),
+                    data.get("notes", ""), data.get("provider", ""),
+                    bool(data.get("accept_snapgen_credit")),
+                )
             raise ValueError("ไม่พบคำสั่งหน้าออโต้")
         if action == "prompt_split_start":
             self._start_prompt_split(data.get("scene"))

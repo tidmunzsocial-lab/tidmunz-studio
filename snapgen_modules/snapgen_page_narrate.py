@@ -7009,7 +7009,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                   bg="#2563EB", fg="white").pack(fill="x", padx=12, pady=10)
         win.grab_set()
 
-    def repair_identity(index, record):
+    def repair_identity(index, record, provider_choice=None, snapgen_credit_consent=False):
         project = state["project"]
         if state["busy"]:
             return
@@ -7027,6 +7027,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         for key in ("snapgen_credit_acceptance", "motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(key, None)
         project.setdefault("image_stage_providers", {}).pop("images", None)
+        if video_mode and provider_choice in VIDEO_AUTO_SCENE_PROVIDER_LABELS:
+            project.setdefault("image_stage_providers", {})["images"] = provider_choice
+        warning = project.get("snapgen_credit_warning")
+        if (video_mode and provider_choice == "snapgen" and snapgen_credit_consent
+                and credit_consent_required(project, None)):
+            state["snapgen_credit_acceptance"] = {
+                "ceiling": (warning or {}).get("used_credit") or 0,
+                "allow_unknown": (warning or {}).get("used_credit") is None
+                                  or bool((warning or {}).get("unverified")),
+            }
         state["active_image_stage"] = "images"
         project.setdefault("identity_repairs_pending", {})[str(index)] = record
         save_project()
@@ -7624,7 +7634,87 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             request_stop()
             return "สั่งหยุดแล้ว (หยุดหลังขั้นที่กำลังทำ)"
 
+        def mobile_identity_options(shot_number):
+            project = state.get("project") or {}
+            if state["busy"]:
+                raise ValueError("ออโต้กำลังทำงานอยู่ — หยุดหรือรอให้เสร็จก่อนแก้เรฟ")
+            try:
+                shot_number = int(shot_number)
+                if not 1 <= shot_number <= len(project.get("scenes") or []):
+                    raise ValueError
+                index = shot_number - 1
+                scene = project["scenes"][index]
+            except (TypeError, ValueError, KeyError, IndexError):
+                raise ValueError("เลือกช็อตที่มีอยู่ในโปรเจกต์ก่อน")
+            if not Path(scene.get("image") or "").is_file():
+                raise ValueError("ช็อตนี้ยังไม่มีรูปให้แก้")
+            contexts = {c["name"]: c for c in (project.get("context") or {}).get("characters", [])
+                        if isinstance(c, dict) and c.get("name")}
+            pending = (project.get("identity_repairs_pending") or {}).get(str(index)) or scene.get("identity_repair") or {}
+            characters = []
+            for name in scene.get("characters") or []:
+                context = contexts.get(name)
+                if not context:
+                    continue
+                matches = match_reference_files(name, attachment_folder())
+                refs = [{"label": label, "path": str(Path(path).resolve())} for label, path in matches]
+                previous = pending.get("reference") if pending.get("character") == name else None
+                if previous and Path(previous).is_file() and all(Path(item["path"]).resolve() != Path(previous).resolve() for item in refs):
+                    refs.insert(0, {"label": Path(previous).stem, "path": str(Path(previous).resolve())})
+                characters.append({"name": name, "context": character_description(context)
+                                   or json.dumps(context, ensure_ascii=False, indent=2),
+                                   "notes": pending.get("notes", "") if pending.get("character") == name else "",
+                                   "references": refs})
+            if not characters:
+                raise ValueError("ช็อตนี้ไม่มีตัวละครที่พบใน Context ของโปรเจกต์")
+            warning = project.get("snapgen_credit_warning")
+            return {"shot": index + 1, "characters": characters,
+                    "snapgen_credit_warning": credit_warning_text(warning),
+                    "snapgen_credit_consent_required": credit_consent_required(project, None)}
+
+        def mobile_repair_identity(shot_number, character, reference, notes, provider, accept_credit):
+            project = state.get("project") or {}
+            if state["busy"]:
+                raise ValueError("ออโต้กำลังทำงานอยู่ — รอให้จบก่อน")
+            try:
+                shot_number = int(shot_number)
+                if not 1 <= shot_number <= len(project.get("scenes") or []):
+                    raise ValueError
+                index = shot_number - 1
+                scene = project["scenes"][index]
+            except (TypeError, ValueError, KeyError, IndexError):
+                raise ValueError("ไม่พบช็อตนี้ในโปรเจกต์")
+            contexts = {c["name"]: c for c in (project.get("context") or {}).get("characters", [])
+                        if isinstance(c, dict) and c.get("name")}
+            if character not in (scene.get("characters") or []) or character not in contexts:
+                raise ValueError("ตัวละครนี้ไม่ได้อยู่ในช็อต หรือไม่มี Context ให้ใช้อ้างอิง")
+            path = Path(reference).resolve()
+            if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp") or not path.is_file():
+                raise ValueError("เลือกหรืออัปโหลดไฟล์เรฟรูปก่อน")
+            if path == Path(scene.get("image") or "").resolve():
+                raise ValueError("เลือกรูปเรฟตัวละครแยกจากรูปช็อต")
+            try:
+                from PIL import Image
+                with Image.open(path) as ref_image:
+                    ref_image.verify()
+            except Exception:
+                raise ValueError("เปิดไฟล์เรฟนี้ไม่ได้ เลือกรูปที่สมบูรณ์ก่อน")
+            if provider not in {"gpt_web", "snapgen"}:
+                raise ValueError("เลือก GPT Web (Chrome) หรือ SnapGen API")
+            warning = project.get("snapgen_credit_warning")
+            if (provider == "snapgen" and credit_consent_required(project, None)
+                    and not accept_credit):
+                raise ValueError(credit_warning_text(warning) + " — ยืนยันคำเตือนก่อนใช้ API หรือเลือก GPT Web")
+            record = {"character": character, "reference": str(path),
+                      "context": json.loads(json.dumps(contexts[character], ensure_ascii=False)),
+                      "notes": str(notes or "").strip()[:1000]}
+            repair_identity(index, record, provider_choice=provider,
+                            snapgen_credit_consent=bool(accept_credit))
+            return f"เริ่มแก้เรฟช็อต {index + 1} ผ่าน {'SnapGen API' if provider == 'snapgen' else 'GPT Web (Chrome)'} แล้ว — ดูสถานะในหน้าออโต้"
+
         runtime["mobile_auto"] = {"snapshot": mobile_snapshot, "open": mobile_open,
-                                  "start": mobile_start, "stop": mobile_stop}
+                                  "start": mobile_start, "stop": mobile_stop,
+                                  "repair_options": mobile_identity_options,
+                                  "repair_identity": mobile_repair_identity}
     return {"open_project": open_project, "refresh_clip_info": refresh_clip_info, "busy": lambda: state["busy"],
             "stage_var": stage_var}
