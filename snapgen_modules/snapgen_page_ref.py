@@ -398,6 +398,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         items = []
 
         def add_place(name, detail=""):
+            if isinstance(name, dict):
+                place = name
+                name = place.get("name") or place.get("place") or place.get("location") or place.get("สถานที่")
+                detail = (detail or place.get("detail") or place.get("description") or place.get("visual_description")
+                          or place.get("atmosphere") or place.get("บรรยากาศ") or place.get("รายละเอียด") or "")
             name = str(name or "").strip()
             detail = str(detail or "").strip()
             if not name or name == "ไม่ระบุ":
@@ -409,12 +414,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             import json as _json
             data = _json.loads(context_text)
             if isinstance(data, dict):
-                for key in ("locations", "places", "key_places", "สถานที่"):
-                    for place in data.get(key, []) or []:
+                for key in ("locations", "places", "key_locations", "key_places", "สถานที่"):
+                    places = data.get(key, []) or []
+                    if isinstance(places, dict):
+                        places = [dict(value, name=value.get("name") or name) if isinstance(value, dict)
+                                  else {"name": name, "detail": value} for name, value in places.items()]
+                    if not isinstance(places, list):
+                        places = [places]
+                    for place in places:
                         if isinstance(place, dict):
-                            name = place.get("name") or place.get("place") or place.get("location") or place.get("สถานที่")
-                            detail = place.get("detail") or place.get("description") or place.get("note") or place.get("รายละเอียด") or place.get("บรรยากาศ")
-                            add_place(name, detail)
+                            add_place(place)
                         else:
                             add_place(place)
                 story = data.get("story") if isinstance(data.get("story"), dict) else {}
@@ -424,18 +433,15 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     if isinstance(place, dict):
                         add_place(
                             place.get("name") or place.get("place") or place.get("location"),
-                            place.get("detail") or place.get("description") or place.get("note"),
+                            place.get("detail") or place.get("description") or place.get("visual_description") or place.get("note"),
                         )
                 add_place(
                     data.get("main_location") or data.get("location") or data.get("สถานที่หลัก")
                     or story.get("main_location")
                 )
-                # A newly summarized Context already contains a complete
-                # Location Bible.  Prefer it over an older external cache.
-                if any(
-                    isinstance(place, dict) and (place.get("visual_description") or place.get("views"))
-                    for place in data.get("locations", []) or []
-                ):
+                # Prompt Context owns the current complete location inventory.
+                # Never replace it with a stale GPT-selected subset from the sidecar Bible.
+                if items:
                     return items
         except Exception:
             pass
@@ -2208,23 +2214,18 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             _ref_log("กำลังสร้างอยู่ — รอให้งานเดิมเสร็จก่อน")
             return
         ref_job_running[0] = True
-        _ref_log("[auto-ref location] กำลังวิเคราะห์เฉพาะสถานที่ที่มีเหตุการณ์เกิดขึ้นจริงในบท...")
+        _ref_log("[auto-ref location] ใช้รายชื่อสถานที่จาก Prompt Context โดยตรง...")
         def discover_worker():
             try:
-                lock = globals().get("_bridge_queue_lock")
-                if lock:
-                    with lock:
-                        targets, reused = _discover_location_targets_via_context()
-                else:
-                    targets, reused = _discover_location_targets_via_context()
-                names = [str(x.get("name") or "").strip() for x in targets if isinstance(x, dict) and str(x.get("name") or "").strip()]
+                locations = _extract_ref_locations(ctx_raw)
+                names = [str(item.get("name") or "").strip() for item in locations
+                         if isinstance(item, dict) and str(item.get("name") or "").strip()]
                 if not names:
-                    raise RuntimeError("ไม่พบสถานที่สำหรับสร้าง Ref")
+                    raise RuntimeError("Prompt Context ไม่มีรายชื่อสถานที่ — อัปเดต Context ให้มีหัวข้อสถานที่ก่อน")
                 def start_jobs():
                     ref_job_running[0] = False
                     _ref_log(
-                        f"[auto-ref location] {'ใช้รายการที่ล็อกไว้' if reused else 'บันทึกรายการใหม่'} "
-                        f"{len(names)} แห่ง: " + ", ".join(names)
+                        f"[auto-ref location] พบจาก Context {len(names)} แห่ง: " + ", ".join(names)
                     )
                     ref_img = ref_attach_path[0] if ref_attach_path and ref_attach_path[0] else None
                     _run_ref_jobs(names, auto=True, ref_image=ref_img, entity_kind="location")
@@ -2232,11 +2233,6 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             except Exception as e:
                 def fail(e=e):
                     ref_job_running[0] = False
-                    if "chatgpt_empty_response" in str(e):
-                        _ref_log("[auto-ref location] GPT ฝั่งข้อความไม่ส่งผลวิเคราะห์สถานที่กลับมา — "
-                                 "ยังไม่ส่งคำขอสร้างรูป ตรวจบัญชี/โควตาใน Chrome ของโปรแกรมแล้วลองใหม่ "
-                                 "ตัวเลือก SnapGen API เปลี่ยนเฉพาะผู้สร้างรูป ไม่เปลี่ยนตัววิเคราะห์สถานที่")
-                        return
                     _ref_log(f"[auto-ref location] ERROR: {e}")
                 root.after(0, fail)
         threading.Thread(target=discover_worker, daemon=True).start()
