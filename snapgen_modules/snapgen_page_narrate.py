@@ -303,28 +303,18 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
     return _save_image_result(image, target, api_key)
 
 
-def maxplus_image(prompt: str, refs: list[str], output_dir: str, name: str,
-                  aspect: str, api_key: str, model: str = MAXPLUS_IMAGE_MODEL,
-                  quality: str | None = "high", max_references: int = 16,
-                  size: str | None = None) -> str:
-    """Generate one image through MaxPlus, preserving every supplied reference."""
-    if not api_key:
-        raise RuntimeError("ตั้ง MaxPlus API key (pool Gen Image) ก่อน")
-    if len(refs) > max_references:
-        raise RuntimeError(f"MaxPlus {model} รับรูปอ้างอิงได้ไม่เกิน {max_references} รูปต่อคำขอ (ได้รับ {len(refs)})")
+def _prepare_maxplus_references(refs, *, max_image_bytes=10 * 1024 * 1024,
+                                max_total_bytes=25 * 1024 * 1024, log=None):
+    """Prepare upload bytes only; leave reference files and generated outputs intact."""
+    import io
+    from PIL import Image, ImageOps
 
-    uploaded_references = []
-    total_bytes = 0
+    entries = []
     for raw_path in refs:
         path = Path(raw_path)
         if not path.is_file():
             continue
         data = path.read_bytes()
-        total_bytes += len(data)
-        if len(data) > 10 * 1024 * 1024:
-            raise RuntimeError(f"รูปอ้างอิง {path.name} เกิน 10 MB")
-        if total_bytes > 25 * 1024 * 1024:
-            raise RuntimeError("รูปอ้างอิงรวมกันเกิน 25 MB")
         if data.startswith(b"\x89PNG\r\n\x1a\n"):
             media_type = "image/png"
         elif data.startswith(b"\xff\xd8\xff"):
@@ -333,7 +323,61 @@ def maxplus_image(prompt: str, refs: list[str], output_dir: str, name: str,
             media_type = "image/webp"
         else:
             raise RuntimeError(f"ชนิดไฟล์อ้างอิงไม่รองรับ: {path.name} (รองรับ PNG/JPEG/WebP)")
-        uploaded_references.append((media_type, data))
+        entries.append((path, media_type, data))
+
+    # Small references keep their original bytes; share the remaining allowance
+    # between large references so the entire multipart upload fits the limits.
+    budget = max_image_bytes
+    remaining = max_total_bytes
+    for index, (_, _, data) in enumerate(sorted(entries, key=lambda item: len(item[2]))):
+        share = remaining // (len(entries) - index)
+        if len(data) > share:
+            budget = min(budget, share)
+            break
+        remaining -= len(data)
+
+    prepared = []
+    for path, media_type, data in entries:
+        if len(data) > budget:
+            original_bytes = len(data)
+            with Image.open(io.BytesIO(data)) as source:
+                image = ImageOps.exif_transpose(source)
+                alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
+                image = image.convert("RGBA" if alpha else "RGB")
+                media_type = "image/webp" if alpha else "image/jpeg"
+                for _ in range(10):
+                    for quality in (95, 90, 85):
+                        buffer = io.BytesIO()
+                        options = {} if alpha else {"subsampling": 0}
+                        image.save(buffer, "WEBP" if alpha else "JPEG", quality=quality, **options)
+                        data = buffer.getvalue()
+                        if len(data) <= budget:
+                            break
+                    if len(data) <= budget:
+                        break
+                    scale = min(0.85, (budget / len(data)) ** 0.5 * 0.95)
+                    image = image.resize((max(1, int(image.width * scale)),
+                                          max(1, int(image.height * scale))), Image.Resampling.LANCZOS)
+            if len(data) > budget:
+                raise RuntimeError(f"เตรียมรูปอ้างอิง {path.name} ให้ไม่เกินขนาดที่ MaxPlus รับไม่ได้")
+            if log:
+                log(f"ไฟล์แนบ {path.name}: {original_bytes / 1048576:.2f} → {len(data) / 1048576:.2f} MB "
+                    "(บีบอัดเฉพาะไฟล์ส่ง API; เก็บรูปต้นฉบับไว้)")
+        prepared.append((media_type, data))
+    return prepared
+
+
+def maxplus_image(prompt: str, refs: list[str], output_dir: str, name: str,
+                  aspect: str, api_key: str, model: str = MAXPLUS_IMAGE_MODEL,
+                  quality: str | None = "high", max_references: int = 16,
+                  size: str | None = None, reference_log=None) -> str:
+    """Generate one image through MaxPlus, preserving every supplied reference."""
+    if not api_key:
+        raise RuntimeError("ตั้ง MaxPlus API key (pool Gen Image) ก่อน")
+    if len(refs) > max_references:
+        raise RuntimeError(f"MaxPlus {model} รับรูปอ้างอิงได้ไม่เกิน {max_references} รูปต่อคำขอ (ได้รับ {len(refs)})")
+
+    uploaded_references = _prepare_maxplus_references(refs, log=reference_log)
 
     body = {
         "async": True,
@@ -3621,7 +3665,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         try:
             return maxplus_image(prompt, refs, str(out_dir), name, aspect, key,
                                  model=model["model"], quality=model["quality"],
-                                 max_references=model["max_references"], size=size)
+                                 max_references=model["max_references"], size=size, reference_log=log)
         except Exception as exc:
             # A timeout can mean the paid request is still running; never submit it again automatically.
             raise ImageProviderError(f"{model['label']}: {exc} — ตรวจ MaxPlus History ก่อนลองใหม่") from exc
