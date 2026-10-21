@@ -3937,6 +3937,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if board:
             # Image 1 = this shot's storyboard panel (layout to follow), then identity references.
             refs = [board, *refs] if provider in ("snapgen", "qwen") or is_video_auto_maxplus_provider(provider) else [board, *refs][:6]
+        face_reference = (identity_repair or {}).get("face_reference")
+        face_ref_limit = (10 if provider == "snapgen" else 16 if provider == "qwen"
+                          else VIDEO_AUTO_MAXPLUS_MODELS[provider]["max_references"]
+                          if is_video_auto_maxplus_provider(provider) else 6)
+        if face_reference and Path(face_reference).is_file() and len(refs) < face_ref_limit:
+            # Keep the complete master for body/outfit, and add its face-focused crop as a separate cue.
+            refs.append(face_reference)
         if provider == "snapgen" and len(refs) > 10:
             raise ImageProviderError("ฉากนี้มีไฟล์เรฟเกิน 10 รูปที่ API รองรับ — หยุดก่อนส่งเพื่อไม่ให้เรฟตัวละครตกหล่น")
         if provider == "qwen" and len(refs) > 16:
@@ -3984,6 +3991,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             number = next((i for i, p in enumerate(refs, 1) if Path(p).resolve() == master), None)
             if number is None or not master.is_file():
                 raise ImageProviderError("ยังไม่ได้แนบเรฟที่เลือกสำหรับแก้ตัวละคร — หยุดก่อนใช้เครดิต")
+            face_number = next((i for i, p in enumerate(refs, 1)
+                                if face_reference and Path(p).resolve() == Path(face_reference).resolve()), None)
             prompt += (
                 f"\n\nIDENTITY CORRECTION — highest priority for {identity_repair['character']}: "
                 f"Image {number} is the selected MASTER identity reference. Match its exact face, facial structure, "
@@ -3993,6 +4002,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 "and unrelated details. Do not copy the master's background or neutral standing pose. "
                 "When assumed visual descriptions in the old prompt/Context conflict with the master, the master wins. "
                 "Keep story-required injuries/transformations only when explicitly specified for this scene.\n"
+                + (f"Image {face_number} is a close crop made directly from the selected master; use it to match the exact face, eyes, nose, mouth, skin detail and hairline. It is the SAME character, not a second reference. Use the full master for body, hair shape and outfit.\n" if face_number else "")
+                +
                 f"Context for this character from THIS project:\n{json.dumps(identity_repair['context'], ensure_ascii=False)}\n"
                 f"User's specific correction: {identity_repair.get('notes') or 'แก้ตัวละครให้ตรงกับรูปเรฟที่เลือก'}")
         import hashlib
@@ -7025,6 +7036,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         start_btn.config(state="disabled", text="⏳ กำลังแก้เรฟ…")
         outcome = {"stage": "", "detail": "", "request_started": False}
         def worker():
+            face_crop_path = None
             try:
                 check_stop()
                 log(f"แก้เรฟช็อต {index + 1}: {record['character']} · {Path(record['reference']).name} · ส่ง Context ตัวละครครบ")
@@ -7046,9 +7058,24 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 check_stop()
                 images_dir = Path(state["folder"]) / "images"
                 images_dir.mkdir(parents=True, exist_ok=True)
+                repair_record = dict(record)
+                try:
+                    import tempfile
+                    from PIL import Image, ImageOps
+                    with Image.open(record["reference"]) as ref_image:
+                        ref_image = ImageOps.exif_transpose(ref_image).convert("RGB")
+                        crop_bottom = max(1, round(ref_image.height * 0.55))
+                        face_crop = ref_image.crop((0, 0, ref_image.width, crop_bottom))
+                    fd, face_crop_path = tempfile.mkstemp(prefix="tidmunz-identity-face-", suffix=".jpg")
+                    os.close(fd)
+                    face_crop.save(face_crop_path, format="JPEG", quality=94)
+                    repair_record["face_reference"] = face_crop_path
+                    log("แนบเรฟเต็มและภาพครอปช่วงใบหน้าจากเรฟเดียวกัน เพื่อช่วยจับรายละเอียดหน้า")
+                except Exception as exc:
+                    log(f"สร้างภาพครอปใบหน้าไม่สำเร็จ จะใช้เรฟเต็มตามปกติ: {exc}")
                 outcome["request_started"] = True
                 out = make_image(scene_prompt(scene), [record["reference"]], images_dir,
-                                 name, project["aspect"], board=source, identity_repair=record)
+                                 name, project["aspect"], board=source, identity_repair=repair_record)
                 if scene.get("image") != source or file_digest(source) != source_digest:
                     raise ImageProviderError(f"รูปต้นฉบับเปลี่ยนระหว่างทำงาน — เก็บผลไว้ที่ {out} ยังไม่แทนรูปในโปรเจกต์")
                 scene.setdefault("image_history", []).append({"image": source, "clip": scene.get("clip")})
@@ -7076,6 +7103,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 outcome.update(stage=f"แก้เรฟช็อต {index + 1} ไม่สำเร็จ — ตรวจข้อความ error ก่อนทำต่อ",
                                detail=str(exc)[:240])
             finally:
+                if face_crop_path:
+                    try:
+                        Path(face_crop_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 save_project()
                 state["busy"] = False
                 state.pop("active_image_stage", None)
