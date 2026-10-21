@@ -15,6 +15,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk as _ttk
+from tkinter import messagebox as _ref_messagebox
 from snapgen_fonts import font_family as _snapgen_font_family
 
 SNAPGEN_UI_FONT = _snapgen_font_family()
@@ -114,6 +115,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         story_type_labels[0],
     )
     ref_story_type_var = tk.StringVar(value=saved_story_type_label)
+    ref_provider_labels = {"gpt_web": "GPT Web (Chrome เดิม)", "snapgen": "SnapGen API · Image 2.5 Lower"}
+    ref_provider_var = tk.StringVar(value=ref_provider_labels.get(
+        _saved_ref_settings.get("image_provider"), ref_provider_labels["gpt_web"]))
     g["_ref_selected_context"] = ""
     g["_ref_selected_name"] = ""
     g["_ref_selected_kind"] = ""
@@ -211,6 +215,17 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             pass
     root.after(2000, _follow_prompt_ref_story)
 
+    provider_row = tk.Frame(box, bg="#FAFAF7")
+    provider_row.pack(fill="x", pady=(0, 6))
+    tk.Label(provider_row, text="สร้างรูปผ่าน", bg="#FAFAF7").pack(side="left")
+    ref_provider_combo = _ttk.Combobox(provider_row, textvariable=ref_provider_var,
+        values=list(ref_provider_labels.values()), state="readonly", width=34)
+    ref_provider_combo.pack(side="left", padx=6)
+    tk.Label(provider_row, text="API: แยกคำขอต่อรูป · ใช้คีย์ SnapGen ในตั้งค่า", bg="#FAFAF7",
+             fg="#6B7280").pack(side="left")
+    ref_credit_warning_var = tk.StringVar(value="")
+    tk.Label(box, textvariable=ref_credit_warning_var, fg="#DC2626", bg="#FAFAF7",
+             anchor="w", wraplength=850).pack(fill="x")
     row = tk.Frame(box, bg="#FAFAF7")
     row.pack(fill="x", pady=(0, 6))
     _form_label(row, "ชื่อ:")
@@ -247,6 +262,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 json.dumps({
                     "use_context": bool(ref_use_context_var.get()),
                     "story_type": story_type_by_label.get(ref_story_type_var.get(), "auto"),
+                    "image_provider": next((k for k, v in ref_provider_labels.items()
+                                            if v == ref_provider_var.get()), "gpt_web"),
                 }, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
@@ -270,6 +287,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
 
     ref_use_context_var.trace_add("write", _save_ref_page_settings)
     ref_story_type_var.trace_add("write", _save_ref_page_settings)
+    ref_provider_var.trace_add("write", _save_ref_page_settings)
     tk.Checkbutton(
         row, text="ใช้ Context", variable=ref_use_context_var,
         bg="#FAFAF7", activebackground="#FAFAF7", fg="#374151",
@@ -765,6 +783,83 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         _builder_append_log(log, msg)
     g["_ref_log"] = _ref_log
 
+    ref_billing_path = Path(BASE) / "ref_api_billing.json"
+    try:
+        ref_billing = json.loads(ref_billing_path.read_text(encoding="utf-8"))
+        if not isinstance(ref_billing, dict):
+            raise ValueError("invalid Ref billing")
+    except FileNotFoundError:
+        ref_billing = {}
+    except (OSError, ValueError):
+        ref_billing = {"snapgen_credit_warning": {"unverified": True, "name": "Ref", "used_credit": None}}
+
+    def _refresh_ref_credit_warning():
+        from snapgen_credit_guard import credit_warning_text
+        ref_credit_warning_var.set(credit_warning_text(ref_billing.get("snapgen_credit_warning")))
+    _refresh_ref_credit_warning()
+
+    def _ref_request_options():
+        provider = next((k for k, v in ref_provider_labels.items() if v == ref_provider_var.get()), "gpt_web")
+        keyvar = g.get("api_key_var")
+        key = str(keyvar.get() if keyvar is not None else "").strip() if provider == "snapgen" else ""
+        if provider == "snapgen" and not key:
+            _ref_log("ใส่ SnapGen API Key ในตั้งค่าก่อน — ยังไม่ส่งงาน")
+            return None
+        return {"provider": provider, "api_key": key, "acceptance": {}}
+
+    def _ref_ask_worker(title, text):
+        answer, event = [], threading.Event()
+        def ask():
+            try:
+                answer.append(_ref_messagebox.askyesno(title, text, parent=ref_page))
+            finally:
+                event.set()
+        root.after(0, ask)
+        event.wait()
+        return bool(answer and answer[0])
+
+    def _ref_image_request(options, prompt, name, refs, web_payload, raw_prompt=None):
+        if options["provider"] == "gpt_web":
+            return g["_do_image_request"](web_payload, is_edit=bool(refs), prompt=prompt,
+                name_hint=name, raw_prompt=raw_prompt or prompt, output_dir=str(export_ref_dir))
+        import hashlib
+        import uuid
+        from snapgen_page_narrate import snapgen_image
+        from snapgen_credit_guard import record_image_billing, credit_consent_required, credit_warning_text
+        if any(not Path(p).is_file() for p in refs):
+            raise RuntimeError("ไม่พบไฟล์แนบ Ref — เลือกรูปใหม่ก่อนใช้เครดิต")
+        if credit_consent_required(ref_billing, options["acceptance"]):
+            warning = ref_billing["snapgen_credit_warning"]
+            if not _ref_ask_worker("Ref — ยอมรับเครดิตก่อนทำต่อ", credit_warning_text(warning) +
+                    "\n\nยอมรับราคาหรือความเสี่ยงนี้ในรอบนี้หรือไม่?\nตอบไม่ = หยุด แล้วเลือก GPT Web ได้"):
+                raise RuntimeError("หยุด API ตามคำสั่ง — เลือก GPT Web หรือยอมรับเครดิตก่อนทำต่อ")
+            options["acceptance"] = {"ceiling": warning.get("used_credit"), "allow_unknown": bool(warning.get("unverified"))}
+        # Stable scratch job names allow History-only recovery after timeouts. Gallery files are unique.
+        fingerprint = hashlib.sha256(json.dumps([name, prompt,
+            [hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in refs]], ensure_ascii=False).encode()).hexdigest()[:20]
+        scratch = Path(export_ref_dir) / ".snapgen_ref_jobs" / fingerprint
+        def on_credit(record):
+            record_image_billing(ref_billing, name, record)
+            temporary = ref_billing_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(ref_billing, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(ref_billing_path)
+            root.after(0, _refresh_ref_credit_warning)
+            cost = record.get("used_credit")
+            _ref_log(f"[SnapGen Ref] {name}: เครดิตงานนี้ {cost:g}" if cost is not None else
+                     f"[SnapGen Ref] {name}: ยังยืนยันเครดิตงานนี้ไม่ได้")
+        def confirm_resubmit(_name):
+            return _ref_ask_worker("SnapGen — ตรวจ History ก่อนส่งซ้ำ",
+                f"{name}: งานก่อนอาจหักเครดิตแล้วแต่ไม่ได้เลขงานกลับมา\n"
+                "ตรวจ SnapGen History ก่อน ถ้าได้รูปแล้วให้หยุดและนำรูปนั้นมาใช้\n\n"
+                "ตรวจแล้วและยอมรับให้ส่งใหม่ซึ่งอาจหักเครดิตซ้ำใช่ไหม?")
+        _ref_log(f"[SnapGen Ref] {name}: Image 2.5 Lower · คำขอแยก · แนบ {len(refs)} รูป")
+        result = snapgen_image(prompt, refs, str(scratch), "ref", "1:1", options["api_key"],
+                               on_credit=on_credit, confirm_resubmit=confirm_resubmit)
+        safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name))[:60].strip(" .") or "ref"
+        target = Path(export_ref_dir) / f"ref_{safe}_{uuid.uuid4().hex[:12]}.png"
+        shutil.copy2(result, target)
+        return str(target)
+
     def _ref_bridge_ready():
         try:
             import json as _json
@@ -957,6 +1052,13 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             if not Path(p).is_file():
                 _ref_log(f"[แก้ Ref] ไม่พบรูป: {p}")
                 return
+            if ref_job_running[0]:
+                _ref_log("กำลังสร้างอยู่ — รอให้งานเดิมเสร็จก่อน")
+                return
+            options = _ref_request_options()
+            if options is None:
+                return
+            _set_ref_action_buttons_running(True)
             comment_entry.config(state=tk.DISABLED)
             edit_btn.config(state=tk.DISABLED, text="กำลังแก้...")
 
@@ -971,11 +1073,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         "aspect_ratio": "1:1", "history_and_training_disabled": False,
                         "images": [encoder(p)], "_use_ref_story_history": True,
                     }
-                    out = g["_do_image_request"](
-                        payload, is_edit=True, prompt=prompt,
-                        name_hint=f"{Path(p).stem}_แก้ไข", raw_prompt=comment,
-                        output_dir=str(export_ref_dir),
-                    )
+                    out = _ref_image_request(options, prompt, f"{Path(p).stem}_แก้ไข", [p], payload, comment)
                     out = _normalize_ref_output(out, str(g.get("_ref_selected_name") or Path(p).stem))
                     root.after(0, lambda out=out: (
                         _ref_gallery_add(str(out), True, is_ghost=is_ghost),
@@ -985,6 +1083,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     root.after(0, lambda exc=exc: _ref_log(f"[แก้ Ref] ERROR: {exc}"))
                 finally:
                     root.after(0, lambda: (
+                        _set_ref_action_buttons_running(False),
                         comment_entry.config(state=tk.NORMAL),
                         edit_btn.config(state=tk.NORMAL, text="ส่งแก้ไข"),
                     ))
@@ -1805,6 +1904,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     
     def _set_ref_action_buttons_running(running, auto=False):
         ref_job_running[0] = bool(running)
+        ref_provider_combo.configure(state="disabled" if running else "readonly")
         try:
             if ref_make_btn[0]:
                 ref_make_btn[0].config(state=(tk.DISABLED if running else tk.NORMAL))
@@ -1838,19 +1938,23 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         if not names:
             _ref_log("ไม่มีชื่อสำหรับสร้าง Ref")
             return
+        options = _ref_request_options()
+        if options is None:
+            return
         has_ref_story = g.get("has_ref_story_history")
         current_ref_title = g.get("get_ref_story_title")
         valid_ref_story = bool(has_ref_story()) if callable(has_ref_story) else False
         title = current_ref_title() if callable(current_ref_title) else ""
-        if not valid_ref_story or not title:
+        if options["provider"] == "gpt_web" and (not valid_ref_story or not title):
             ref_story_title_var.set("")
             _ref_log("[บทเรื่อง] ยังไม่มีประวัติเรื่องหลัก — เริ่มเรื่องจาก Prompt-Ref ก่อน")
             return
         ref_story_title_var.set(title)
-        ok_bridge, bridge_msg = _ref_bridge_ready()
-        _ref_log(bridge_msg)
-        if not ok_bridge:
-            return
+        if options["provider"] == "gpt_web":
+            ok_bridge, bridge_msg = _ref_bridge_ready()
+            _ref_log(bridge_msg)
+            if not ok_bridge:
+                return
         if ref_job_running[0]:
             _ref_log("กำลังสร้างอยู่ — รอให้งานเดิมเสร็จก่อน")
             return
@@ -1910,7 +2014,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     else:
                         _ref_log(f"[context] พบเพียงชื่อ {name} — เติมเฉพาะรายละเอียดที่ Context ไม่ระบุ")
                     refine = g.get("_refine_prompt_via_ai") or globals().get("_refine_prompt_via_ai")
-                    if callable(refine) and ghost_design is None:
+                    if options["provider"] == "gpt_web" and callable(refine) and ghost_design is None:
                         _ref_log(f"[refine] ส่ง GPT แปลง prompt Ref: {name}")
                         # Select details are already embedded in `prompt`.
                         # Never append the full story context here.
@@ -1922,7 +2026,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         _ref_log(
                             "[refine] ใช้ Ghost Bible โดยตรงเพื่อไม่ให้ชนิดผีถูกตีความใหม่"
                             if ghost_design is not None else
-                            "[refine] ไม่เจอตัวแปลง prompt — ใช้ prompt เดิม"
+                            "[refine] ใช้ prompt ที่สร้างจากข้อมูลตัวละครโดยตรง"
                         )
                     if auto and auto_ref_stop[0]:
                         _ref_log(f"[auto-ref] หยุดแล้ว — ข้าม {name}")
@@ -1939,7 +2043,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                             payload["images"] = [_b64.b64encode(_f.read()).decode("utf-8")]
                         _ref_log(f"[ref] แนบรูปอ้างอิง: {os.path.basename(ref_image)}")
                     file_hint = _outfit_name_hint(name, entity_kind or context_kind)
-                    out = g["_do_image_request"](payload, is_edit=bool(ref_image and os.path.exists(ref_image)), prompt=prompt, name_hint=file_hint, raw_prompt=prompt, output_dir=str(export_ref_dir))
+                    out = _ref_image_request(options, prompt, file_hint,
+                        [ref_image] if ref_image else [], payload)
                     out = _normalize_ref_output(out, name)
                     root.after(0, lambda out=out, ghost=bool(ghost_design): (
                         _ref_log(f"✓ {out}"), _ref_gallery_add(out, True, is_ghost=ghost), _notify_done()
@@ -1953,12 +2058,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 if lock:
                     with lock:
                         send_type = g.get("send_ref_story_type_lock")
-                        if callable(send_type):
+                        if options["provider"] == "gpt_web" and callable(send_type):
                             send_type(selected_story_type, log_fn=_ref_log)
                         run_all()
                 else:
                     send_type = g.get("send_ref_story_type_lock")
-                    if callable(send_type):
+                    if options["provider"] == "gpt_web" and callable(send_type):
                         send_type(selected_story_type, log_fn=_ref_log)
                     run_all()
             except Exception as e:
@@ -2117,6 +2222,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             except Exception as e:
                 def fail(e=e):
                     ref_job_running[0] = False
+                    if "chatgpt_empty_response" in str(e):
+                        _ref_log("[auto-ref location] GPT ฝั่งข้อความไม่ส่งผลวิเคราะห์สถานที่กลับมา — "
+                                 "ยังไม่ส่งคำขอสร้างรูป ตรวจบัญชี/โควตาใน Chrome ของโปรแกรมแล้วลองใหม่ "
+                                 "ตัวเลือก SnapGen API เปลี่ยนเฉพาะผู้สร้างรูป ไม่เปลี่ยนตัววิเคราะห์สถานที่")
+                        return
                     _ref_log(f"[auto-ref location] ERROR: {e}")
                 root.after(0, fail)
         threading.Thread(target=discover_worker, daemon=True).start()
