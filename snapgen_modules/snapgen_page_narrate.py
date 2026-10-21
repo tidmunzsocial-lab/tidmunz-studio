@@ -22,6 +22,7 @@ Everything lives in EXPORT_ROOT/เล่าภาพ/<script name>/.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import re
@@ -247,23 +248,43 @@ def _save_image_result(result, target: Path, api_key: str = "") -> str:
 
 
 def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
-                  aspect: str, api_key: str, on_credit=None) -> str:
+                  aspect: str, api_key: str, on_credit=None, confirm_resubmit=None) -> str:
     if not api_key:
         raise RuntimeError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
     files = [("files", p, Path(p).read_bytes()) for p in refs if Path(p).is_file()]
+    import hashlib
+    fingerprint = hashlib.sha256(json.dumps([prompt, aspect, api_key,
+        [hashlib.sha256(data).hexdigest() for _, _, data in files]], ensure_ascii=False).encode()).hexdigest()
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    receipt = Path(output_dir) / f".{name}_snapgen_{fingerprint[:16]}.json"
+    previous = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
+    task_id = previous.get("task_id")
+    if previous and not task_id:
+        if not callable(confirm_resubmit) or not confirm_resubmit(name):
+            raise RuntimeError(f"{name}: งาน SnapGen ก่อนหน้าหมดเวลารอโดยไม่ได้เลขงาน — อาจหักเครดิตแล้ว "
+                               "ตรวจ SnapGen History แล้วใช้รูปที่ได้ หรือเลือก GPT Chrome; ยังไม่ส่ง API ซ้ำ")
+
+    def remember(task=None):
+        # No prompt, reference bytes or account key is written to this receipt.
+        temporary = receipt.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"task_id": task}), encoding="utf-8")
+        temporary.replace(receipt)
+
     # Lower has fixed output settings and does not accept resolution/mode/background.
     body, boundary = _multipart({"prompt": prompt, "aspect_ratio": aspect}, files)
     request = urllib.request.Request(
         SNAPGEN_IMAGE_URL, data=body, method="POST",
         headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
                  "Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}"})
-    payload = None
+    payload = {"uuid": task_id} if task_id else None
     image = None
-    billing = {"task_id": None, "used_credit": None}
+    billing = {"task_id": task_id, "used_credit": None}
 
     def report_credit(value, final=False):
         nonlocal billing
         found = image_billing(value, billing["task_id"])
+        if found["task_id"]:
+            remember(found["task_id"])
         if found["used_credit"] == 0 and not final and not _image_result(value):
             found["used_credit"] = None  # Queued jobs may report zero before billing.
         if found["used_credit"] is not None:
@@ -272,33 +293,54 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
             billing = found
         elif found["task_id"]:
             billing["task_id"] = found["task_id"]
-    try:
-        with urllib.request.urlopen(request, timeout=600) as response:
-            for candidate in image_response_items(response):
-                payload = candidate
-                report_credit(payload)
-                image = _image_result(candidate)
-                if image:
-                    break
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:800]
-        raise RuntimeError(f"SnapGen GPT Image ตอบ HTTP {exc.code}: {detail}") from exc
+    if not task_id:
+        remember()  # Persist before POST: a crash/timeout must never silently resubmit a paid job.
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                for candidate in image_response_items(response):
+                    payload = candidate
+                    report_credit(payload)
+                    image = _image_result(candidate)
+                    if image:
+                        break
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            if not billing["task_id"]:
+                code = getattr(exc, "code", None)
+                if code and 400 <= code < 500 and code != 408:
+                    receipt.unlink(missing_ok=True)  # Explicit rejection, not an ambiguous timeout.
+                detail = (exc.read().decode("utf-8", "replace")[:500]
+                          if hasattr(exc, "read") and code != 524 else str(exc)[:200])
+                if code == 524 or isinstance(exc, (TimeoutError, ConnectionError)):
+                    detail = ("หมดเวลารอผล — งานอาจยังสร้างและหักเครดิตอยู่ "
+                              "ตรวจ SnapGen History หรือเลือก GPT Chrome; โปรแกรมยังไม่ส่งซ้ำ")
+                raise RuntimeError(f"SnapGen GPT Image HTTP {code or 'ขัดข้อง'}: {detail}") from exc
+            payload = {"uuid": billing["task_id"]}  # A known job can be recovered with GET only.
     if not image and isinstance(payload, dict):
         task_id = billing["task_id"]
         if task_id:
+            poll_errors = 0
             for _ in range(180):
                 poll = urllib.request.Request(
                     "https://api.snapgen.ai/uapi/v1/history/" + urllib.parse.quote(str(task_id), safe=""),
                     headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
                              "Accept": "application/json"})
-                with urllib.request.urlopen(poll, timeout=60) as response:
-                    payload = json.load(response)
+                try:
+                    with urllib.request.urlopen(poll, timeout=60) as response:
+                        payload = json.load(response)
+                    poll_errors = 0
+                except (OSError, ValueError, http.client.HTTPException) as exc:
+                    poll_errors += 1
+                    if poll_errors >= 3:
+                        raise RuntimeError(f"ดึงผล SnapGen History {task_id} ไม่สำเร็จ — กดทำต่อเพื่อดึงงานเดิม; ไม่ยิงใหม่") from exc
+                    time.sleep(3)
+                    continue
                 report_credit(payload)
                 image = _image_result(payload)
                 if image:
                     break
                 status = str(payload.get("status") or "").lower() if isinstance(payload, dict) else ""
                 if status in {"3", "failed", "error", "cancelled", "canceled"}:
+                    receipt.unlink(missing_ok=True)
                     code = str(payload.get("error_code") or payload.get("status_desc") or "failed")
                     detail = str(payload.get("error_message") or "ผู้ให้บริการไม่ได้ระบุสาเหตุ")[:600]
                     credit = payload.get("used_credit")
@@ -307,7 +349,8 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
                                        f" · History {task_id}{billed}")
                 time.sleep(3)
     if not image:
-        raise RuntimeError("SnapGen GPT Image ไม่ได้ส่งไฟล์ภาพกลับมา")
+        raise RuntimeError(f"SnapGen ยังไม่ได้ส่งภาพกลับมา · History {billing['task_id'] or 'ยังไม่ได้เลขงาน'} "
+                           "— เก็บสถานะไว้แล้ว ตรวจ History ก่อนทำต่อ")
     if on_credit and billing["used_credit"] is None:
         if billing["task_id"]:
             try:
@@ -316,13 +359,15 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
                     headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT, "Accept": "application/json"})
                 with urllib.request.urlopen(poll, timeout=15) as response:
                     report_credit(json.load(response), final=True)
-            except (OSError, ValueError):
+            except (OSError, ValueError, http.client.HTTPException):
                 pass  # Keep the paid image; unknown billing requires explicit consent.
         if billing["used_credit"] is None:
             on_credit(billing)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     target = Path(output_dir) / f"{name}_snapgen.png"
-    return _save_image_result(image, target, api_key)
+    result = _save_image_result(image, target, api_key)
+    receipt.unlink(missing_ok=True)
+    return result
 
 
 def _prepare_maxplus_references(refs, *, max_image_bytes=10 * 1024 * 1024,
@@ -3312,6 +3357,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def show_project(folder, project):
         state.pop("snapgen_credit_acceptance", None)
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
         state["folder"] = str(folder)
         state["project"] = project
         if not video_mode:
@@ -3749,9 +3796,37 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if warning:
                 ui(refresh_snapgen_credit_warning)
 
+        def confirm_resubmit(job_name):
+            # Parallel jobs share one explicit decision for this worker run.
+            with state.setdefault("snapgen_resume_lock", threading.Lock()):
+                if "snapgen_resubmit_confirmed" in state:
+                    if state["snapgen_resubmit_confirmed"]:
+                        return True
+                    raise Stopped()
+                accepted = ask_on_ui("SnapGen — ตรวจ History ก่อนส่งซ้ำ",
+                    f"งาน {job_name} เคยส่งแล้ว แต่ไม่ได้เลขงานกลับมา\n"
+                    "งานอาจสร้างสำเร็จและหักเครดิตไปแล้ว ตรวจ SnapGen History ก่อน\n"
+                    "ถ้ามีรูปแล้ว ให้หยุดและนำรูปนั้นมาใช้ หรือกดทำต่อแล้วเลือก GPT Chrome\n\n"
+                    "คุณตรวจ History แล้ว และยอมรับให้ส่งงานที่สถานะไม่ชัดเจนในรอบนี้ใหม่ใช่ไหม?\n"
+                    "การส่งใหม่อาจหักเครดิตซ้ำ กดไม่ใช่เพื่อหยุด")
+                state["snapgen_resubmit_confirmed"] = accepted
+                if not accepted:
+                    raise Stopped()
+                return True
+
         try:
+            # Migrate timeouts saved by versions predating request receipts.
+            old_error = next((str(scene.get("error") or "")
+                              for i, scene in enumerate(state["project"].get("scenes") or [])
+                              if name == f"scene_{i + 1:03d}"), "")
+            if "SnapGen" in old_error and "HTTP 524" in old_error and not any(
+                    Path(out_dir).glob(f".{name}_snapgen_*.json")):
+                confirm_resubmit(name)
             image = snapgen_image(prompt, refs, str(out_dir), name, aspect, api_key,
+                                  confirm_resubmit=confirm_resubmit,
                                   **({"on_credit": on_credit} if video_mode else {}))
+        except Stopped:
+            raise
         except Exception as exc:
             # A timed-out request may already be processing; do not auto-submit another paid job.
             raise ImageProviderError(f"SnapGen API: {exc} — ตรวจ History ก่อนลองใหม่") from exc
@@ -3972,6 +4047,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 if "GPT said:" in str(exc) or "safety policy" in text:
                     # GPT refused this prompt: asking the same thing again only burns time.
                     raise
+                if any(marker in text for marker in ("no assistant text came back", "no message reached the chat",
+                                                     "chatgpt page did not answer")):
+                    raise  # Replaying an unanswered Web request does not repair the provider.
                 if "conversation_not_found" in text or ("conversation" in text and ("not found" in text or "404" in text)):
                     # The chat is gone from the account Chrome is logged into (chats deleted, or another
                     # account). Nothing is lost: the story and Context live in files, so a new chat in the
@@ -5155,6 +5233,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             messagebox.showinfo("เล่าภาพ", "กำลังทำงานอยู่ — รอให้เสร็จ หรือกดหยุดก่อน", parent=page)
             return
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
 
         def worker():
             done = []
@@ -5526,6 +5606,28 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 "bodies": bodies, "notes": "; ".join(scene.get("fix_notes") or [])})
         return items
 
+    def use_planned_motion(indices, exc):
+        """Explicit, current-run fallback; never mark planned text as visually checked."""
+        if not video_mode or not any(marker in str(exc).lower() for marker in (
+                "no assistant text came back", "no message reached the chat", "chatgpt page did not answer")):
+            return False
+        scenes = state["project"]["scenes"]
+        if any(not str(scenes[i].get("video_prompt") or "").strip() for i in indices):
+            return False
+        if not state.get("motion_planned_only"):
+            if not ask_on_ui("GPT Web ไม่ตอบ — ใช้พรอมต์เดิมไหม?",
+                    "GPT Web ไม่ส่งคำตอบกลับมา แต่ช็อตที่เหลือมีพรอมต์วิดีโอจากแผนอยู่แล้ว\n\n"
+                    "ใช้พรอมต์เหล่านั้นต่อในรอบนี้ โดยข้ามการเขียนและตรวจคำสั่งด้วย GPT Web ไหม?\n"
+                    "ยังไม่ได้ตรวจว่าคำสั่งตรงกับรูปจริง คุณควรตรวจรูปและคำสั่งก่อน\n"
+                    "โปรแกรมยังตรวจรอยตัดคลิปในเครื่องตามเดิม และการสร้างคลิปยังใช้เครดิตตามปกติ\n\n"
+                    "กดไม่ใช่เพื่อหยุดเก็บงานไว้ รอ GPT Web กลับมาใช้งานได้"):
+                raise Stopped()
+            check_stop()
+            state["motion_planned_only"] = True
+            state["motion_text_only"] = True
+            log("ใช้พรอมต์วิดีโอเดิมตามที่ยืนยันเฉพาะรอบนี้ — ไม่ได้ตรวจรูป/คำสั่งด้วย GPT Web; ตรวจคลิปในเครื่อง")
+        return True
+
     def stage_motion(indices=None, force=False):
         """After the pictures: GPT looks at each finished first frame with the script and writes its video prompt.
 
@@ -5539,6 +5641,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         todo = [i for i in pool if scenes[i].get("image") and os.path.isfile(scenes[i]["image"])
                 and (force or scenes[i].get("motion_image") != file_digest(scenes[i]["image"]))]
         if not todo:
+            return
+        if state.get("motion_planned_only") and use_planned_motion(todo, "no assistant text came back"):
             return
         ensure_story_in_history()
         ensure_continuity()
@@ -5566,6 +5670,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     # Pictures could not be sent: for the rest of this run write from the script and image prompt.
                     state["motion_text_only"] = True
                     if force:
+                        if use_planned_motion(todo, exc):
+                            return
                         # A re-look only to describe the picture: without the picture keep the prompt
                         # already written from it rather than rewriting it from planning text.
                         log(f"ส่งรูปให้ GPT ดูไม่ได้ ({str(exc)[:120]}) — ใช้พรอมต์วิดีโอเดิมของช็อต {shots}")
@@ -5574,7 +5680,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if reply is None:
                 text = request + "\n\n(ไม่มีรูปแนบ: ภาพแรกของแต่ละช็อตคือ) " + " | ".join(
                     f"ช็อต {i + 1}: {str(scenes[i].get('prompt') or '')[:300]}" for i in batch)
-                reply = with_retries(f"พรอมต์วิดีโอ ช็อต {shots}", lambda text=text: parse_json_reply(chat(text)))
+                try:
+                    reply = with_retries(f"พรอมต์วิดีโอ ช็อต {shots}", lambda text=text: parse_json_reply(chat(text)))
+                except (Stopped, HistoryLost, RateLimited, ImageProviderError):
+                    raise
+                except Exception as exc:
+                    if use_planned_motion([i for remaining in batches[b - 1:] for i in remaining], exc):
+                        return
+                    raise
             items = [item for item in reply.get("shots") or [] if isinstance(item, dict)]
             for item in items:
                 try:
@@ -5662,6 +5775,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def review_clip_prompt(scene, index):
         """Checker 1, before credits: a separate GPT reads the whole request + the start frame and passes or fixes it."""
+        if state.get("motion_planned_only"):
+            return  # User explicitly accepted the current-run fallback; no false review pass is saved.
         import hashlib
         key = hashlib.md5((clip_prompt(scene) + str(scene.get("image"))).encode("utf-8")).hexdigest()
         if (scene.get("prompt_review") or {}).get("key") == key:
@@ -5782,7 +5897,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         scene["clip_cuts"] = cuts
         verdict, reason, until = ("trim", f"ตัดฉากเองที่วินาที {cuts[0]:g}", cuts[0] - 0.15) if cuts else ("pass", "", None)
         try:
-            if not cuts or state.get("upload_quota_out"):
+            if not cuts or state.get("upload_quota_out") or state.get("motion_planned_only"):
                 raise LookupError  # one continuous shot (or no upload quota left): the local check decides
             url, step = frames_sheet_url(clip, length, scene.get("image"))
             speech = (f"มีบทพูด: {scene['dialogue']} พูดว่า “{scene.get('line', '')}” ปากขยับตรงกับคำพูด คนอื่นไม่พูด"
@@ -5845,6 +5960,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         selected = sorted(int(i) for i in table.selection()) or list(range(len(project.get("scenes") or [])))
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
 
         def worker():
             try:
@@ -5922,6 +6039,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                    + "\n\nทำเลยไหม?", parent=page):
             return
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
 
         def worker():
             redone, still_bad = [], []
@@ -6257,6 +6376,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project.setdefault("done", {}).pop("video", None)
         save_project()
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
         start_btn.config(state="disabled")
 
         def worker():
@@ -6521,6 +6642,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         follow_active_account()
         save_project()
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
         start_btn.config(state="disabled")
 
         def worker():
@@ -6528,6 +6651,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             try:
                 if video_mode:
                     state.pop("snapgen_credit_acceptance", None)
+                    for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+                        state.pop(transient, None)
                     ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                 keys = [only] if only else [k for k, _t, _w in stages]
@@ -6717,12 +6842,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         follow_active_account()
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
 
         def worker():
             before = {i: (project["scenes"][i].get("image"), _mtime(project["scenes"][i].get("image"))) for i in selected}
             try:
                 if video_mode:
                     state.pop("snapgen_credit_acceptance", None)
+                    for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+                        state.pop(transient, None)
                     ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                 stage_images(selected)
@@ -6795,11 +6924,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         problem = problem.strip()
         follow_active_account()
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
 
         def worker():
             try:
                 if video_mode:
                     state.pop("snapgen_credit_acceptance", None)
+                    for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+                        state.pop(transient, None)
                     ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                 ensure_story_in_history()
@@ -6884,6 +7017,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         follow_active_account()
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
 
         def worker():
             try:
@@ -6904,6 +7039,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project = state["project"]
         scene = project["scenes"][index]
         state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(transient, None)
 
         def worker():
             try:

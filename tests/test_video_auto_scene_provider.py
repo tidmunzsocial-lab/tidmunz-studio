@@ -84,9 +84,13 @@ def test_stop_resume_and_restart_ask_once_per_run_and_keep_storyboard(tmp_path):
                  stage_var=Widget(), detail_var=Widget(), bar=Widget(), start_btn=Widget())
     worker = load(scope, "worker", "start_pipeline")
     scope["state"]["snapgen_credit_acceptance"] = {"ceiling": 999}
+    for key in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+        scope["state"][key] = True
     assert scope["image_provider_for"]("storyboard") == "maxplus_gpt_image_2_4k"
     worker()
     assert "snapgen_credit_acceptance" not in scope["state"]
+    assert not any(key in scope["state"] for key in (
+        "motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"))
     assert seen == ["snapgen"] * 8 and len(dialogs) == 1
     restored = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
     assert restored["image_stage_providers"]["images"] == "snapgen"
