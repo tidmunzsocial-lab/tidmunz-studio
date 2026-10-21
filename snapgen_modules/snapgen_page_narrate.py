@@ -2968,6 +2968,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         else:
             found = match_reference_files(text, attachment_folder())
         paths = [str(path) for _name, path in found]
+        repaired_ref = (scene.get("identity_repair") or {}).get("reference")
+        if repaired_ref and Path(repaired_ref).is_file():
+            repaired_name = str(scene["identity_repair"].get("character") or "").casefold()
+            paths = [repaired_ref, *(p for p in paths if Path(p).resolve() != Path(repaired_ref).resolve()
+                                    and Path(p).stem.casefold() != repaired_name)]
         return paths if limit is None else paths[:limit]
 
     def desired_count() -> int:
@@ -2999,8 +3004,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                           + model_info
                           + (f" → ประมาณ {count} คลิป" if count else ""))
 
+    # Settings can be folded once a project has scenes, leaving room for the work.
+    settings_parent = tk.Frame(box, bg=bg) if video_mode else box
+    settings_open = [True]
+    if video_mode:
+        settings_parent.pack(fill="x")
+
+    def toggle_settings(show=None):
+        settings_open[0] = not settings_open[0] if show is None else bool(show)
+        if settings_open[0]:
+            settings_parent.pack(fill="x", before=run_row)
+        else:
+            settings_parent.pack_forget()
+        settings_button.config(text="ซ่อนตั้งค่า ▴" if settings_open[0] else "ตั้งค่า ▾")
+
     # ── input row ──
-    inputs = tk.Frame(box, bg=bg)
+    inputs = tk.Frame(settings_parent, bg=bg)
     inputs.pack(fill="x", padx=8, pady=(4, 0))
 
     def file_card(parent, title, var, command):
@@ -3013,7 +3032,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tk.Label(card, textvariable=var, bg="#FFFFFF", fg="#475569", anchor="w").pack(side="left", fill="x", expand=True)
         return card
 
-    options = tk.Frame(box, bg=bg)
+    options = tk.Frame(settings_parent, bg=bg)
     options.pack(fill="x", padx=8, pady=2)
     checkbox_parent = options
     clip_info_var = tk.StringVar(value="")
@@ -3027,7 +3046,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if state.get("project") is not None:
                 state["project"]["economy"] = bool(economy_var.get())
                 save_project()
-        video_controls = tk.Frame(box, bg=bg)
+        video_controls = tk.Frame(settings_parent, bg=bg)
         video_controls.pack(fill="x", padx=8, pady=(0, 2))
         checkbox_parent = video_controls
         tk.Checkbutton(video_controls, text="ประหยัด (สโลว์ 2× · ตัดน้อย)", variable=economy_var,
@@ -3092,7 +3111,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
             threading.Thread(target=worker, daemon=True).start()
 
-        image_provider_row = tk.Frame(box, bg=bg)
+        image_provider_row = tk.Frame(settings_parent, bg=bg)
         image_provider_row.pack(fill="x", padx=8, pady=(1, 3))
         tk.Label(image_provider_row, text="สตอรี่บอร์ดผ่าน", bg=bg).pack(side="left")
         provider_menu = ttk.Combobox(
@@ -3123,11 +3142,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tk.Label(image_provider_row, textvariable=maxplus_credit_var, bg=bg, fg="#475569").pack(side="left", padx=6)
         tk.Button(image_provider_row, text="รีเฟรช", command=refresh_maxplus_credit,
                   relief="flat", bg="#E2E8F0", fg="#0F172A", cursor="hand2").pack(side="left", padx=(0, 4))
-        tk.Label(box, textvariable=maxplus_model_info_var, bg=bg, fg="#475569", anchor="w").pack(
+        tk.Label(settings_parent, textvariable=maxplus_model_info_var, bg=bg, fg="#475569", anchor="w").pack(
             fill="x", padx=10, pady=(0, 3))
         refresh_maxplus_model_info()
 
-        model_row = tk.Frame(box, bg=bg)
+        model_row = tk.Frame(settings_parent, bg=bg)
         model_row.pack(fill="x", padx=8, pady=2)
         tk.Label(model_row, text="โมเดลวิดีโอ", bg=bg).pack(side="left")
         model_menu = ttk.Combobox(model_row, textvariable=video_model_var, width=29, state="readonly",
@@ -3140,7 +3159,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tk.Label(options, text="จำนวนรูปทั้งเรื่อง", bg=bg).pack(side="left")
         ttk.Combobox(options, textvariable=count_var, values=IMAGE_COUNTS, width=5, state="readonly").pack(side="left", padx=4)
         tk.Label(options, text="รูปฉาก (+ รูปตัวละครตามเรื่อง)", bg=bg).pack(side="left", padx=(0, 14))
-        provider_row = tk.Frame(box, bg=bg)
+        provider_row = tk.Frame(settings_parent, bg=bg)
         provider_row.pack(fill="x", padx=8, pady=(1, 3))
         tk.Label(provider_row, text="สร้างรูปผ่าน", bg=bg).pack(side="left")
         provider_menu = ttk.Combobox(provider_row, textvariable=image_provider_var, width=29, state="readonly",
@@ -3198,11 +3217,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     # ── run row ──
     run_row = tk.Frame(box, bg=bg)
     run_row.pack(fill="x", padx=8, pady=(6, 2))
-    start_btn = make_styled_button(run_row, "PRIMARY", "▶ เริ่มทำทั้งเรื่อง", command=lambda: start_pipeline())
+    start_btn = make_styled_button(run_row, "PRIMARY", "▶ เริ่ม" if video_mode else "▶ เริ่มทำทั้งเรื่อง", command=lambda: start_pipeline())
     start_btn.pack(side="left")
     make_styled_button(run_row, "DANGER", "⏸ หยุด", command=lambda: request_stop()).pack(side="left", padx=6)
     make_styled_button(run_row, "SECONDARY", "เปิดโปรเจกต์", command=lambda: choose_saved_project()).pack(side="left", padx=6)
-    make_styled_button(run_row, "SUCCESS", "▶ เปิดวิดีโอ", command=lambda: open_path((state["project"] or {}).get("last_video"))).pack(side="left")
+    if video_mode:
+        settings_button = tk.Button(run_row, text="ซ่อนตั้งค่า ▴", command=toggle_settings, relief="flat", padx=8)
+        settings_button.pack(side="left", padx=4)
+        tools_menu = tk.Menubutton(run_row, text="เครื่องมือ ▾", relief="flat", padx=8)
+        menu = tk.Menu(tools_menu, tearoff=False)
+        menu.add_command(label="เปิดโฟลเดอร์งาน", command=lambda: open_path(state.get("folder")))
+        menu.add_separator()
+        menu.add_command(label="เริ่มประวัติ GPT ใหม่…", command=lambda: reset_history())
+        tools_menu.config(menu=menu)
+        tools_menu.pack(side="left")
+    else:
+        make_styled_button(run_row, "SUCCESS", "▶ เปิดวิดีโอ", command=lambda: open_path((state["project"] or {}).get("last_video"))).pack(side="left")
     redo_var = tk.StringVar(value=stages[2][1])
     make_styled_button(run_row, "SECONDARY", "↺ ทำใหม่ตั้งแต่ขั้น", command=lambda: redo_from(redo_var.get())).pack(side="right")
     ttk.Combobox(run_row, textvariable=redo_var, values=[t for _k, t, _w in stages], width=14,
@@ -3231,7 +3261,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     # ── scenes table ──
     table_tools = tk.Frame(box, bg=bg)
     table_tools.pack(fill="x", padx=8)
-    tk.Label(table_tools, text="ฉาก", bg=bg, fg="#334155").pack(side="left", padx=(0, 6))
+    if not video_mode:
+        tk.Label(table_tools, text="ฉาก", bg=bg, fg="#334155").pack(side="left", padx=(0, 6))
     if not video_mode:
         tk.Label(table_tools, text="ส่งออก 1080p", bg=bg, fg="#64748B").pack(side="left", padx=(0, 4))
         make_styled_button(table_tools, "SUCCESS", "เฉพาะที่แก้",
@@ -3239,23 +3270,46 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         make_styled_button(table_tools, "SECONDARY", "ทั้งหมด",
                            command=lambda: render_video_selected(force=True)).pack(side="left", padx=2)
     if video_mode:
-        make_styled_button(table_tools, "SECONDARY", "ต่อวิดีโอใหม่", command=lambda: start_pipeline(only="video")).pack(side="right")
-    make_styled_button(table_tools, "SECONDARY", "เจนช็อตใหม่" if video_mode else "เจนรูปใหม่", command=lambda: regenerate_selected()).pack(side="right", padx=4)
-    make_styled_button(table_tools, "DANGER", "🛠 แก้ช็อตพัง" if video_mode else "🛠 แก้รูปพัง",
-                       command=lambda: fix_problem_selected()).pack(side="right", padx=6)
-    if video_mode:
-        make_styled_button(table_tools, "SUCCESS", "🎬 เจนวิดีโอใหม่ช็อตที่เลือก",
-                           command=lambda: remake_clips_selected()).pack(side="right", padx=6)
-        make_styled_button(table_tools, "SECONDARY", "🔍 ตรวจคลิป",
-                           command=lambda: review_clips_selected()).pack(side="right", padx=6)
-        make_styled_button(table_tools, "SECONDARY", "🐢 ทำสโลว์ใหม่",
-                           command=lambda: reslow_selected()).pack(side="right", padx=6)
-    make_styled_button(table_tools, "PRIMARY", "แก้ prompt", command=lambda: refine_selected()).pack(side="right", padx=4)
-    make_styled_button(table_tools, "DANGER", "รีเซ็ต GPT", command=lambda: reset_history()).pack(side="right")
+        action_hint = tk.StringVar(value="เลือกช็อตในตารางก่อน · ชี้ปุ่มเพื่อดูหน้าที่ · การสร้างรูป/คลิปอาจใช้เครดิต")
+        action_groups = (
+            ("รูปภาพ", (
+                ("สร้างใหม่", lambda: regenerate_selected(), "สร้างภาพช็อตที่เลือกใหม่จากพรอมต์และเรฟ ใช้เครดิตสร้างรูป"),
+                ("แก้รูปเดิม", lambda: edit_current_selected(), "แก้รายละเอียดจากภาพปัจจุบัน โดยรักษาส่วนที่ไม่ได้สั่งแก้"),
+                ("แก้ให้ตรงเรฟ", lambda: repair_identity_selected(), "เลือกตัวละคร รูปเรฟ และ Context แล้วแก้เฉพาะตัวละครนั้น"),
+                ("แก้พรอมต์", lambda: edit_prompt(), "เปิดข้อความพรอมต์ภาพให้แก้เอง ยังไม่สร้างรูปจนกดยืนยัน"),
+                ("GPT ช่วยแก้", lambda: refine_selected(), "ให้ GPT เขียนพรอมต์ภาพใหม่ แล้วถามก่อนสร้างรูป"),
+                ("นำเข้ารูป", lambda: use_scene_image(), "เลือกไฟล์รูปสำเร็จมาแทนภาพของช็อตเดียว ไม่เสียเครดิตสร้างรูป"),
+            )),
+            ("วิดีโอ", (
+                ("สร้างคลิป", lambda: remake_clips_selected(), "สร้างวิดีโอใหม่เฉพาะช็อตที่เลือกจากภาพปัจจุบัน ใช้เครดิตวิดีโอ"),
+                ("แจ้งปัญหาคลิป", lambda: fix_problem_selected(), "บอกปัญหาคลิปให้ GPT แก้คำสั่ง ไม่แก้ภาพแรก และถามก่อนสร้างคลิป"),
+                ("ตรวจคลิป", lambda: review_clips_selected(), "ตรวจรอยตัดหรือฉากกระโดดในคลิป และให้ GPT ช่วยดูเมื่อจำเป็น ไม่ใช่ตรวจหน้าตาตรงเรฟ"),
+                ("ทำสโลว์", lambda: reslow_selected(), "ทำสโลว์ 2× จากคลิปที่มีอยู่ ไม่ส่งสร้างวิดีโอใหม่"),
+                ("รวมวิดีโอ", lambda: start_pipeline(only="video"), "รวมคลิปที่มีอยู่กับเสียงเป็นวิดีโอ ไม่สร้างรูปหรือคลิปใหม่"),
+                ("เปิดวิดีโอ", lambda: open_path((state["project"] or {}).get("last_video")), "เปิดวิดีโอที่รวมเสร็จล่าสุด"),
+            )),
+        )
+        for column, (title, buttons) in enumerate(action_groups):
+            group = tk.LabelFrame(table_tools, text=title, bg=bg, fg="#334155", padx=4, pady=2)
+            group.grid(row=0, column=column, sticky="nsew", padx=(0, 6))
+            table_tools.grid_columnconfigure(column, weight=1, uniform="actions")
+            for n, (label, command, hint) in enumerate(buttons):
+                button = tk.Button(group, text=label, command=command, relief="flat", bg="#E2E8F0",
+                                   fg="#0F172A", font=("TkDefaultFont", 9), padx=3, pady=3, cursor="hand2")
+                button.grid(row=n // 3, column=n % 3, sticky="ew", padx=2, pady=2)
+                group.grid_columnconfigure(n % 3, weight=1, uniform="buttons")
+                button.bind("<Enter>", lambda e, text=hint: action_hint.set(text))
+                button.bind("<FocusIn>", lambda e, text=hint: action_hint.set(text))
+        tk.Label(box, textvariable=action_hint, bg=bg, fg="#475569", anchor="w").pack(fill="x", padx=10)
+    else:
+        make_styled_button(table_tools, "SECONDARY", "เจนรูปใหม่", command=lambda: regenerate_selected()).pack(side="right", padx=4)
+        make_styled_button(table_tools, "DANGER", "🛠 แก้รูปพัง", command=lambda: fix_problem_selected()).pack(side="right", padx=6)
+        make_styled_button(table_tools, "PRIMARY", "แก้ prompt", command=lambda: refine_selected()).pack(side="right", padx=4)
+        make_styled_button(table_tools, "DANGER", "รีเซ็ต GPT", command=lambda: reset_history()).pack(side="right")
     table_frame = tk.Frame(box, bg=bg)
     table_frame.pack(fill="both", expand=True, padx=8, pady=2)
     # Give the selected image a useful viewing width while the table takes the remaining space.
-    preview_box = tk.Frame(table_frame, bg="#F1F5F9", width=420)
+    preview_box = tk.Frame(table_frame, bg="#F1F5F9", width=300 if video_mode else 420)
     preview_box.pack(side="right", fill="y", padx=(8, 0))
     preview_box.pack_propagate(False)
     preview = tk.Label(preview_box, bg="#F1F5F9", text="เลือกฉากเพื่อดูรูป")
@@ -3264,8 +3318,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     table = ttk.Treeview(table_frame, columns=columns, show="headings", height=12, selectmode="extended")
     table.tag_configure("bad", foreground="#DC2626")
     for key, title, width in (("no", "#", 44), ("time", "เวลา", 64),
-                              ("chars", "ไฟล์แนบที่ใช้ (ตัวละคร/สถานที่)" if video_mode else "ตัวละคร", 220 if video_mode else 170),
-                              ("prompt", "ภาพ", 560), ("status", "รูป", 170 if video_mode else 80)):
+                              ("chars", "ตัวละคร / สถานที่" if video_mode else "ตัวละคร", 160 if video_mode else 170),
+                              ("prompt", "พรอมต์ภาพ", 560), ("status", "สถานะ", 140 if video_mode else 80)):
         table.heading(key, text=title)
         table.column(key, width=width, stretch=key == "prompt")
     scroll = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
@@ -3361,6 +3415,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             state.pop(transient, None)
         state["folder"] = str(folder)
         state["project"] = project
+        if video_mode:
+            toggle_settings(not bool(project.get("scenes")))
         if not video_mode:
             restored = relink_scene_images(project, folder)
             if restored:
@@ -3864,7 +3920,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             refresh_maxplus_credit()
 
     def make_image(prompt, refs, out_dir, name, aspect, board=None, identity=False, api_context=None,
-                   grid_template=False):
+                   grid_template=False, identity_repair=None):
         imgmod = runtime.get("_imgmod") or g.get("_imgmod")
         project = state["project"]
         provider = "snapgen" if api_context is not None else image_provider_for(state.get("active_image_stage", "images"))
@@ -3916,10 +3972,27 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 + "\nDraw a completely NEW scene picture as described above, with its own setting, background, "
                 "lighting, camera angle and action. Do NOT copy the references' standing pose, plain gray background, "
                 "framing or layout, and never output a character reference sheet or a person on a plain backdrop.")
+        if identity_repair:
+            master = Path(identity_repair["reference"]).resolve()
+            number = next((i for i, p in enumerate(refs, 1) if Path(p).resolve() == master), None)
+            if number is None or not master.is_file():
+                raise ImageProviderError("ยังไม่ได้แนบเรฟที่เลือกสำหรับแก้ตัวละคร — หยุดก่อนใช้เครดิต")
+            prompt += (
+                f"\n\nIDENTITY CORRECTION — highest priority for {identity_repair['character']}: "
+                f"Image {number} is the selected MASTER identity reference. Match its exact face, facial structure, "
+                "skin tone, hair/hairline, body proportions and outfit. Correct these features even when they differ "
+                "from the old scene or storyboard; do NOT preserve the incorrect identity in those images. "
+                "The old scene/storyboard controls camera, placement, action and setting ONLY. Preserve other people "
+                "and unrelated details. Do not copy the master's background or neutral standing pose. "
+                "When assumed visual descriptions in the old prompt/Context conflict with the master, the master wins. "
+                "Keep story-required injuries/transformations only when explicitly specified for this scene.\n"
+                f"Context for this character from THIS project:\n{json.dumps(identity_repair['context'], ensure_ascii=False)}\n"
+                f"User's specific correction: {identity_repair.get('notes') or 'แก้ตัวละครให้ตรงกับรูปเรฟที่เลือก'}")
         import hashlib
         old = {hashlib.md5(Path(s["image"]).read_bytes()).hexdigest()
                for s in project.get("scenes") or [] if s.get("image") and os.path.isfile(s["image"])}
         old.update(project.get("rejected_hashes") or [])
+        protected_images = {Path(p).resolve() for p in [*refs, *(s.get("image") for s in project.get("scenes") or [])] if p}
         # Pictures go into short chats of IMAGES_PER_CHAT, not the story chat: it grows ~2 MB per picture
         # and, once it held a few dozen, every new picture there took 3-8 minutes (the page and GPT re-read
         # it all). A short chat still lets GPT see the previous few shots; faces stay consistent through
@@ -3996,10 +4069,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 raise ImageProviderError(f"{labels.get(provider, provider)} ส่งภาพซ้ำ — เก็บภาพไว้แล้ว ตรวจผลก่อนสั่งสร้างใหม่")
             # An old picture came back (GPT drew nothing new): ask once more in another fresh chat.
             log(f"{name}: ได้รูปเก่าซ้ำกลับมา — สร้างใหม่ในแชตใหม่")
-            Path(out).unlink(missing_ok=True)
+            if Path(out).resolve() not in protected_images:
+                Path(out).unlink(missing_ok=True)
             out = maybe_qwen(generate_base(temporary=True))
             if hashlib.md5(Path(out).read_bytes()).hexdigest() in old:
-                Path(out).unlink(missing_ok=True)
+                if Path(out).resolve() not in protected_images:
+                    Path(out).unlink(missing_ok=True)
                 raise RuntimeError("GPT ส่งรูปเก่าซ้ำกลับมา ไม่ได้สร้างรูปใหม่")
         target = Path(out_dir) / f"{name}{Path(out).suffix or '.png'}"
         for old in Path(out_dir).glob(f"{name}.*"):
@@ -5034,7 +5109,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             check_batch_stop()
             i, prompt, paths, board = job
             return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}",
-                              project["aspect"], board=board, api_context=api_context)
+                              project["aspect"], board=board, api_context=api_context,
+                              **({"identity_repair": scenes[i]["identity_repair"]} if scenes[i].get("identity_repair") else {}))
 
         def completed(job, image, error):
             nonlocal finished
@@ -5125,9 +5201,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             try:
                 board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
                 scene["image"] = with_retries(f"ฉาก {i + 1}", lambda: make_image(
-                    scene_prompt(scene), ref_paths, images_dir, f"scene_{i + 1:03d}", project["aspect"], board=board))
+                    scene_prompt(scene), ref_paths, images_dir, f"scene_{i + 1:03d}", project["aspect"], board=board,
+                    **({"identity_repair": scene["identity_repair"]} if scene.get("identity_repair") else {})))
                 if ref_paths and looks_like_reference_sheet(scene["image"]):
-                    if image_provider_for("images") in ("qwen", "maxplus"):
+                    if image_provider_for("images") in ("qwen", "maxplus") or scene.get("identity_repair"):
                         save_project()
                         raise ImageProviderError(f"ฉาก {i + 1} คล้ายรูปเรฟ — เก็บภาพไว้ ตรวจผลก่อนสร้างใหม่ เพื่อไม่ส่ง API ซ้ำอัตโนมัติ")
                     # The picture came back as a copy of a reference (plain backdrop): draw the scene again
@@ -6641,6 +6718,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project["done"].pop("video", None)
         follow_active_account()
         save_project()
+        if video_mode:
+            toggle_settings(False)
         state["busy"], state["stop"] = True, False
         for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(transient, None)
@@ -6827,6 +6906,145 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return os.path.getmtime(str(path)) if path else 0.0
         except OSError:
             return 0.0
+
+    def edit_current_selected():
+        selected = table.selection()
+        if state["busy"] or len(selected) != 1:
+            messagebox.showinfo("แก้รูปเดิม", "หยุดงานก่อน แล้วเลือกช็อตเดียวในตาราง", parent=page)
+            return
+        wish = simpledialog.askstring("แก้รูปเดิม", "เปลี่ยนรายละเอียดอะไรในภาพนี้?\nถ้าหน้าตา/ผม/ชุดไม่ตรงเรฟ ใช้ปุ่ม ‘แก้ให้ตรงเรฟ’", parent=page)
+        if wish and wish.strip():
+            edit_scene_image(int(selected[0]), wish.strip())
+
+    def repair_identity_selected():
+        project = state.get("project")
+        selected = table.selection()
+        if not project or state["busy"] or len(selected) != 1:
+            messagebox.showinfo("แก้ให้ตรงเรฟ", "หยุดงานก่อน แล้วเลือกช็อตเดียวในตาราง", parent=page)
+            return
+        index = int(selected[0])
+        scene = project["scenes"][index]
+        if not Path(scene.get("image") or "").is_file():
+            messagebox.showinfo("แก้ให้ตรงเรฟ", "ช็อตนี้ยังไม่มีรูปให้แก้", parent=page)
+            return
+        contexts = {c["name"]: c for c in (project.get("context") or {}).get("characters", []) if c.get("name")}
+        names = [name for name in scene.get("characters") or [] if name in contexts]
+        if not names:
+            messagebox.showinfo("แก้ให้ตรงเรฟ", "ช็อตนี้ไม่มีตัวละครที่ตรงกับ Context ของโปรเจกต์ — ตรวจรายชื่อตัวละครก่อน", parent=page)
+            return
+        pending = (project.get("identity_repairs_pending") or {}).get(str(index)) or scene.get("identity_repair") or {}
+        win = tk.Toplevel(page)
+        win.title(f"แก้ให้ตรงเรฟ — ช็อต {index + 1}")
+        win.geometry("720x470")
+        win.transient(root)
+        character = tk.StringVar(value=pending.get("character") if pending.get("character") in names else names[0])
+        reference = tk.StringVar(value="")
+        tk.Label(win, text="เลือกตัวละครและเรฟที่ถูกต้อง · คงฉากและตัวละครอื่นตามรูปเดิม", anchor="w").pack(fill="x", padx=12, pady=8)
+        menu = ttk.Combobox(win, textvariable=character, values=names, state="readonly")
+        menu.pack(fill="x", padx=12)
+        ref_row = tk.Frame(win); ref_row.pack(fill="x", padx=12, pady=8)
+        tk.Entry(ref_row, textvariable=reference).pack(side="left", fill="x", expand=True)
+        def browse():
+            path = filedialog.askopenfilename(parent=win, title=f"เรฟของ {character.get()}",
+                    initialdir=attachment_folder() or state["folder"],
+                    filetypes=[("รูปภาพ", "*.png *.jpg *.jpeg *.webp")])
+            if path:
+                reference.set(path)
+        tk.Button(ref_row, text="เลือกเรฟ…", command=browse).pack(side="left", padx=4)
+        tk.Button(ref_row, text="ดูเรฟ", command=lambda: open_path(reference.get())).pack(side="left")
+        tk.Label(win, text="Context ของตัวละครจากโปรเจกต์นี้ (เรฟที่เลือกมีลำดับสูงกว่ารายละเอียดที่สมมุติ)", anchor="w").pack(fill="x", padx=12)
+        context_box = tk.Text(win, height=9, wrap="word", font=("TkDefaultFont", 9))
+        context_box.pack(fill="both", expand=True, padx=12, pady=4)
+        def character_changed(_event=None):
+            context_box.config(state="normal"); context_box.delete("1.0", tk.END)
+            context_box.insert("1.0", character_description(contexts[character.get()])
+                               or json.dumps(contexts[character.get()], ensure_ascii=False, indent=2))
+            context_box.config(state="disabled")
+            candidates = match_reference_files(character.get(), attachment_folder())
+            chosen = pending.get("reference") if pending.get("character") == character.get() else None
+            reference.set(chosen if chosen and Path(chosen).is_file() else candidates[0][1] if len(candidates) == 1 else "")
+        menu.bind("<<ComboboxSelected>>", character_changed)
+        character_changed()
+        tk.Label(win, text="เน้นแก้อะไรเพิ่มเติม เช่น ผมต้องเกรียนตามเรฟ ห้ามผมหยิก", anchor="w").pack(fill="x", padx=12)
+        notes = tk.Entry(win); notes.pack(fill="x", padx=12, pady=4)
+        notes.insert(0, pending.get("notes") or "")
+        def accept():
+            path = Path(reference.get().strip())
+            if not path.is_file() or path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                messagebox.showerror("แก้ให้ตรงเรฟ", "เลือกไฟล์รูปเรฟของตัวละครก่อน", parent=win)
+                return
+            if path.resolve() == Path(scene["image"]).resolve():
+                messagebox.showerror("แก้ให้ตรงเรฟ", "เลือกเรฟตัวละครแยกจากรูปฉากที่มีปัญหา", parent=win)
+                return
+            try:
+                from PIL import Image
+                with Image.open(path) as ref_image:
+                    ref_image.verify()
+            except Exception:
+                messagebox.showerror("แก้ให้ตรงเรฟ", "เปิดไฟล์เรฟนี้ไม่ได้ เลือกรูปที่สมบูรณ์ก่อนใช้เครดิต", parent=win)
+                return
+            record = {"character": character.get(), "reference": str(path.resolve()),
+                      "context": json.loads(json.dumps(contexts[character.get()])), "notes": notes.get().strip()}
+            win.destroy()
+            repair_identity(index, record)
+        tk.Button(win, text="แก้รูปนี้ — เลือกผู้สร้างรูปในขั้นถัดไป (อาจใช้เครดิต)", command=accept,
+                  bg="#2563EB", fg="white").pack(fill="x", padx=12, pady=10)
+        win.grab_set()
+
+    def repair_identity(index, record):
+        project = state["project"]
+        if state["busy"]:
+            return
+        scene = project["scenes"][index]
+        source = scene.get("image")
+        if not source or not Path(source).is_file() or not Path(record["reference"]).is_file():
+            messagebox.showerror("แก้ให้ตรงเรฟ", "รูปฉากหรือเรฟถูกย้าย/ลบ — เลือกใหม่ก่อนใช้เครดิต", parent=page)
+            return
+        import hashlib
+        source_digest = file_digest(source)
+        fingerprint = hashlib.sha256(Path(source).read_bytes() + Path(record["reference"]).read_bytes()
+            + json.dumps(record, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
+        name = f"scene_{index + 1:03d}_identity_{fingerprint}"
+        state["busy"], state["stop"] = True, False
+        for key in ("snapgen_credit_acceptance", "motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
+            state.pop(key, None)
+        project.setdefault("image_stage_providers", {}).pop("images", None)
+        state["active_image_stage"] = "images"
+        project.setdefault("identity_repairs_pending", {})[str(index)] = record
+        save_project()
+        start_btn.config(state="disabled")
+        def worker():
+            try:
+                check_stop()
+                log(f"แก้เรฟช็อต {index + 1}: {record['character']} · {Path(record['reference']).name} · ส่ง Context ตัวละครครบ")
+                images_dir = Path(state["folder"]) / "images"
+                images_dir.mkdir(parents=True, exist_ok=True)
+                out = make_image(scene_prompt(scene), [record["reference"]], images_dir,
+                                 name, project["aspect"], board=source, identity_repair=record)
+                if scene.get("image") != source or file_digest(source) != source_digest:
+                    raise ImageProviderError(f"รูปต้นฉบับเปลี่ยนระหว่างทำงาน — เก็บผลไว้ที่ {out} ยังไม่แทนรูปในโปรเจกต์")
+                scene.setdefault("image_history", []).append({"image": source, "clip": scene.get("clip")})
+                scene["image"] = out
+                scene["identity_repair"] = record
+                for key in ("error", "bad", "motion_image", "seen", "prompt_review", "clip", "clip_normal",
+                            "clip_review", "clip_error", "clip_use_until", "clip_cuts"):
+                    scene.pop(key, None)
+                for key in ("motion", "clips", "video"):
+                    project.setdefault("done", {}).pop(key, None)
+                project["images_verified"] = False
+                project["identity_repairs_pending"].pop(str(index), None)
+                log(f"✓ แก้เรฟช็อต {index + 1} ได้รูปใหม่แล้ว — ตรวจภาพก่อนกดสร้างคลิป; เก็บรูป/คลิปเดิมไว้ในประวัติ")
+            except Stopped:
+                log("หยุดแก้เรฟ — รูปและคลิปเดิมยังอยู่")
+            except Exception as exc:
+                log(f"❌ แก้เรฟช็อต {index + 1}: {exc}")
+            finally:
+                save_project()
+                state["busy"] = False
+                state.pop("active_image_stage", None)
+                ui(lambda: start_btn.config(state="normal", text="▶ ทำต่อ"))
+                ui(refresh_all)
+        threading.Thread(target=worker, daemon=True).start()
 
     def regenerate_selected(only=None, ask=True):
         project = state["project"]
