@@ -124,7 +124,19 @@ async function workerTab() {
     } catch (e) {}
   }
   if (id === null) {
-    const tab = await chrome.tabs.create({url: "https://chatgpt.com/", active: false, pinned: true});
+    let tab;
+    try {
+      tab = await chrome.tabs.create({url: "https://chatgpt.com/", active: false, pinned: true});
+    } catch (e) {
+      if (!/No current window/i.test(String(e && e.message || e))) throw e;
+      // The service worker can stay connected after the profile's last window closed.
+      // Open a window in this extension's profile before sending anything to ChatGPT.
+      const win = await chrome.windows.create({url: "https://chatgpt.com/", type: "normal", focused: false, incognito: false});
+      tab = win && win.tabs && win.tabs[0];
+      if (!tab || !Number.isInteger(tab.id))
+        throw new Error("Cannot open ChatGPT work tab — open the program's Chrome window, then try again");
+      await chrome.tabs.update(tab.id, {pinned: true});
+    }
     await chrome.storage.session.set({tabId: tab.id});
     id = tab.id;
   }
