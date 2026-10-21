@@ -79,17 +79,17 @@ if exist ".venv311\Scripts\python.exe" (
 )
 
 REM No working venv - find system Python 3.12 first, then 3.11
-for %%V in (3.12 3.13 3.11) do (
+for %%V in (312) do (
   if not defined PYEXE (
     for %%P in (
       "%LocalAppData%\Programs\Python\Python%%V\python.exe"
       "%ProgramFiles%\Python%%V\python.exe"
       "%ProgramFiles(x86)%\Python%%V\python.exe"
     ) do (
-      if not defined PYEXE if exist %%~P (
+      if not defined PYEXE if exist "%%~P" (
         set "PYEXE=%%~P"
-        set "PYVER=%%V"
-        echo   Found: Python %%V at %%~P
+        set "PYVER=3.12"
+        echo   Found: Python 3.12 at "%%~P"
       )
     )
   )
@@ -99,7 +99,7 @@ REM Try py launcher
 if not defined PYEXE (
   py -3.12 -c "import sys; print(sys.executable)" > "%TEMP%\snapgen_py.txt" 2>nul
   if exist "%TEMP%\snapgen_py.txt" (
-    for /f "delims=" %%A in (%TEMP%\snapgen_py.txt) do (
+    for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_py.txt") do (
       if not defined PYEXE if not "%%A"=="" set "PYEXE=%%A"
     )
     del "%TEMP%\snapgen_py.txt" >nul 2>nul
@@ -110,7 +110,7 @@ REM Try plain python
 if not defined PYEXE (
   python -c "import sys; print(sys.executable)" > "%TEMP%\snapgen_py.txt" 2>nul
   if exist "%TEMP%\snapgen_py.txt" (
-    for /f "delims=" %%A in (%TEMP%\snapgen_py.txt) do (
+    for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_py.txt") do (
       if not defined PYEXE if not "%%A"=="" set "PYEXE=%%A"
     )
     del "%TEMP%\snapgen_py.txt" >nul 2>nul
@@ -121,7 +121,7 @@ REM Try where python (finds Python in PATH even if not in standard locations)
 if not defined PYEXE (
   where python > "%TEMP%\snapgen_where.txt" 2>nul
   if exist "%TEMP%\snapgen_where.txt" (
-    for /f "delims=" %%A in (%TEMP%\snapgen_where.txt) do (
+    for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_where.txt") do (
       if not defined PYEXE if not "%%A"=="" (
         "%%A" -c "import sys; print('OK')" >nul 2>nul
         if not errorlevel 1 set "PYEXE=%%A"
@@ -135,19 +135,19 @@ REM Try uv-managed Python 3.12 (works on machines without winget)
 if not defined PYEXE (
   where uv > "%TEMP%\snapgen_uv_where.txt" 2>nul
   if exist "%TEMP%\snapgen_uv_where.txt" (
-    for /f "delims=" %%U in (%TEMP%\snapgen_uv_where.txt) do if not defined UVEXE set "UVEXE=%%U"
+    for /f "usebackq delims=" %%U in ("%TEMP%\snapgen_uv_where.txt") do if not defined UVEXE set "UVEXE=%%U"
     del "%TEMP%\snapgen_uv_where.txt" >nul 2>nul
   )
   if defined UVEXE (
     echo   Found uv: !UVEXE!
-    !UVEXE! python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
-    for /f "delims=" %%A in (%TEMP%\snapgen_uv_py312.txt) do if not defined PYEXE set "PYEXE=%%A"
+    "!UVEXE!" python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
+    for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_uv_py312.txt") do if not defined PYEXE set "PYEXE=%%A"
     del "%TEMP%\snapgen_uv_py312.txt" >nul 2>nul
     if not defined PYEXE (
       echo   uv did not have Python 3.12 cached - downloading Python 3.12...
-      !UVEXE! python install 3.12
-      !UVEXE! python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
-      for /f "delims=" %%A in (%TEMP%\snapgen_uv_py312.txt) do if not defined PYEXE set "PYEXE=%%A"
+      "!UVEXE!" python install 3.12
+      "!UVEXE!" python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
+      for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_uv_py312.txt") do if not defined PYEXE set "PYEXE=%%A"
       del "%TEMP%\snapgen_uv_py312.txt" >nul 2>nul
     )
     if defined PYEXE echo   Found Python 3.12 via uv: !PYEXE!
@@ -163,9 +163,9 @@ if not defined PYEXE (
   if exist "%USERPROFILE%\.local\bin\uv.exe" set "UVEXE=%USERPROFILE%\.local\bin\uv.exe"
   if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UVEXE=%USERPROFILE%\.cargo\bin\uv.exe"
   if defined UVEXE (
-    !UVEXE! python install 3.12
-    !UVEXE! python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
-    for /f "delims=" %%A in (%TEMP%\snapgen_uv_py312.txt) do if not defined PYEXE set "PYEXE=%%A"
+    "!UVEXE!" python install 3.12
+    "!UVEXE!" python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
+    for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_uv_py312.txt") do if not defined PYEXE set "PYEXE=%%A"
     del "%TEMP%\snapgen_uv_py312.txt" >nul 2>nul
   )
 )
@@ -177,13 +177,13 @@ if not defined PYEXE (
   if not errorlevel 1 (
     winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements
   )
-  for %%V in (3.12) do (
+  for %%V in (312) do (
     if not defined PYEXE (
       for %%P in (
         "%LocalAppData%\Programs\Python\Python%%V\python.exe"
         "%ProgramFiles%\Python\Python%%V\python.exe"
       ) do (
-        if not defined PYEXE if exist %%~P set "PYEXE=%%~P"
+        if not defined PYEXE if exist "%%~P" set "PYEXE=%%~P"
       )
     )
   )
@@ -202,7 +202,7 @@ if not defined PYEXE (
 
 :found_python
 set "PYIS312=0"
-"%PYEXE%" -c "import sys; sys.exit(0 if sys.version_info[:2]==(3,12) else 1)" >nul 2>nul
+"!PYEXE!" -c "import sys; sys.exit(0 if sys.version_info[:2]==(3,12) else 1)" >nul 2>nul
 if not errorlevel 1 set "PYIS312=1"
 
 REM If found Python is not 3.12, try to get 3.12
@@ -213,32 +213,32 @@ if "%PYIS312%"=="0" (
     "%LocalAppData%\Programs\Python\Python312\python.exe"
     "%ProgramFiles%\Python\Python312\python.exe"
   ) do (
-    if not defined PYEXE if exist %%~P set "PYEXE=%%~P"
+    if not defined PYEXE if exist "%%~P" set "PYEXE=%%~P"
   )
   if not defined PYEXE (
     py -3.12 -c "import sys; print('OK')" >nul 2>nul
     if not errorlevel 1 (
       py -3.12 -c "import sys; print(sys.executable)" > "%TEMP%\snapgen_py312.txt" 2>nul
-      for /f "delims=" %%A in (%TEMP%\snapgen_py312.txt) do set "PYEXE=%%A"
+      for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_py312.txt") do set "PYEXE=%%A"
       del "%TEMP%\snapgen_py312.txt" >nul 2>nul
     )
   )
   if not defined PYEXE (
     where uv > "%TEMP%\snapgen_uv_where.txt" 2>nul
     if exist "%TEMP%\snapgen_uv_where.txt" (
-      for /f "delims=" %%U in (%TEMP%\snapgen_uv_where.txt) do if not defined UVEXE set "UVEXE=%%U"
+      for /f "usebackq delims=" %%U in ("%TEMP%\snapgen_uv_where.txt") do if not defined UVEXE set "UVEXE=%%U"
       del "%TEMP%\snapgen_uv_where.txt" >nul 2>nul
     )
     if defined UVEXE (
       echo   Python 3.12 not found in system paths. Trying uv...
-      !UVEXE! python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
-      for /f "delims=" %%A in (%TEMP%\snapgen_uv_py312.txt) do if not defined PYEXE set "PYEXE=%%A"
+      "!UVEXE!" python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
+      for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_uv_py312.txt") do if not defined PYEXE set "PYEXE=%%A"
       del "%TEMP%\snapgen_uv_py312.txt" >nul 2>nul
       if not defined PYEXE (
         echo   uv downloading Python 3.12...
-        !UVEXE! python install 3.12
-        !UVEXE! python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
-        for /f "delims=" %%A in (%TEMP%\snapgen_uv_py312.txt) do if not defined PYEXE set "PYEXE=%%A"
+        "!UVEXE!" python install 3.12
+        "!UVEXE!" python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
+        for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_uv_py312.txt") do if not defined PYEXE set "PYEXE=%%A"
         del "%TEMP%\snapgen_uv_py312.txt" >nul 2>nul
       )
       if defined PYEXE echo   Found Python 3.12 via uv: !PYEXE!
@@ -250,9 +250,9 @@ if "%PYIS312%"=="0" (
     if exist "%USERPROFILE%\.local\bin\uv.exe" set "UVEXE=%USERPROFILE%\.local\bin\uv.exe"
     if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UVEXE=%USERPROFILE%\.cargo\bin\uv.exe"
     if defined UVEXE (
-      !UVEXE! python install 3.12
-      !UVEXE! python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
-      for /f "delims=" %%A in (%TEMP%\snapgen_uv_py312.txt) do if not defined PYEXE set "PYEXE=%%A"
+      "!UVEXE!" python install 3.12
+      "!UVEXE!" python find 3.12 > "%TEMP%\snapgen_uv_py312.txt" 2>nul
+      for /f "usebackq delims=" %%A in ("%TEMP%\snapgen_uv_py312.txt") do if not defined PYEXE set "PYEXE=%%A"
       del "%TEMP%\snapgen_uv_py312.txt" >nul 2>nul
     )
   )
@@ -264,7 +264,7 @@ if "%PYIS312%"=="0" (
       "%LocalAppData%\Programs\Python\Python312\python.exe"
       "%ProgramFiles%\Python\Python312\python.exe"
     ) do (
-      if not defined PYEXE if exist %%~P set "PYEXE=%%~P"
+      if not defined PYEXE if exist "%%~P" set "PYEXE=%%~P"
     )
   )
   if not defined PYEXE (
@@ -273,12 +273,12 @@ if "%PYIS312%"=="0" (
     pause
     exit /b 1
   )
-  echo   Found Python 3.12: %PYEXE%
+  echo   Found Python 3.12: !PYEXE!
   set "PYIS312=1"
   REM If we had a working venv but it's wrong version, recreate as .venv312
   if defined VENV_DIR (
-    echo   Removing wrong-version venv: %VENV_DIR%
-    rmdir /s /q "%VENV_DIR%" 2>nul
+    echo   Removing wrong-version venv: !VENV_DIR!
+    rmdir /s /q "!VENV_DIR!" 2>nul
     set "VENV_DIR="
     set "VENV_PY="
   )
@@ -287,15 +287,15 @@ if "%PYIS312%"=="0" (
 if defined VENV_PY (
   set "PYEXE=%VENV_PY%"
 ) else (
-  set "VENV_PY=%PYEXE%"
+  set "VENV_PY=!PYEXE!"
 )
-echo   Using: %PYEXE%
-"%PYEXE%" --version
+echo   Using: !PYEXE!
+"!PYEXE!" --version
 
 REM ===== Step 2: Check tkinter =====
 echo.
 echo [2/7] Checking tkinter...
-"%PYEXE%" -c "import tkinter; print('tkinter OK')" >nul 2>nul
+"!PYEXE!" -c "import tkinter; print('tkinter OK')" >nul 2>nul
 if errorlevel 1 (
   echo   tkinter missing. Installing official Python 3.12 with Tcl/Tk...
   set "PY_ARCH=amd64"
@@ -328,7 +328,7 @@ echo [3/7] Setting up venv...
 if not defined VENV_DIR (
   REM snapgen_gui_v2.py REQUIRES Python 3.12 (.pyc compiled for 3.12)
   REM Check if current Python is 3.12
-  "%PYEXE%" -c "import sys; sys.exit(0 if sys.version_info[:2]==(3,12) else 1)" >nul 2>nul
+  "!PYEXE!" -c "import sys; sys.exit(0 if sys.version_info[:2]==(3,12) else 1)" >nul 2>nul
   if errorlevel 1 (
     if defined PYVER (
       echo   Python found is %PYVER%, need 3.12. Trying winget install...
@@ -341,9 +341,9 @@ if not defined VENV_DIR (
       "%LocalAppData%\Programs\Python\Python312\python.exe"
       "%ProgramFiles%\Python\Python312\python.exe"
     ) do (
-      if exist %%~P set "PYEXE=%%~P"
+      if exist "%%~P" set "PYEXE=%%~P"
     )
-    "%PYEXE%" -c "import sys; sys.exit(0 if sys.version_info[:2]==(3,12) else 1)" >nul 2>nul
+    "!PYEXE!" -c "import sys; sys.exit(0 if sys.version_info[:2]==(3,12) else 1)" >nul 2>nul
     if errorlevel 1 (
       echo [FAIL] Need Python 3.12. Please install from https://python.org
       pause
@@ -353,7 +353,7 @@ if not defined VENV_DIR (
   set "VENV_DIR=.venv312"
   set "VENV_PY=%CD%\!VENV_DIR!\Scripts\python.exe"
   echo   Creating venv: !VENV_DIR!...
-  "%PYEXE%" -m venv "!VENV_DIR!"
+  "!PYEXE!" -m venv "!VENV_DIR!"
   if not exist "!VENV_PY!" (
     echo [FAIL] venv creation failed.
     pause
@@ -361,7 +361,7 @@ if not defined VENV_DIR (
   )
   echo   venv created: !VENV_DIR!
 ) else (
-  echo   venv exists: %VENV_DIR%
+  echo   venv exists: !VENV_DIR!
 )
 
 REM ===== Step 4: Install packages =====
@@ -446,10 +446,14 @@ if errorlevel 1 (
 ) else (
   gh auth status --hostname github.com >nul 2>nul
   if errorlevel 1 (
-    echo   Opening browser once for automatic error reports...
-    gh auth login --hostname github.com --git-protocol https --web --clipboard
-    gh auth status --hostname github.com >nul 2>nul
-    if errorlevel 1 echo   [WARN] Browser approval not finished. SnapGen will ask again only when an error must be sent.
+    if /I "%~1"=="--no-run" (
+      echo   [WARN] GitHub login deferred until error reporting is used in the app.
+    ) else (
+      echo   Opening browser once for automatic error reports...
+      gh auth login --hostname github.com --git-protocol https --web --clipboard
+      gh auth status --hostname github.com >nul 2>nul
+      if errorlevel 1 echo   [WARN] Browser approval not finished. SnapGen will ask again only when an error must be sent.
+    )
   ) else (
     echo   GitHub error reporting ready
   )
@@ -498,8 +502,9 @@ if not exist "snapgen_modules\ai_slow2x.py" (
   set "MISSING_PROJECT=1"
 )
 if not exist "snapgen_data\snapgen_config.json" (
-  echo   [FAIL] Missing: snapgen_data\snapgen_config.json
-  set "MISSING_PROJECT=1"
+  echo   Creating empty settings for this machine.
+  if not exist "snapgen_data" mkdir "snapgen_data"
+  > "snapgen_data\snapgen_config.json" echo {}
 )
 if not exist "snapgen_data\prompt_bank.txt" (
   echo   [WARN] Missing: snapgen_data\prompt_bank.txt
@@ -561,8 +566,8 @@ echo   All imports OK
 
 REM Create a portable launcher shortcut bound to this project's Python.
 REM This avoids broken/missing Windows .py file associations on other PCs.
-set "PYW_EXE=%CD%\%VENV_DIR%\Scripts\pythonw.exe"
-if not exist "%PYW_EXE%" set "PYW_EXE=%CD%\%VENV_DIR%\Scripts\python.exe"
+set "PYW_EXE=%CD%\!VENV_DIR!\Scripts\pythonw.exe"
+if not exist "%PYW_EXE%" set "PYW_EXE=%CD%\!VENV_DIR!\Scripts\python.exe"
 set "PROJECT_DIR=%CD%"
 set "SHORTCUT_PATH=%CD%\ติดมันส์ สตูดิโอ.lnk"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut($env:SHORTCUT_PATH); $s.TargetPath=$env:PYW_EXE; $q=[char]34; $s.Arguments='-B '+$q+$env:PROJECT_DIR+'\snapgen_gui_v2.py'+$q; $s.WorkingDirectory=$env:PROJECT_DIR; $ico=$env:PROJECT_DIR+'\assets\tidmun_studio_icon_final.ico'; if(Test-Path -LiteralPath $ico){$s.IconLocation=$ico}; $s.Save()" >nul 2>nul
@@ -575,7 +580,7 @@ if exist "%SHORTCUT_PATH%" (
 REM Register .py for the current Windows user so snapgen_gui_v2.py can be
 REM double-clicked on PCs where Python file association was never installed.
 REM Use pythonw.exe to avoid opening a terminal window.
-set "PY_ASSOC_EXE=%CD%\%VENV_DIR%\Scripts\pythonw.exe"
+set "PY_ASSOC_EXE=%CD%\!VENV_DIR!\Scripts\pythonw.exe"
 if not exist "%PY_ASSOC_EXE%" set "PY_ASSOC_EXE=%PYW_EXE%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$base='HKCU:\Software\Classes'; New-Item -Path ($base+'\.py') -Force | Out-Null; Set-Item -Path ($base+'\.py') -Value 'SnapGen.Python.File'; New-Item -Path ($base+'\SnapGen.Python.File\shell\open\command') -Force | Out-Null; $q=[char]34; $cmd=$q+$env:PY_ASSOC_EXE+$q+' '+$q+'%%1'+$q+' %%*'; Set-Item -Path ($base+'\SnapGen.Python.File\shell\open\command') -Value $cmd; New-Item -Path ($base+'\SnapGen.Python.File\DefaultIcon') -Force | Out-Null; Set-Item -Path ($base+'\SnapGen.Python.File\DefaultIcon') -Value ($env:PY_ASSOC_EXE+',0')" >nul 2>nul
 if errorlevel 1 (
@@ -617,8 +622,8 @@ echo.
 echo [7/7] Starting SnapGen...
 echo ============================================
 echo.
-set "VENV_PYW=%CD%\%VENV_DIR%\Scripts\pythonw.exe"
-if not exist "%VENV_PYW%" set "VENV_PYW=%CD%\%VENV_DIR%\Scripts\python.exe"
+set "VENV_PYW=%CD%\!VENV_DIR!\Scripts\pythonw.exe"
+if not exist "%VENV_PYW%" set "VENV_PYW=%CD%\!VENV_DIR!\Scripts\python.exe"
 if not exist "%VENV_PYW%" (
   echo [FAIL] Missing project Python: %VENV_PYW%
   pause

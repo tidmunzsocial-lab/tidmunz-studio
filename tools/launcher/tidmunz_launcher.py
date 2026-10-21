@@ -175,7 +175,19 @@ def run_setup(home: Path, progress=lambda _text, _fraction=None: None) -> None:
 
 def start_app(home: Path) -> bool:
     python = _venv_python(home)
-    if python is None:
+    console_python = _venv_python(home, windowed=False)
+    if python is None or console_python is None:
+        return False
+    try:
+        ready = subprocess.run(
+            [str(console_python), "-B", "-c",
+             "import sys, tkinter, PIL, websocket, qcloud_cos; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)"],
+            cwd=str(home), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=30,
+        )
+        if ready.returncode:
+            return False
+    except (OSError, subprocess.SubprocessError):
         return False
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(
@@ -234,8 +246,9 @@ def _setup_with_window(home: Path) -> None:
 
     def worker():
         try:
-            if not (home / MAIN_SCRIPT).is_file():
-                install_program(home, report("ดาวน์โหลดโปรแกรม", 0, 30))
+            # A failed first install already has the main script. Refresh its
+            # stale setup too; install_program preserves user settings/exports.
+            install_program(home, report("ดาวน์โหลดโปรแกรม", 0, 30))
             run_setup(home, report("ติดตั้ง Python และแพ็กเกจ", 30, 100))
         except Exception as exc:  # pragma: no cover - network/machine dependent
             result["error"] = exc
