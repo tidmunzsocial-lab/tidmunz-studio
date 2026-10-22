@@ -166,6 +166,38 @@ def test_video_auto_uses_five_api_workers_and_only_unfinished_scenes(tmp_path):
     assert all(scene.get("image") for scene in saved["scenes"])
 
 
+def test_selected_redraw_analyzes_old_frame_but_api_gets_only_prompt_and_scene_refs(tmp_path):
+    scope, paths = batch_scope(tmp_path, 1)
+    scene = scope["state"]["project"]["scenes"][0]
+    old = tmp_path / "old-frame.png"; old.write_bytes(b"old-frame")
+    scene.update(image=str(old), characters=["ทหาร"])
+    analyses, generated = [], []
+
+    def analyze(prompt, images):
+        analyses.append((prompt, images))
+        return {"prompt": "ทหารสองคนยืนในลานวัดช่วงเช้า แสงอุ่นและกล้องระดับสายตา"}
+
+    def make_image(prompt, refs, folder, name, aspect, board=None, api_context=None, **kwargs):
+        generated.append((prompt, refs, board, kwargs))
+        target = folder / (name + ".png"); target.write_bytes(b"new-frame")
+        return str(target)
+
+    scope.update(with_retries=lambda _name, call: call(), image_data_url=lambda path: f"data:{Path(path).name}",
+                 gpt_look=analyze, make_image=make_image,
+                 credit_consent_required=lambda *_args: False)
+    load(scope, "analyze_previous_frame_prompt")
+    scope["stage_images"]([0], analyze_previous=True)
+
+    assert len(analyses) == 1 and analyses[0][1] == ["data:old-frame.png"]
+    assert "เล็บ" in analyses[0][0] and "ทหาร" in analyses[0][0]
+    prompt, refs, board, options = generated[0]
+    assert "ทหารสองคนยืนในลานวัด" in prompt
+    assert refs == paths[:2] and board is None
+    assert options["fresh_chat"] is True
+    assert scene["prompt"] == "ทหารสองคนยืนในลานวัดช่วงเช้า แสงอุ่นและกล้องระดับสายตา"
+    assert scene["prompt_before_visual_redraw"] == "shot-0"
+
+
 def test_api_reference_overflow_fails_before_any_submission(tmp_path):
     scope, paths = batch_scope(tmp_path, 1)
     scope["attachments_for"] = lambda scene, limit=None: paths[:1] * 10

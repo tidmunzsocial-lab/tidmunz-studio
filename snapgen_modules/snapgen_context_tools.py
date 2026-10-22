@@ -57,13 +57,15 @@ def load_context_any(base):
 
 def invent_missing_char_detail(ch, field):
     name = ch.get("name", "ตัวละคร")
+    # Hair and clothing define identity/costume. Leave them unknown unless the
+    # story or a reference supplies them; generic defaults can mislead image generation.
+    if field in {"ทรงผม", "เสื้อผ้า"}:
+        return "ไม่ระบุ"
     defaults = {
         "อายุ": "วัยผู้ใหญ่ตอนต้น (สมมุติเพื่อภาพ)",
         "เพศ": "ไม่ระบุเพศชัดเจน (สมมุติเพื่อภาพ)",
         "สีผิว": "ผิวสองสีธรรมชาติแบบไทย (สมมุติเพื่อภาพ)",
-        "ทรงผม": "ผมสีดำทรงเรียบร้อย ไม่ปิดหน้า (สมมุติเพื่อภาพ)",
         "ใบหน้า": "ใบหน้าคนไทยสมจริง แสงสม่ำเสมอ มองเห็นชัด (สมมุติเพื่อภาพ)",
-        "เสื้อผ้า": "เสื้อผ้าร่วมสมัยเรียบง่าย สีไม่ฉูดฉาด (สมมุติเพื่อภาพ)",
         "ลักษณะเด่น": f"บุคลิกจำง่ายของ{name} แต่ยังสมจริง (สมมุติเพื่อภาพ)",
     }
     return defaults.get(field, "รายละเอียดสมจริง (สมมุติเพื่อภาพ)")
@@ -107,7 +109,10 @@ def normalize_context_master(base, data=None, invent=False):
         ch.setdefault("locks", {"face": True, "clothes": True, "allow_outfit_change_by_scene": False})
         for f in CHAR_FIELDS:
             if is_unknown(ch.get(f)):
-                ch[f] = invent_missing_char_detail(ch, f) if invent else "ไม่ระบุ"
+                if invent and f in {"ทรงผม", "เสื้อผ้า"}:
+                    ch.pop(f, None)
+                else:
+                    ch[f] = invent_missing_char_detail(ch, f) if invent else "ไม่ระบุ"
     return master
 
 

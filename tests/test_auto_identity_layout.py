@@ -45,7 +45,7 @@ def test_repair_only_selected_image_and_invalidate_its_clip_after_success(tmp_pa
     before = json.loads(json.dumps(project["scenes"]))
     project["done"] = dict(images=True, motion=True, clips=True, video=True)
     scope["state"]["busy"] = False
-    scope.update(start_btn=Widget(), refresh_all=lambda: None,
+    scope.update(start_btn=Widget(), bar=Widget(), stage_var=Widget(), detail_var=Widget(), refresh_all=lambda: None,
                  messagebox=SimpleNamespace(showerror=lambda *a, **kw: pytest.fail("unexpected dialog")),
                  threading=SimpleNamespace(Thread=lambda target, **kw: SimpleNamespace(start=target)))
     calls = []
