@@ -166,36 +166,36 @@ def test_video_auto_uses_five_api_workers_and_only_unfinished_scenes(tmp_path):
     assert all(scene.get("image") for scene in saved["scenes"])
 
 
-def test_selected_redraw_analyzes_old_frame_but_api_gets_only_prompt_and_scene_refs(tmp_path):
+@pytest.mark.parametrize("provider", ["snapgen", "gpt-web"])
+def test_selected_redraw_uses_original_prompt_and_scene_guides_without_old_frame(tmp_path, provider):
     scope, paths = batch_scope(tmp_path, 1)
+    scope["image_provider_for"] = lambda _stage: provider
     scene = scope["state"]["project"]["scenes"][0]
     old = tmp_path / "old-frame.png"; old.write_bytes(b"old-frame")
-    scene.update(image=str(old), characters=["ทหาร"])
-    analyses, generated = [], []
-
-    def analyze(prompt, images):
-        analyses.append((prompt, images))
-        return {"prompt": "ทหารสองคนยืนในลานวัดช่วงเช้า แสงอุ่นและกล้องระดับสายตา"}
+    scene.update(image=str(old), characters=["ทหาร"], prompt="rewritten prompt",
+                 prompt_before_visual_redraw="original shot prompt")
+    generated = []
 
     def make_image(prompt, refs, folder, name, aspect, board=None, api_context=None, **kwargs):
-        generated.append((prompt, refs, board, kwargs))
+        generated.append((prompt, refs, board, api_context, kwargs))
         target = folder / (name + ".png"); target.write_bytes(b"new-frame")
         return str(target)
 
-    scope.update(with_retries=lambda _name, call: call(), image_data_url=lambda path: f"data:{Path(path).name}",
-                 gpt_look=analyze, make_image=make_image,
+    scope.update(with_retries=lambda _name, call: call(),
+                 gpt_look=lambda *_args, **_kwargs: pytest.fail("selected redraw must not analyze the old frame"),
+                 make_image=make_image,
                  credit_consent_required=lambda *_args: False)
-    load(scope, "analyze_previous_frame_prompt")
-    scope["stage_images"]([0], analyze_previous=True)
+    scope["stage_images"]([0], selected_redraw=True)
 
-    assert len(analyses) == 1 and analyses[0][1] == ["data:old-frame.png"]
-    assert "เล็บ" in analyses[0][0] and "ทหาร" in analyses[0][0]
-    prompt, refs, board, options = generated[0]
-    assert "ทหารสองคนยืนในลานวัด" in prompt
+    assert len(generated) == 1
+    prompt, refs, board, api_context, options = generated[0]
+    assert prompt == "original shot prompt"
     assert refs == paths[:2] and board is None
     assert options["fresh_chat"] is True
-    assert scene["prompt"] == "ทหารสองคนยืนในลานวัดช่วงเช้า แสงอุ่นและกล้องระดับสายตา"
-    assert scene["prompt_before_visual_redraw"] == "shot-0"
+    assert api_context == ({"api_key": "test-key"} if provider == "snapgen" else None)
+    assert scene["prompt"] == "original shot prompt"
+    assert "prompt_before_visual_redraw" not in scene
+    assert old.read_bytes() == b"old-frame"
 
 
 def test_api_reference_overflow_fails_before_any_submission(tmp_path):

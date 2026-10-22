@@ -5088,53 +5088,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         except tk.TclError:
             pass
 
-    def analyze_previous_frame_prompt(index, scene, refs, progress=0.0):
-        """Use the old frame only for GPT's visual analysis; never pass it to the image generator."""
-        prior_image = scene.get("image")
-        excluded = {str(Path(p).resolve()) for p in (prior_image, scene.get("board")) if p}
-        clean_refs = [p for p in refs if str(Path(p).resolve()) not in excluded]
-        if not prior_image or not os.path.isfile(prior_image):
-            return None, clean_refs
-
-        # Only the old frame is uploaded to GPT; its image-file quota is also needed by the story.
-        names = ", ".join(str(name) for name in scene.get("characters") or []) or "ตามที่ระบุในคำบรรยายช็อต"
-        ref_labels = ", ".join(Path(path).stem for path in clean_refs[:10])
-        analysis_request = (
-            "ดูภาพเดิมแล้วเขียนพรอมป์สำหรับสร้างภาพใหม่ทั้งภาพ ห้ามสั่งแก้ภาพเดิม\n"
-            "ภาพ 1 คือผลเดิมของช็อต ใช้ดูจำนวน/ตำแหน่งตัวละคร ท่าทาง มุมกล้อง ระยะภาพ ฉากหลัง แสง เวลา และบรรยากาศเท่านั้น\n"
-            "ภาพเรฟตัวละคร/สถานที่จะถูกแนบให้ตัวสร้างภาพแยกต่างหาก; ใช้รายชื่อและรายละเอียดใน Context เพื่อระบุตัวละคร\n"
-            f"รายชื่อตัวละครที่อนุญาตในช็อตนี้: {names}\n"
-            "คงจำนวนตัวละครที่เห็นในภาพ 1 พร้อมตำแหน่ง องค์ประกอบ มุมกล้อง การกระทำ ฉากหลัง และอารมณ์ให้ใกล้เคียงที่สุด "
-            "ห้ามเพิ่มตัวละครนอกเหนือจากรายชื่อของช็อต\n"
-            "ห้ามลอกความผิดจากภาพ 1 โดยเฉพาะใบหน้า รูปร่าง มือ นิ้ว เล็บ เสื้อผ้า หรืออวัยวะ "
-            "รายละเอียดตัวละครให้ยึด Context และภาพเรฟเป็นหลัก หากขัดกับภาพ 1 ให้ถือว่าภาพ 1 ผิด\n"
-            "ยึดเหตุการณ์และข้อห้ามใน brief ห้ามเพิ่มเหตุการณ์หรือสิ่งของที่บทไม่ได้ระบุ\n"
-            f"ชื่อไฟล์เรฟที่ตัวสร้างภาพจะได้รับ: {ref_labels or 'ไม่มี'}\n\n"
-            f"Brief และ Context ที่ถูกต้องของช็อต:\n{scene_prompt(scene)}\n\n"
-            "ตอบ JSON เท่านั้น รูปแบบ {\"prompt\":\"พรอมป์เต็มสำหรับสร้างภาพใหม่\"}"
-        )
-        set_progress("images", progress, f"GPT กำลังดูภาพเดิมและเขียน prompt ใหม่ · ช็อต {index + 1}")
-        log(f"🔎 GPT วิเคราะห์ภาพเดิมช็อต {index + 1} เพื่อร่าง prompt ใหม่ — ภาพเดิมใช้วิเคราะห์เท่านั้น")
-        try:
-            reply = with_retries(
-                f"วิเคราะห์ภาพเดิมช็อต {index + 1}",
-                lambda: gpt_look(analysis_request, [image_data_url(prior_image)]),
-            )
-        except (Stopped, HistoryLost, RateLimited, ImageProviderError):
-            raise
-        except Exception as exc:
-            raise ImageProviderError(
-                f"GPT วิเคราะห์ภาพเดิมช็อต {index + 1} ไม่สำเร็จ — ยังไม่ส่งสร้างรูป: {exc}"
-            ) from exc
-        rewritten_prompt = str(reply.get("prompt") or "").strip()
-        if len(rewritten_prompt) < 20:
-            raise ImageProviderError(
-                f"GPT ไม่ได้เขียน prompt ใหม่จากภาพเดิมของช็อต {index + 1} — ยังไม่ส่งสร้างรูป"
-            )
-        log(f"✓ GPT ร่าง prompt ใหม่ของช็อต {index + 1} แล้ว โดยยึดเรฟตัวละคร/สถานที่")
-        return rewritten_prompt, clean_refs
-
-    def run_snapgen_scenes(todo, scenes, refs, images_dir, analyze_previous=False):
+    def run_snapgen_scenes(todo, scenes, refs, images_dir, selected_redraw=False):
         project = state["project"]
         keyvar = runtime.get("api_key_var") or g.get("api_key_var")
         api_context = {"api_key": str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip()}
@@ -5157,16 +5111,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     raise ImageProviderError("ยังไม่มีรูปเรฟตัวละคร: " + ", ".join(missing))
                 paths = [refs[c] for c in dict.fromkeys(shown) if c in refs]
             board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
-            rewritten_prompt = None
-            if analyze_previous and video_mode:
-                rewritten_prompt, paths = analyze_previous_frame_prompt(
-                    i, scene, paths, progress=(len(jobs) / max(1, len(todo)))
-                )
+            if selected_redraw and video_mode:
                 board = None
-            prompt_scene = dict(scene, prompt=rewritten_prompt) if rewritten_prompt else scene
             if len(paths) + bool(board) > 10:
                 raise ImageProviderError(f"ฉาก {i + 1} มีไฟล์เรฟเกิน 10 รูป — หยุดก่อนส่ง")
-            jobs.append((i, scene_prompt(prompt_scene), paths, board, rewritten_prompt))
+            jobs.append((i, scene_prompt(scene), paths, board))
         if not jobs:
             return
         fetch = runtime.get("fetch_available_credit") or g.get("fetch_available_credit")
@@ -5190,8 +5139,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def work(job):
             check_batch_stop()
-            i, prompt, paths, board, _rewritten_prompt = job
-            redraw_options = {"fresh_chat": True} if analyze_previous and video_mode else {}
+            i, prompt, paths, board = job
+            redraw_options = {"fresh_chat": True} if selected_redraw and video_mode else {}
             if scenes[i].get("identity_repair"):
                 redraw_options["identity_repair"] = scenes[i]["identity_repair"]
             return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}",
@@ -5206,13 +5155,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             with state["lock"]:
                 if image:
                     scenes[i]["image"] = image
-                rewritten_prompt = job[4]
                 if error is not None:
                     scenes[i]["error"] = str(error)[:600]
                 else:
-                    if rewritten_prompt:
-                        scenes[i].setdefault("prompt_before_visual_redraw", scenes[i].get("prompt", ""))
-                        scenes[i]["prompt"] = rewritten_prompt
                     scenes[i].pop("error", None)
                     scenes[i].pop("bad", None)
                 save_project()
@@ -5240,7 +5185,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if measured is not None:
                 log(f"คิว API 5 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
 
-    def stage_images(indices=None, analyze_previous=False):
+    def stage_images(indices=None, selected_redraw=False):
         project = state["project"]
         check_script_matches_audio()
         project["images_verified"] = False
@@ -5254,9 +5199,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         scenes = project["scenes"]
         todo = indices if indices is not None else [
             i for i, s in enumerate(scenes) if not (s.get("image") and os.path.isfile(s["image"]))]
+        selected_redraw = bool(selected_redraw and video_mode)
+        if selected_redraw:
+            restored_prompt = False
+            for i in dict.fromkeys(todo):
+                original_prompt = scenes[i].pop("prompt_before_visual_redraw", None)
+                if original_prompt is not None:
+                    scenes[i]["prompt"] = original_prompt
+                    restored_prompt = True
+            if restored_prompt:
+                save_project()
         if image_provider_for("images") == "snapgen":
             run_snapgen_scenes(todo, scenes, refs, images_dir,
-                               analyze_previous=bool(analyze_previous and video_mode))
+                               selected_redraw=selected_redraw)
             missing = [i + 1 for i, scene in enumerate(scenes)
                        if not (scene.get("image") and os.path.isfile(scene["image"]))]
             if missing:
@@ -5269,7 +5224,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         for n, i in enumerate(todo, 1):
             check_stop()
             scene = scenes[i]
-            redraw_context = bool(analyze_previous and video_mode)
+            redraw_context = selected_redraw
             prior_image = scene.get("image") if redraw_context else None
             if not prior_image or not os.path.isfile(prior_image):
                 prior_image = None
@@ -5295,19 +5250,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     ref_paths = [refs[c] for c in shown if c in refs][:4]
             try:
                 board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
-                image_prompt = scene_prompt(scene)
-                rewritten_prompt = None
                 if redraw_context:
-                    rewritten_prompt, ref_paths = analyze_previous_frame_prompt(
-                        i, scene, ref_paths, progress=(n - 1) / max(1, len(todo))
-                    )
                     board = None
-                    if rewritten_prompt:
-                        image_prompt = scene_prompt(dict(scene, prompt=rewritten_prompt))
-                    else:
-                        log(f"ช็อต {i + 1} ไม่มีภาพเดิมให้วิเคราะห์ — ใช้ prompt และเรฟที่มี")
+                image_prompt = scene_prompt(scene)
+                if redraw_context:
                     set_progress("images", (n - 1) / max(1, len(todo)),
-                                 f"กำลังสร้างภาพใหม่ในแชตแยก · ช็อต {i + 1}")
+                                 f"กำลังสร้างภาพใหม่ด้วย prompt เดิมและเรฟตัวละคร/สถานที่ · ช็อต {i + 1}")
                 redraw_options = {"fresh_chat": True} if redraw_context else {}
                 if scene.get("identity_repair"):
                     redraw_options["identity_repair"] = scene["identity_repair"]
@@ -5315,11 +5263,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     image_prompt, ref_paths, images_dir, f"scene_{i + 1:03d}", project["aspect"], board=board,
                     **redraw_options))
                 scene["image"] = generated_image
-                if rewritten_prompt:
-                    scene.setdefault("prompt_before_visual_redraw", scene.get("prompt", ""))
-                    scene["prompt"] = rewritten_prompt
                 if ref_paths and looks_like_reference_sheet(scene["image"]):
-                    if image_provider_for("images") in ("qwen", "maxplus") or scene.get("identity_repair"):
+                    if (redraw_context or image_provider_for("images") in ("qwen", "maxplus")
+                            or scene.get("identity_repair")):
                         save_project()
                         raise ImageProviderError(f"ฉาก {i + 1} คล้ายรูปเรฟ — เก็บภาพไว้ ตรวจผลก่อนสร้างใหม่ เพื่อไม่ส่ง API ซ้ำอัตโนมัติ")
                     # The picture came back as a copy of a reference (plain backdrop): draw the scene again
@@ -7261,7 +7207,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         state.pop(transient, None)
                     ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
-                stage_images(selected, analyze_previous=video_mode)
+                stage_images(selected, selected_redraw=video_mode)
                 if video_mode:
                     for i in selected:
                         project["scenes"][i].pop("clip", None)
