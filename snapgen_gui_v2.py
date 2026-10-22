@@ -875,7 +875,7 @@ tk.Misc.mainloop = _real_mainloop
 GROK_LITE_MODEL = "grok-1.5-lite"
 try:
     _local_model_ids = {
-        "ltx-2.3-local", "ltx-2.5-maestro", "vela-ai-video", "grok-lower", GROK_LITE_MODEL,
+        "ltx-2.3-local", "ltx-2.5-maestro", "vela-ai-video", "muse-ai-video", "grok-lower", GROK_LITE_MODEL,
     } | set(SEEDANCE_MODELS)
     _retired_local_model_ids = {"minimax-h3-local", "ltx-2.5-cloud"}
     for _slot_index, _saved_slot in enumerate(_saved_local_slot_configs):
@@ -887,6 +887,8 @@ try:
             _saved_model = "ltx-2.5-maestro"
         if _saved_model == "vela-ai-video":
             _saved_slot = dict(_saved_slot, duration="5")
+        if _saved_model == "muse-ai-video":
+            _saved_slot = dict(_saved_slot, duration="10")
         if _saved_model in ("grok-lower", GROK_LITE_MODEL) and str(_saved_slot.get("duration") or "") not in {"6", "10", "15"}:
             _saved_slot = dict(_saved_slot, duration="6")
         if _saved_model == GROK_LITE_MODEL:
@@ -903,8 +905,8 @@ try:
             _slot_var = _runtime_slot.get(_slot_key)
             if hasattr(_slot_var, "set") and _slot_key in _saved_slot:
                 _slot_var.set(str(_saved_slot[_slot_key]))
-        if _saved_model == "vela-ai-video" and hasattr(_runtime_slot.get("duration"), "set"):
-            _runtime_slot["duration"].set("5")
+        if _saved_model in ("vela-ai-video", "muse-ai-video") and hasattr(_runtime_slot.get("duration"), "set"):
+            _runtime_slot["duration"].set("5" if _saved_model == "vela-ai-video" else "10")
     _save_slots = g.get("save_slot_configs")
     if callable(_save_slots):
         _save_slots()
@@ -2753,6 +2755,13 @@ from snapgen_vela_video import (
     build_command as _build_vela_video_command,
     find_video_url as _find_vela_video_url,
 )
+from snapgen_muse_video import (
+    LABEL as MUSE_VIDEO_LABEL,
+    MODEL as MUSE_VIDEO_MODEL,
+    SUPPORTED_DURATION as MUSE_VIDEO_DURATION,
+    build_command as _build_muse_video_command,
+    find_video_url as _find_muse_video_url,
+)
 from snapgen_grok_lower import (
     GROK_LITE_LABEL,
     GROK_LITE_MODEL,
@@ -2779,6 +2788,7 @@ ALLOWED_VIDEO_MODELS = {
     "grok-lower",
     GROK_LITE_MODEL,
     VELA_VIDEO_MODEL,
+    MUSE_VIDEO_MODEL,
     "ltx-2.3-local",
 }
 DEFAULT_VIDEO_MODEL = "veo-3.1-lite"
@@ -3374,8 +3384,8 @@ if callable(_core_duration_values_for_model):
     def duration_values_for_model(model):
         if str(model or "").strip() in SEEDANCE_MODELS:
             return list(SEEDANCE_DURATIONS[str(model).strip()])
-        if str(model or "").strip() == VELA_VIDEO_MODEL:
-            return [VELA_VIDEO_DURATION]
+        if str(model or "").strip() in (VELA_VIDEO_MODEL, MUSE_VIDEO_MODEL):
+            return [VELA_VIDEO_DURATION if str(model or "").strip() == VELA_VIDEO_MODEL else MUSE_VIDEO_DURATION]
         if str(model or "").strip() in (GROK_LOWER_MODEL, GROK_LITE_MODEL):
             return list(GROK_LOWER_DURATIONS)
         values = list(_core_duration_values_for_model(model) or [])
@@ -3406,12 +3416,12 @@ if callable(_core_duration_values_for_model):
 # Hosted adapters can return media_url/media_files as well as generated_video.
 # Reuse the same UUID/download flow for Vela and Seedance.
 _original_poll_and_download = g.get("poll_and_download")
-if callable(_original_poll_and_download) and not getattr(_original_poll_and_download, "_snapgen_vela_wrapper", False):
+if callable(_original_poll_and_download) and not getattr(_original_poll_and_download, "_snapgen_hosted_video_wrapper", False):
     def _poll_vela_video(i, uuid, model):
-        if str(model or "").strip() not in (VELA_VIDEO_MODEL, *SEEDANCE_MODELS):
+        if str(model or "").strip() not in (VELA_VIDEO_MODEL, MUSE_VIDEO_MODEL, *SEEDANCE_MODELS):
             return _original_poll_and_download(i, uuid, model)
 
-        provider = SEEDANCE_MODELS.get(model, "Vela")
+        provider = SEEDANCE_MODELS.get(model, MUSE_VIDEO_LABEL if model == MUSE_VIDEO_MODEL else "Vela")
         last_error = None
         for attempt in range(240):  # 20 minutes; never submit the UUID again.
             try:
@@ -3443,7 +3453,8 @@ if callable(_original_poll_and_download) and not getattr(_original_poll_and_down
                 if error_code or error_message:
                     raise RuntimeError(str(error_message or error_code))
 
-                url = _find_vela_video_url(history)
+                find_video_url = _find_muse_video_url if model == MUSE_VIDEO_MODEL else _find_vela_video_url
+                url = find_video_url(history)
                 if url:
                     root.after(0, lambda slot=i: g["set_slot_state"](slot, "loading", f"Downloading {provider}..."))
                     path = g["download_video"](url, str(uuid))
@@ -3462,7 +3473,7 @@ if callable(_original_poll_and_download) and not getattr(_original_poll_and_down
             raise RuntimeError(f"เช็คงาน {provider} ไม่สำเร็จ: {last_error}")
         raise RuntimeError(f"{provider} ยังไม่คืนไฟล์ภายใน 20 นาที (UUID: {uuid}) — งานเดิมไม่ถูกส่งซ้ำ")
 
-    _poll_vela_video._snapgen_vela_wrapper = True
+    _poll_vela_video._snapgen_hosted_video_wrapper = True
     g["poll_and_download"] = _poll_vela_video
 
 
@@ -4132,7 +4143,7 @@ def _add_minimax_h3_to_model_menu(i):
                         LTX23_LOCAL_MODEL,
                         LTX25_MAESTRO_MODEL,
                     ]
-                    paid_values = [VELA_VIDEO_MODEL, GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS]
+                    paid_values = [VELA_VIDEO_MODEL, MUSE_VIDEO_MODEL, GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS]
                     current_paid = [
                         value for value in values
                         if value not in grouped_values and value not in retired_values
@@ -4146,7 +4157,7 @@ def _add_minimax_h3_to_model_menu(i):
                     ))
                 else:
                     menu = widget["menu"]
-                    paid_header = "โมเดล SnapGen — เสียเครดิต"
+                    paid_header = "โมเดลวิดีโอ SnapGen"
                     local_header = "โมเดล Local — ใช้เครื่องตัวเอง"
                     retired_labels = {
                         MINIMAX_H3_LOCAL_MODEL, MINIMAX_H3_LOCAL_LABEL,
@@ -4179,15 +4190,19 @@ def _add_minimax_h3_to_model_menu(i):
                         menu.insert_command(1, label=VELA_VIDEO_LABEL, command=lambda: model_var.set(VELA_VIDEO_MODEL))
 
                     labels = menu_labels()
+                    if MUSE_VIDEO_MODEL not in labels and MUSE_VIDEO_LABEL not in labels:
+                        menu.insert_command(2, label=MUSE_VIDEO_LABEL, command=lambda: model_var.set(MUSE_VIDEO_MODEL))
+
+                    labels = menu_labels()
                     if GROK_LOWER_MODEL not in labels and GROK_LOWER_LABEL not in labels:
-                        menu.insert_command(2, label=GROK_LOWER_LABEL, command=lambda: model_var.set(GROK_LOWER_MODEL))
+                        menu.insert_command(3, label=GROK_LOWER_LABEL, command=lambda: model_var.set(GROK_LOWER_MODEL))
 
                     labels = menu_labels()
                     if GROK_LITE_MODEL not in labels and GROK_LITE_LABEL not in labels:
-                        menu.insert_command(3, label=GROK_LITE_LABEL, command=lambda: model_var.set(GROK_LITE_MODEL))
+                        menu.insert_command(4, label=GROK_LITE_LABEL, command=lambda: model_var.set(GROK_LITE_MODEL))
 
                     labels = menu_labels()
-                    for position, (value, label) in enumerate(SEEDANCE_MODELS.items(), 3):
+                    for position, (value, label) in enumerate(SEEDANCE_MODELS.items(), 5):
                         labels = menu_labels()
                         if value in labels and label not in labels:
                             menu.entryconfigure(labels.index(value), label=label)
@@ -4347,7 +4362,7 @@ def _add_minimax_h3_to_model_menu(i):
                         selected_aspect = aspect_var.get()
                         keep_vertical = (
                             str(model_var.get() or "").strip()
-                            in ("veo-2", "veo-3.1-lite", VELA_VIDEO_MODEL, GROK_LOWER_MODEL, GROK_LITE_MODEL)
+                            in ("veo-2", "veo-3.1-lite", VELA_VIDEO_MODEL, MUSE_VIDEO_MODEL, GROK_LOWER_MODEL, GROK_LITE_MODEL)
                             and str(aspect_var.get() or "").strip() == "9:16"
                         )
                         try:
@@ -5375,9 +5390,11 @@ def _install_video_expression_prompt_wrapper():
                     logger(int(index), f"ใช้สีหน้า: {selected}")
                 except Exception:
                     pass
-        if not voice_mode and str(g["slot_cfg_vars"][index]["model"].get() or "").strip() == VELA_VIDEO_MODEL:
+        selected_model = str(g["slot_cfg_vars"][index]["model"].get() or "").strip()
+        if not voice_mode and selected_model in (VELA_VIDEO_MODEL, MUSE_VIDEO_MODEL):
             cfg = g["slot_cfg_vars"][index]
-            return g["run_json"](_build_vela_video_command(
+            build_command = _build_muse_video_command if selected_model == MUSE_VIDEO_MODEL else _build_vela_video_command
+            return g["run_json"](build_command(
                 g["api_key_var"].get(),
                 final_prompt,
                 image,

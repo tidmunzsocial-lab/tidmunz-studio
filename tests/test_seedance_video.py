@@ -113,9 +113,12 @@ def test_saved_slot_restores_seedance_instead_of_recovered_default():
                                                             for t in item.targets) for item in node.body))
     saved = [{"model": model, "resolution": "720p", "duration": S.DURATIONS[model][-1], "aspect": "21:9"}
              for model in S.MODELS]
+    saved.append({"model": "muse-ai-video", "resolution": "720p", "duration": "10", "aspect": "9:16"})
     slots = [{key: Var("old") for key in item} for item in saved]
     ns = {"_saved_local_slot_configs": saved, "g": {"slot_cfg_vars": slots},
           "GROK_LITE_MODEL": G.GROK_LITE_MODEL,
+          "MUSE_VIDEO_MODEL": "muse-ai-video", "MUSE_VIDEO_DURATION": "10",
+          "VELA_VIDEO_MODEL": "vela-ai-video", "VELA_VIDEO_DURATION": "5",
           "SEEDANCE_MODELS": S.MODELS, "_normalize_seedance_settings": S.normalize_settings}
     exec(compile(ast.Module(body=[block], type_ignores=[]), "launcher-startup", "exec"), ns)
     assert [{key: var.get() for key, var in item.items()} for item in slots] == saved
@@ -159,7 +162,7 @@ def test_auto_model_selection_save_then_restart_load(tmp_path):
               video_model_var=Var(S.MODELS["sd-2-5-lower"]), project_path=lambda: tmp_path / "project.json",
               refresh_clip_info=lambda: None, last_project_file=lambda: tmp_path / "last.txt", video_mode=True,
               STYLES={}, last_style=lambda: "ปกติ", refresh_all=lambda: None,
-              VIDEO_MODEL_LABELS={"auto": "อัตโนมัติ (Grok / Vela)"},
+              VIDEO_MODEL_LABELS={"auto": "อัตโนมัติ (Grok / Vela)", "muse-ai-video": "Muse AI · 10s · ฟรี"},
               VIDEO_AUTO_IMAGE_PROVIDER_LABELS={"gpt_web": "GPT Web"},
               VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS={"gpt_web": "GPT Web"},
               GPT_WEB_LABEL="GPT Web", image_provider_var=Var("GPT Web"),
@@ -172,9 +175,13 @@ def test_auto_model_selection_save_then_restart_load(tmp_path):
     ns["video_model_changed"]()
     persisted = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
     assert persisted["video_model"] == "sd-2-5-lower"
+    ns["video_model_var"] = Var("Muse AI · 10s · ฟรี")
+    ns["video_model_changed"]()
+    persisted = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
+    assert persisted["video_model"] == "muse-ai-video"
     ns["video_model_var"] = Var("อัตโนมัติ (Grok / Vela)")
     ns["show_project"](tmp_path, persisted)
-    assert ns["video_model_var"].get() == S.MODELS["sd-2-5-lower"]
+    assert ns["video_model_var"].get() == "Muse AI · 10s · ฟรี"
 
 
 def test_desktop_menu_uses_each_model_capabilities():
@@ -189,6 +196,7 @@ def test_desktop_menu_uses_each_model_capabilities():
         ns = dict(g=g, root=root, SEEDANCE_MODELS=S.MODELS, SEEDANCE_DURATIONS=S.DURATIONS,
                   GROK_LITE_MODEL=G.GROK_LITE_MODEL, GROK_LITE_LABEL=G.GROK_LITE_LABEL,
                   GROK_LITE_RESOLUTIONS=G.GROK_LITE_RESOLUTIONS,
+                  MUSE_VIDEO_MODEL="muse-ai-video", MUSE_VIDEO_LABEL="Muse AI · 10s · ฟรี",
                   SEEDANCE_ASPECTS=S.ASPECTS, _normalize_seedance_settings=S.normalize_settings,
                   GROK_LOWER_DURATIONS=("6", "10", "15"), VIDEO_AUTO_ASPECT="อัตโนมัติ",
                   VIDEO_AUTO_ASPECT_LABEL="อัตโนมัติ (ตามรูป)")
@@ -197,6 +205,7 @@ def test_desktop_menu_uses_each_model_capabilities():
                                   VELA_VIDEO="vela-ai-video", GROK_LOWER="grok-lower").items():
             ns[prefix + "_MODEL"] = model
             ns[prefix + "_LABEL"] = model
+        ns["VELA_VIDEO_LABEL"] = "Vela AI Video"
         node = next(node for node in launcher_tree().body if isinstance(node, ast.FunctionDef)
                     and node.name == "_add_minimax_h3_to_model_menu")
         exec(compile(ast.Module(body=[node], type_ignores=[]), "desktop-menu", "exec"), ns)
@@ -206,6 +215,7 @@ def test_desktop_menu_uses_each_model_capabilities():
                     if menu.type(i) != "separator"]
         ns[node.name](0)
         assert set(S.MODELS.values()) <= set(labels("model"))
+        assert "Muse AI · 10s · ฟรี" in labels("model")
         assert "แนบ Ref Seedance (ฉาก / ตัวละคร)" in labels("model")
         assert labels("duration") == ["5", "10", "30"]
         assert labels("resolution") == ["720p"]

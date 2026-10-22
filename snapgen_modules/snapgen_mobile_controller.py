@@ -19,9 +19,11 @@ from pathlib import Path
 try:
     from .snapgen_grok_lower import SUPPORTED_DURATIONS as GROK_LOWER_DURATIONS
     from .snapgen_seedance_video import MODELS as SEEDANCE_MODELS, DURATIONS as SEEDANCE_DURATIONS, ASPECTS as SEEDANCE_ASPECTS
+    from .snapgen_muse_video import MODEL as MUSE_VIDEO_MODEL, LABEL as MUSE_VIDEO_LABEL, SUPPORTED_DURATION as MUSE_VIDEO_DURATION
 except ImportError:
     from snapgen_grok_lower import SUPPORTED_DURATIONS as GROK_LOWER_DURATIONS
     from snapgen_seedance_video import MODELS as SEEDANCE_MODELS, DURATIONS as SEEDANCE_DURATIONS, ASPECTS as SEEDANCE_ASPECTS
+    from snapgen_muse_video import MODEL as MUSE_VIDEO_MODEL, LABEL as MUSE_VIDEO_LABEL, SUPPORTED_DURATION as MUSE_VIDEO_DURATION
 
 
 CONFIG_KEYS = ("model", "resolution", "duration", "aspect", "mode", "camera_movement", "dialogue")
@@ -230,11 +232,12 @@ class MobileController:
     def _models(self):
         labels = {
             "vela-ai-video": "Vela AI Video",
+            MUSE_VIDEO_MODEL: MUSE_VIDEO_LABEL,
             "grok-lower": "Grok Lower — เสียเครดิต 50%",
             **SEEDANCE_MODELS,
         }
         models = [{"value": x, "label": labels.get(x, x)}
-                  for x in ("vela-ai-video", "grok-lower", *SEEDANCE_MODELS, "veo-2", "veo-3.1-lite", "grok-3")]
+                  for x in ("vela-ai-video", MUSE_VIDEO_MODEL, "grok-lower", *SEEDANCE_MODELS, "veo-2", "veo-3.1-lite", "grok-3")]
         for prefix in ("LTX23_LOCAL", "LTX25_MAESTRO"):
             key = self.app.get(prefix + "_MODEL")
             if key:
@@ -243,8 +246,10 @@ class MobileController:
 
     def options(self, model):
         vela = model == "vela-ai-video"
+        muse = model == MUSE_VIDEO_MODEL
         durations = (
             ["5"] if vela
+            else [MUSE_VIDEO_DURATION] if muse
             else list(SEEDANCE_DURATIONS[model]) if model in SEEDANCE_MODELS
             else list(GROK_LOWER_DURATIONS) if model == "grok-lower"
             else self.g["duration_values_for_model"](model)
@@ -253,7 +258,7 @@ class MobileController:
         return {"duration": [str(x) for x in durations],
                 "resolution": ["720p"] if model in SEEDANCE_MODELS else ["480p", "720p"] if grok else ["720p", "1080p"],
                 "aspect": ([VIDEO_AUTO_ASPECT, *SEEDANCE_ASPECTS] if model in SEEDANCE_MODELS else
-                           [VIDEO_AUTO_ASPECT, "16:9", "9:16", "1:1"] if vela else
+                           [VIDEO_AUTO_ASPECT, "16:9", "9:16", "1:1"] if vela or muse else
                            [VIDEO_AUTO_ASPECT, "landscape", "portrait", "square", "vertical", "horizontal"] if grok else
                            [VIDEO_AUTO_ASPECT, "16:9", "9:16"]),
                 "mode": ["custom", "normal", "extremely-crazy", "extremely-spicy-or-crazy"] if grok else ["custom"],

@@ -1480,6 +1480,10 @@ VIDEO_MODEL_LABELS = {
     VIDEO_GROK_LOWER_MODEL: "Grok Lower · 1080p",
     VIDEO_GROK_LITE_MODEL: "Grok Lite · 1080p",
 }
+VIDEO_MUSE_MODEL = "muse-ai-video"
+VIDEO_MUSE_LABEL = "Muse AI · 10s · ฟรี"
+VIDEO_MUSE_SECONDS = 10
+VIDEO_MODEL_LABELS[VIDEO_MUSE_MODEL] = VIDEO_MUSE_LABEL
 VIDEO_CHEAP_MODEL = "vela-ai-video"
 GROK_CLIP_SECONDS = (6, 10, 15)  # lengths grok-lower accepts; AI Slow 2x doubles a clip
 VELA_CLIP_SECONDS = 5  # vela-ai-video only makes 5 s
@@ -1534,6 +1538,7 @@ def assign_clips(scenes: list, duration: float, economy: bool = False) -> None:
 def clip_label(scene: dict) -> str:
     clip_model = scene.get("clip_model")
     model = (SEEDANCE_MODELS.get(clip_model) or
+             (VIDEO_MUSE_LABEL if clip_model == VIDEO_MUSE_MODEL else None) or
              ("Grok Lite" if clip_model == VIDEO_GROK_LITE_MODEL else
               "Grok Lower" if clip_model == VIDEO_GROK_LOWER_MODEL else
               "vela" if clip_model == VIDEO_CHEAP_MODEL else "Grok"))
@@ -2921,6 +2926,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def apply_selected_video_model(project):
         model = project.get("video_model")
+        if model == VIDEO_MUSE_MODEL:
+            for scene in project.get("scenes") or []:
+                if not (scene.get("clip") and os.path.isfile(scene["clip"])):
+                    scene["clip_model"], scene["clip_seconds"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS
+                    scene["clip_slow"] = False
         if model in SEEDANCE_MODELS:
             for scene in project.get("scenes") or []:
                 if not (scene.get("clip") and os.path.isfile(scene["clip"])):
@@ -3003,6 +3013,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                          if label == video_model_var.get()), selected)
         if selected in SEEDANCE_MODELS:
             model_info = video_model_var.get() + " · ฉาก 1 + Ref ไม่เกิน 3 รูป"
+        elif selected == VIDEO_MUSE_MODEL:
+            model_info = video_model_var.get() + " · 10 วิ · 0 เครดิต (อิงราคาที่หน้า SnapGen แสดง)"
         elif selected in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
             model_info = video_model_var.get() + " · ทุกฉาก · 6/10/15 วิ"
         else:
@@ -6287,6 +6299,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                                attachment_folder())
             seedance_refs = scene_references(scene, candidates)
             log(f"ช็อต {index + 1}: {SEEDANCE_MODELS[selected_model]} · รูปฉาก 1 + Ref {len(seedance_refs)} รูป")
+        elif selected_model == VIDEO_MUSE_MODEL:
+            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS, False
+            log(f"ช็อต {index + 1}: {VIDEO_MUSE_LABEL} · 10 วินาที")
         elif selected_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
             dialogue = bool(scene.get("dialogue"))
             _, seconds, slow = pick_clip(
@@ -6440,7 +6455,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         """vela first when the plan says cheap; if vela can't make it, the same shot goes to grok-lower."""
         try:
             return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i),
-                                attempts=1 if scene.get("clip_model") == VIDEO_CHEAP_MODEL else 2)
+                                attempts=1 if scene.get("clip_model") in (VIDEO_CHEAP_MODEL, VIDEO_MUSE_MODEL) else 2)
         except (Stopped, HistoryLost, RateLimited, ImageProviderError):
             raise
         except Exception as exc:
