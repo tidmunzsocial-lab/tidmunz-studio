@@ -78,6 +78,39 @@ def build_ref_edit_prompt(comment, ghost=True):
     return prompt + "เปลี่ยนเฉพาะตามคำสั่งผู้ใช้ต่อไปนี้: " + str(comment or "").strip()
 
 
+def _character_context_prompt_details(entity):
+    """Read the canonical Prompt-Ref Visual Bible fields used by Auto Ref."""
+    if not isinstance(entity, dict):
+        return ""
+    appearance = entity.get("appearance") if isinstance(entity.get("appearance"), dict) else {}
+    fields = (
+        ("visual_identity", "ภาพจำ/เอกลักษณ์", None), ("appearance.age", "วัย", "อายุ"),
+        ("appearance.gender", "เพศ", "เพศ"), ("appearance.body", "รูปร่าง", "รูปร่าง"),
+        ("appearance.height", "ส่วนสูง", "ส่วนสูง"), ("appearance.skin", "สีผิว", "สีผิว"),
+        ("appearance.face", "โครงหน้าและลักษณะใบหน้า", "ใบหน้า"),
+        ("appearance.eyes", "ดวงตา", "ดวงต"), ("appearance.hair", "ทรงผมและเส้นผม", "ทรงผม"),
+        ("ลักษณะเด่น", "จุดจำเฉพาะ", None),
+    )
+    rows = []
+    for path, label, legacy_key in fields:
+        value = appearance.get(path.split(".", 1)[1]) if path.startswith("appearance.") else entity.get(path)
+        if not value and legacy_key:
+            value = entity.get(legacy_key)
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        value = str(value or "").strip()
+        if value and not value.startswith("ไม่ระบุ") and value not in ("null", "None"):
+            rows.append(f"{label}: {value}")
+    return "; ".join(rows)
+
+
+def _ref_auto_history_payload(auto, entity_kind):
+    """Auto character sheets must not inherit another character's GPT image history."""
+    if auto and str(entity_kind or "").strip().lower() == "character":
+        return {"_temporary_chat": True}
+    return {"_use_ref_story_history": True}
+
+
 def install(g: dict, root: tk.Misc) -> tk.Misc:
     """Build this page and return its root frame."""
     globals().update(g)
@@ -115,7 +148,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         story_type_labels[0],
     )
     ref_story_type_var = tk.StringVar(value=saved_story_type_label)
-    ref_provider_labels = {"gpt_web": "GPT Web (Chrome เดิม)", "snapgen": "SnapGen API · Image 2.5 Lower"}
+    ref_provider_labels = {"gpt_web": "ChatGPT Web (Chrome เดิม)", "snapgen": "SnapGen API · Image 2.5 Lower"}
     ref_provider_var = tk.StringVar(value=ref_provider_labels.get(
         _saved_ref_settings.get("image_provider"), ref_provider_labels["gpt_web"]))
     g["_ref_selected_context"] = ""
@@ -812,6 +845,34 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             _ref_log("ใส่ SnapGen API Key ในตั้งค่าก่อน — ยังไม่ส่งงาน")
             return None
         return {"provider": provider, "api_key": key, "acceptance": {}}
+
+    def _choose_auto_ref_provider():
+        choice = {"provider": None}
+        dialog = tk.Toplevel(root)
+        dialog.title("เลือกวิธีสร้าง Ref อัตโนมัติ")
+        dialog.transient(root.winfo_toplevel())
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        tk.Label(
+            dialog,
+            text="เลือกผู้ให้บริการสำหรับงาน Auto Ref ชุดนี้",
+            padx=18, pady=14,
+        ).pack(fill="x")
+        buttons = tk.Frame(dialog, padx=12, pady=8)
+        buttons.pack(fill="x")
+
+        def select(provider):
+            choice["provider"] = provider
+            ref_provider_var.set(ref_provider_labels[provider])
+            _save_ref_page_settings()
+            dialog.destroy()
+
+        tk.Button(buttons, text="ChatGPT Web", command=lambda: select("gpt_web")).pack(side="left", padx=4)
+        tk.Button(buttons, text="SnapGen API", command=lambda: select("snapgen")).pack(side="left", padx=4)
+        tk.Button(buttons, text="ยกเลิก", command=dialog.destroy).pack(side="right", padx=4)
+        dialog.grab_set()
+        dialog.wait_window()
+        return choice["provider"]
 
     def _ref_ask_worker(title, text):
         answer, event = [], threading.Event()
@@ -1810,17 +1871,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
 
         # Character Ref is an attachment-ready identity sheet.  Context only
         # locks visible identity traits; story events and locations stay out.
-        details = _useful_context_fields(entity, (
-            ("visual_identity", "ภาพจำ"), ("อายุ", "วัย"), ("เพศ", "เพศ"),
-            ("รูปร่าง", "รูปร่าง"), ("ส่วนสูง", "ส่วนสูง"), ("สีผิว", "สีผิว"),
-            ("ทรงผม", "ผม"), ("ใบหน้า", "ใบหน้า"), ("ดวงตา", "ดวงตา"),
-            ("ลักษณะเด่น", "จุดจำ"),
+        details = _character_context_prompt_details(entity) or _useful_context_fields(entity, (
+            ("อายุ", "วัย"), ("เพศ", "เพศ"), ("รูปร่าง", "รูปร่าง"),
+            ("ส่วนสูง", "ส่วนสูง"), ("สีผิว", "สีผิว"), ("ทรงผม", "ผม"),
+            ("ใบหน้า", "ใบหน้า"), ("ดวงตา", "ดวงต"), ("ลักษณะเด่น", "จุดจำ"),
         ))
         if not details and selected_match and selected_ctx:
             details = selected_ctx
         source = _clip_ref_prompt(
             details or "คนไทยสมจริงหนึ่งแบบตามชื่อและบทบาทใน Context",
-            190,
+            520,
         )
         return _clip_ref_prompt(
             f"ประเภทเรื่อง: {story_type_label} ({story_type_id}). {story_type_rules} "
@@ -1828,10 +1888,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "LIGHTING LOCK: flat frontal ID-photo lighting, large camera-front softbox plus equal 1:1 fill from every direction. Face brightness must be perfectly even. ZERO facial shadows: none under brows, eyes, nose, cheeks, lips, or chin. No side/top/rim/Rembrandt/chiaroscuro/dramatic lighting. "
             "จัดเป็นแผ่นอ้างอิง 5 ช่อง. แถวบนมี 4 ช่องเล็กเท่ากันเรียงซ้ายไปขวา: ใบหน้า close-up ด้านซ้าย, ใบหน้า close-up ด้านขวา, เต็มตัวด้านหน้า, เต็มตัวด้านหลัง. "
             "แถวล่างมี 1 ช่องใหญ่เป็นใบหน้าตรง close-up ระยะหัวถึงไหล่ ให้หน้าตรงเป็นภาพหลักและใหญ่ที่สุด. ภาพเต็มตัวต้องเห็นศีรษะถึงเท้าครบแต่เล็กกว่าหน้าตรง. ห้ามสร้างตัวอักษร หัวเรื่อง NOTE หรือป้ายชื่อภายในภาพ เพราะโปรแกรมจะเติมชื่อภายหลัง. ทุกช่องต้องเป็นคนเดียวกัน สีหน้าเป็นกลาง และรักษาใบหน้าเดิม. "
+            "FACE AND HAIR IDENTITY LOCK: reproduce the specified face shape, jaw and cheek structure, eye shape, nose, skin tone, distinctive marks, hair style, length and color from the Character Bible. Treat those traits as the main identity; do not replace them with a generic attractive Thai face or average them with other characters. If the Bible gives a trait, keep it visible in the close-ups and consistent in every panel. "
             f"ล็อกรูปลักษณ์จาก Character Bible: {source}. "
             f"เปลี่ยนเฉพาะเสื้อผ้า: {_character_outfit_instruction(entity, film)}. "
             "พื้นขาว 5600K คงสีผิวและรายละเอียดผิวจริง ไม่ทำหน้าขาวลอยหรือผิวพลาสติก. "
-            "ห้ามฉาก พร็อพ คนอื่น อารมณ์เหตุการณ์ บาดแผล โทนมืด กลางคืน และ watermark. photorealistic, sharp."
+            "ห้ามฉาก พร็อพ คนอื่น อารมณ์เหตุการณ์ บาดแผล โทนมืด กลางคืน และ watermark. photorealistic, sharp.",
+            1700,
         )
 
     g["_clean_character_ref_context"] = _clean_character_ref_context
@@ -1954,14 +2016,23 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         if not names:
             _ref_log("ไม่มีชื่อสำหรับสร้าง Ref")
             return
+        if ref_job_running[0]:
+            _ref_log("กำลังสร้างอยู่ — รอให้งานเดิมเสร็จก่อน")
+            return
+        if auto and entity_kind in ("character", "location"):
+            provider = _choose_auto_ref_provider()
+            if provider is None:
+                _ref_log("ยกเลิก Auto Ref — ยังไม่ส่งงาน")
+                return
         options = _ref_request_options()
         if options is None:
             return
+        isolated_character_auto = bool(auto and entity_kind == "character")
         has_ref_story = g.get("has_ref_story_history")
         current_ref_title = g.get("get_ref_story_title")
         valid_ref_story = bool(has_ref_story()) if callable(has_ref_story) else False
         title = current_ref_title() if callable(current_ref_title) else ""
-        if options["provider"] == "gpt_web" and (not valid_ref_story or not title):
+        if options["provider"] == "gpt_web" and not isolated_character_auto and (not valid_ref_story or not title):
             ref_story_title_var.set("")
             _ref_log("[บทเรื่อง] ยังไม่มีประวัติเรื่องหลัก — เริ่มเรื่องจาก Prompt-Ref ก่อน")
             return
@@ -1971,9 +2042,6 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             _ref_log(bridge_msg)
             if not ok_bridge:
                 return
-        if ref_job_running[0]:
-            _ref_log("กำลังสร้างอยู่ — รอให้งานเดิมเสร็จก่อน")
-            return
         selected_story_type = _current_ref_story_type_id()
         # Auto buttons are Context-driven by definition.  A single manual Ref
         # follows the new checkbox and never reads Tk variables in the worker.
@@ -2023,6 +2091,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         use_context_override=context_enabled,
                         ghost_design=ghost_design,
                     )
+                    character_identity_details = (
+                        _clip_ref_prompt(_character_context_prompt_details(context_entity), 520)
+                        if context_kind == "character" else ""
+                    )
                     if context_kind == "manual":
                         _ref_log(f"[manual] ใช้เฉพาะชื่อที่พิมพ์: {name} — ไม่ดึง Prompt Context")
                     elif context_entity:
@@ -2038,6 +2110,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         if refined_prompt and refined_prompt != prompt:
                             _ref_log(f"[refine] ได้ prompt ใหม่ ({len(refined_prompt)} chars)")
                             prompt = refined_prompt
+                            if character_identity_details:
+                                prompt += (
+                                    "\n\nNON-NEGOTIABLE CHARACTER FACE AND HAIR IDENTITY FROM CONTEXT: "
+                                    + character_identity_details
+                                    + ". Preserve these exact visible traits in every panel; do not normalize or replace them."
+                                )
                     else:
                         _ref_log(
                             "[refine] ใช้ Ghost Bible โดยตรงเพื่อไม่ให้ชนิดผีถูกตีความใหม่"
@@ -2051,8 +2129,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     payload = {
                         "model":"auto", "prompt":prompt, "n":1,
                         "aspect_ratio":"1:1", "history_and_training_disabled":False,
-                        "_use_ref_story_history": True,
                     }
+                    payload.update(_ref_auto_history_payload(auto, entity_kind or context_kind))
+                    if isolated_character_auto and options["provider"] == "gpt_web":
+                        _ref_log(f"[auto-ref] แยก ChatGPT history สำหรับตัวละคร {name}; ส่งทีละตัว")
                     if ref_image and os.path.exists(ref_image):
                         with open(ref_image, "rb") as _f:
                             import base64 as _b64
@@ -2074,12 +2154,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 if lock:
                     with lock:
                         send_type = g.get("send_ref_story_type_lock")
-                        if options["provider"] == "gpt_web" and callable(send_type):
+                        if options["provider"] == "gpt_web" and not isolated_character_auto and callable(send_type):
                             send_type(selected_story_type, log_fn=_ref_log)
                         run_all()
                 else:
                     send_type = g.get("send_ref_story_type_lock")
-                    if options["provider"] == "gpt_web" and callable(send_type):
+                    if options["provider"] == "gpt_web" and not isolated_character_auto and callable(send_type):
                         send_type(selected_story_type, log_fn=_ref_log)
                     run_all()
             except Exception as e:
