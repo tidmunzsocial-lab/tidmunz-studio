@@ -2291,6 +2291,14 @@ def video_shots(segments: list, target: float = 8.0, limit: float = SHOT_LIMIT) 
             if seg.get("speech_end") is not None:
                 shot["speech_end"] = seg["speech_end"]
         shots.append(shot)
+    # A spoken line ends when the voice does (+0.5 s): the quiet after it is no longer part of the speaking
+    # clip, so the mouth is never asked to keep moving. A narration shot that follows simply starts earlier.
+    for shot, after in zip(shots, shots[1:]):
+        stop = shot.get("speech_end")
+        if shot.get("dialogue") and stop is not None and not after.get("dialogue"):
+            ends_at = max(shot["start"] + 1.0, float(stop) + 0.5)
+            if ends_at < shot["end"] - 0.5:
+                shot["end"] = after["start"] = round(ends_at, 2)
     # A short last shot joins the one before it when that still fits.
     if (len(shots) > 1 and not shots[-1].get("dialogue") and not shots[-2].get("dialogue")
             and shots[-1]["end"] - shots[-1]["start"] < 4 and shots[-1]["end"] - shots[-2]["start"] <= limit):
