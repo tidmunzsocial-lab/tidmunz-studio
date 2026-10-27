@@ -193,7 +193,45 @@ def _topaz_dirs():
     return (exe, mdir) if exe and mdir else None
 
 
-def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="iris-3", fi_model="apo-8"):
+_enhance_lock = threading.Lock()
+
+
+def enhance_image(path, log=None, model="rhea-1", scale=2):
+    """Re-detail a freshly generated image 2x with the installed Topaz (leaves/fabric stop looking like jelly).
+
+    The original is kept in an `_original` folder next to it. Any failure leaves the image untouched.
+    Returns the path (same file name, now larger)."""
+    say = log if callable(log) else (lambda m: None)
+    try:
+        src = Path(path)
+        found = _topaz_dirs()
+        if os.environ.get("SNAPGEN_NO_IMAGE_ENHANCE") or not found or not src.is_file():
+            return str(path)
+        exe, mdir = found
+        env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
+        tmp = src.with_name(src.stem + ".enhancing.png")
+        # Topaz needs a short clip, not a single frame: loop the picture for a quarter second.
+        cmd = [str(exe), "-hide_banner", "-y", "-loop", "1", "-framerate", "24", "-t", "0.25", "-i", str(src),
+               "-vf", f"tvai_up=model={model}:scale={scale}:device=0:vram=1:instances=1",
+               "-frames:v", "1", "-pix_fmt", "rgb24", str(tmp)]
+        with _enhance_lock:   # one picture at a time keeps the GPU light
+            started = time.time()
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, encoding="utf-8", errors="replace", env=env)
+        if r.returncode or not _video_ok(tmp):
+            tmp.unlink(missing_ok=True)
+            say("[ภาพ] Topaz เพิ่มรายละเอียดไม่สำเร็จ — ใช้ภาพเดิม")
+            return str(path)
+        keep = src.parent / "_original"
+        keep.mkdir(exist_ok=True)
+        shutil.copyfile(src, keep / src.name)
+        os.replace(tmp, src)
+        say(f"[ภาพ] เพิ่มรายละเอียด {src.name} ✓ ({time.time() - started:.0f} วินาที)")
+    except Exception as e:
+        say(f"[ภาพ] เพิ่มรายละเอียดไม่สำเร็จ — ใช้ภาพเดิม: {e}")
+    return str(path)
+
+
+def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4", fi_model="apo-8"):
     """Slow-mo + upscale to 4K with the installed Topaz Video AI. Returns path or None (caller falls back)."""
     found = _topaz_dirs()
     if not found:

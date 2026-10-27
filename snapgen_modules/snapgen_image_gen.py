@@ -1607,6 +1607,11 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                 sidecar = dest.with_suffix(".txt")
                 sidecar.write_text(prompt, encoding="utf-8")
 
+            try:
+                import ai_slow2x
+                ai_slow2x.enhance_image(str(dest), log=log)
+            except Exception:
+                pass
             log(f"[image-gen] ✓ {dest}")
             return str(dest)
 
@@ -1630,6 +1635,11 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
             artifact_ids_before, request_started, out_dir, name_hint, prompt, log,
         )
         if recovered:
+            try:
+                import ai_slow2x
+                ai_slow2x.enhance_image(str(recovered), log=log)
+            except Exception:
+                pass
             return recovered
 
     raise last_error or RuntimeError("Image generation failed after all retries")
