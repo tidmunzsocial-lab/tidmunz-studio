@@ -1609,7 +1609,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
 
             try:
                 import ai_slow2x
-                ai_slow2x.enhance_image(str(dest), log=log)
+                ai_slow2x.enhance_image_async(str(dest), log=log)   # runs while the next image is requested
             except Exception:
                 pass
             log(f"[image-gen] ✓ {dest}")
@@ -1637,7 +1637,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
         if recovered:
             try:
                 import ai_slow2x
-                ai_slow2x.enhance_image(str(recovered), log=log)
+                ai_slow2x.enhance_image_async(str(recovered), log=log)
             except Exception:
                 pass
             return recovered

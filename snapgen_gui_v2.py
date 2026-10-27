@@ -4435,6 +4435,11 @@ def _install_actual_video_credit():
         def worker():
             before = None
             try:
+                try:   # use the enhanced picture if its background pass is still running
+                    import ai_slow2x as _enh
+                    _enh.wait_enhance(img)
+                except Exception:
+                    pass
                 if model_for_job in (
                     MINIMAX_H3_LOCAL_MODEL,
                     LTX23_LOCAL_MODEL,

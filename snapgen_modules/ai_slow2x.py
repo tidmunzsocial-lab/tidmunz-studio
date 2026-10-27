@@ -193,7 +193,40 @@ def _topaz_dirs():
     return (exe, mdir) if exe and mdir else None
 
 
-_enhance_lock = threading.Lock()
+_enhance_lock = threading.Lock()   # one Topaz job on the GPU at a time (pictures and videos share it)
+_enhance_pending = {}              # resolved path -> Event, set when its picture is done
+_enhance_pool = None
+
+
+def enhance_image_async(path, log=None):
+    """Queue enhance_image on a background worker so the next GPT image can be requested meanwhile."""
+    global _enhance_pool
+    if os.environ.get("SNAPGEN_NO_IMAGE_ENHANCE") or not _topaz_dirs():
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    key = str(Path(path).resolve())
+    done = threading.Event()
+    with _tool_install_lock:
+        if _enhance_pool is None:
+            _enhance_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="img-enhance")
+        _enhance_pending[key] = done
+
+    def job():
+        try:
+            enhance_image(key, log=log)
+        finally:
+            done.set()
+    _enhance_pool.submit(job)
+
+
+def wait_enhance(path=None, timeout=900):
+    """Block until the queued enhancement of `path` (or of every picture when None) has finished."""
+    with _tool_install_lock:
+        events = ([_enhance_pending.get(str(Path(path).resolve()))] if path else list(_enhance_pending.values()))
+    deadline = time.time() + timeout
+    for ev in events:
+        if ev is not None:
+            ev.wait(max(0.0, deadline - time.time()))
 
 
 def enhance_image(path, log=None, model="rhea-1", scale=2):
@@ -257,7 +290,9 @@ def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4",
             "-tag:v", "hvc1", "-movflags", "+faststart", str(out)]
     say(f"[slow2x] ใช้ Topaz Video AI | {w}x{h} → {tw}x{th} | {up_model} + {fi_model} | Slow {factor}x")
     started = time.time()
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=3 * 3600, encoding="utf-8", errors="replace", env=env)
+    with _enhance_lock:   # several video slots finishing together must not fight over the GPU
+        started = time.time()
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3 * 3600, encoding="utf-8", errors="replace", env=env)
     if r.returncode or not _video_ok(out):
         say("[slow2x] Topaz ทำไม่สำเร็จ — ใช้ RIFE แทน: " + ((r.stderr or "")[-300:].strip() or "unknown"))
         return None
