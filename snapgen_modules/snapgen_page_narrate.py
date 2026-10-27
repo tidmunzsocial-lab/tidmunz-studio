@@ -2843,6 +2843,11 @@ def motion_only_prompt(prompt: str) -> str:
     if not any(h in ("เปิดภาพ", "กล้อง") for h in heads):
         return str(prompt or "").strip()
     kept = [p.rstrip() for p, h in zip(parts, heads) if h not in ("เปิดภาพ", "กล้อง") and p.strip()]
+    # The action text may still push the camera in ("กล้องดอลลี่เข้าอย่างช้าๆ"): the video model answers that
+    # with a cross-fade into a close-up, so those phrases become a locked camera.
+    push = _re.compile(r"กล้อง(?:นิ่งหรือ)?(?:ค่อยๆ|เริ่ม)?\s*(?:ดอลลี่|ซูม|เคลื่อน|เลื่อน)(?:กล้อง)?เข้า(?:ไป)?"
+                       r"(?:อย่าง)?(?:ช้ามาก|ช้าๆ|ช้า|นุ่มนวล|ต่อเนื่อง)?(?:เพียง)?(?:เล็กน้อย)?")
+    kept = [push.sub("กล้องนิ่ง", p) for p in kept]
     fixed = ["[เปิดภาพ] เริ่มจากภาพเริ่มต้นที่แนบมาทุกประการ: ขนาดภาพ มุมกล้อง เลนส์ แสง องค์ประกอบ ตำแหน่งและหน้าตาตัวละครตามรูป",
              "[กล้อง] กล้องนิ่ง หรือเคลื่อนช้ามากเล็กน้อยโดยขนาดภาพไม่เปลี่ยน ไม่ซูม ไม่ตัด ไม่เฟด"]
     return "\n".join(fixed + kept)
