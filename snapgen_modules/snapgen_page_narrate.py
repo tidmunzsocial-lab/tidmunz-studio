@@ -2817,6 +2817,36 @@ ONE_SHOT_RULE = ("ช็อตเดียวต่อเนื่องตล�
                  "ตัวละครยืนหรืออยู่ตำแหน่งเดิม ขยับเฉพาะลมหายใจ ผ้า ผม สีหน้า "
                  "(keep the same shot size and framing as the first frame for the whole clip: no zoom-in, no push-in to a close-up, "
                  "no cross-fade, no cut; the camera stays locked or drifts very slightly).")
+_SIZE_WORDS = (("wide", ("extreme wide", "establishing", "wide shot", "wide", "ภาพกว้าง", "ช็อตกว้าง", "ระยะกว้าง")),
+               ("medium", ("medium", "ระดับกลาง", "ภาพกลาง", "ช็อตกลาง")),
+               ("close", ("close-up", "close up", "closeup", "ภาพใกล้", "ช็อตใกล้", "ระยะใกล้")))
+_SIZE_THAI = {"wide": "ช็อตกว้าง (Wide)", "medium": "ช็อตกลาง (Medium)", "close": "ช็อตใกล้ (Close-up)"}
+
+
+def shot_size(text: str) -> str:
+    """'wide' / 'medium' / 'close': the shot size a request states first (it is named at the start), else ''."""
+    head = str(text or "")[:420].lower()
+    found = [(head.find(word), name) for name, words in _SIZE_WORDS for word in words if word in head]
+    return min(found)[1] if found else ""
+
+
+def reconcile_video_prompt(scene: dict) -> tuple:
+    """(video prompt, note). The prompt must open on the same shot size as the picture it starts from.
+
+    Written without seeing the picture, a video prompt may describe a close-up for a wide start image;
+    the video model then cross-fades from the picture into the close-up it was told to make."""
+    prompt = str(scene.get("video_prompt") or scene.get("prompt") or "").strip()
+    picture, said = shot_size(scene.get("prompt")), shot_size(prompt)
+    if not picture or not said or picture == said:
+        return prompt, ""
+    names = ", ".join(str(c) for c in scene.get("characters") or []) or "ตัวละครในภาพ"
+    still = ("[เปิดภาพ] ตามภาพเริ่มต้นทุกประการ: " + _SIZE_THAI[picture] + " "
+             + str(scene.get("prompt") or "")[:900].strip() + "\n"
+             f"[จังหวะ] ตลอดคลิป {names} คงท่าทางและตำแหน่งตามภาพเริ่มต้น เคลื่อนไหวเพียงหายใจเบาๆ ผ้าและผมไหวเล็กน้อย "
+             "กะพริบตาอย่างเป็นธรรมชาติ\n"
+             f"[กล้อง] กล้องนิ่ง ขนาดภาพ{_SIZE_THAI[picture]}และองค์ประกอบเดิมตลอดคลิป ไม่ซูม ไม่ดอลลี่ ไม่แพน ไม่ตัด ไม่เฟด")
+    return still, (f"คำสั่งวิดีโอขึ้นต้นเป็น{_SIZE_THAI[said]} แต่ภาพเริ่มต้นเป็น{_SIZE_THAI[picture]} "
+                   "— ใช้คำสั่งนิ่งตามภาพเริ่มต้นแทน กันภาพละลายไปเป็นอีกขนาดภาพ")
 CONTINUITY_VERSION = 2  # rules changed: records made before this are built again (text only)
 # Someone seen from behind in the first frame has no face there: when AI video turns them round
 # it invents a face that is not the character's.
@@ -6094,7 +6124,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def clip_prompt(scene) -> str:
         """Everything the AI video model receives for one shot, in the order it reads it."""
-        prompt = (scene.get("video_prompt") or scene["prompt"]).strip()
+        prompt, size_note = reconcile_video_prompt(scene)
+        if size_note:
+            log(f"⚠ {size_note}")
         bodies, body_forbid = shot_bodies(scene)
         # The body sheet always (GPT's per-shot summary may leave someone out), then what GPT saw in this frame.
         note = str(scene.get("clip_anatomy") if scene.get("clip_anatomy") is not None else scene.get("anatomy") or "")
