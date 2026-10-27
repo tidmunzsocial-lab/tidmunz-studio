@@ -2395,8 +2395,8 @@ def speech_note(shot: dict) -> str:
             seconds = round(float(shot["speech_end"]) - float(shot["start"]), 1)
         else:
             return ""
-    return (f"พูดจริงยาว {seconds:g} วินาที — ให้พูดประโยคนี้จบภายใน {seconds:g} วินาทีแรกของคลิป "
-            "แล้วปิดปากนิ่ง ไม่พูดต่อ ไม่ขยับปากอีกจนจบคลิป")
+    return (f"พูดจริงยาว {seconds:g} วินาที — เริ่มพูดทันทีตั้งแต่วินาทีที่ 0 (ไม่มีช่วงรอหรือเตรียมก่อนพูด) "
+            f"และพูดประโยคนี้จบภายใน {seconds:g} วินาทีแรกของคลิป แล้วปิดปากนิ่ง ไม่พูดต่อ ไม่ขยับปากอีกจนจบคลิป")
 
 
 def _shot_lines(numbered: list) -> str:
@@ -2728,8 +2728,9 @@ def motion_request(items: list, era: str, horror: bool = False) -> str:
         f"รูปที่แนบมา {len(items)} รูปคือภาพแรกจริงของคลิปวิดีโอ AI แต่ละช็อตของเรื่องนี้ (เรียงตามลำดับด้านล่าง; "
         "ภาพแรกวาดตามสตอรี่บอร์ดแล้ว). เขียนพรอมต์วิดีโอใหม่ของแต่ละช็อตให้ครบทุกด้านและชัดพอที่โมเดลวิดีโอ AI เข้าใจได้ทันที. "
         "video_prompt เขียนเป็นหัวข้อตามลำดับนี้ทุกช็อต: "
-        "[เปิดภาพ] ตรงกับที่เห็นจริงในรูป: ใครอยู่ตรงไหนของจอ หันทางไหน ท่าทางตอนเริ่ม ฉากหลัง แสง — คลิปเริ่มจากภาพนี้พอดี "
-        "ห้ามเปลี่ยนองค์ประกอบ มุมกล้อง หรือตำแหน่งตัวละครไปจากภาพนี้; "
+        "[เปิดภาพ] ตรงกับที่เห็นจริงในรูป: ใครอยู่ตรงไหนของจอ หันทางไหน ท่าทางตอนเริ่ม — คลิปเริ่มจากภาพนี้พอดี "
+        "ห้ามระบุขนาดภาพ (Wide/Medium/Close-up) เลนส์ มุมกล้อง หรือรูปพรรณหน้าตา เพราะรูปเริ่มต้นกำหนดไว้แล้ว "
+        "พรอมต์วิดีโอมีหน้าที่บอกแค่ท่าทาง สีหน้า และการขยับของตัวละคร; "
         + BACK_TURNED_RULE + NO_TALK_RULE +
         "[จังหวะ] แบ่งตามเวลาให้เต็มความยาวคลิป เช่น '0–2 วิ: … / 2–5 วิ: … / 5–8 วิ: …' "
         "การกระทำต้องเล่าเหตุการณ์ของคำบรรยายช็อตนี้ ต่อจากช็อตก่อน และพาไปสู่ช็อตถัดไป มีการกระทำหลัก 1 อย่างที่เห็นชัด "
@@ -2741,9 +2742,8 @@ def motion_request(items: list, era: str, horror: bool = False) -> str:
         "[บทพูด] เขียนทุกช็อต: 'ไม่มีบทพูด — ทุกคนปากปิด' หรือ 'มีบทพูด: ชื่อ พูดว่า …' ตามข้อมูลบทพูดของช็อตนั้นเท่านั้น; "
         "[การหันหน้า] เขียนทุกช็อตจากรูปจริง: แต่ละคนหันหน้าเข้ากล้อง หันข้าง หรือหันหลัง และคงทิศนั้นตลอดคลิป "
         "(คนที่หันหลังห้ามหันหน้ามา); "
-        "[กล้อง] ขนาดภาพ มุม และการเคลื่อนกล้อง (นิ่ง/ดอลลี่/แพน/แทร็ก/ถือกล้อง) — ขนาดภาพต้องคงเดิมตลอดคลิป "
-        "ห้ามเขียนให้กล้องซูมหรือดอลลี่เข้าใกล้จนภาพกว้างกลายเป็นภาพใกล้ (โมเดลวิดีโอจะตัดหรือละลายภาพไปเป็นภาพใกล้แทน) "
-        "ช็อตกว้างให้กล้องนิ่งหรือเคลื่อนช้ามากเล็กน้อยและตัวละครยืนนิ่งขยับแค่ลมหายใจ ผ้า ผม; "
+        "[กล้อง] ไม่ต้องเขียนขนาดภาพ มุม หรือเลนส์ (โปรแกรมใส่ให้) เขียนได้แค่ 'กล้องนิ่ง' หรือกล้องเคลื่อนช้ามากเล็กน้อยโดยขนาดภาพไม่เปลี่ยน "
+        "ห้ามเขียนให้กล้องซูมหรือดอลลี่เข้าใกล้จนภาพกว้างกลายเป็นภาพใกล้ (โมเดลวิดีโอจะตัดหรือละลายภาพไปเป็นภาพใกล้แทน); "
         "[บรรยากาศ] สิ่งรอบตัวที่ขยับ (น้ำ ลม ฝุ่น ไฟ ผม ผ้า) แสงและอารมณ์. "
         "anatomy = เฉพาะเรื่องร่างกายที่ต้องระวังในเฟรมนี้ (ท่าตอนเริ่ม ส่วนที่เห็น/ถูกบัง ส่วนที่ต้องขยับ) "
         "ไม่ต้องทวน 'ร่างกาย' ที่ให้ไว้. "
@@ -2830,12 +2830,30 @@ def shot_size(text: str) -> str:
     return min(found)[1] if found else ""
 
 
+def motion_only_prompt(prompt: str) -> str:
+    """A video prompt that only says what the people do.
+
+    The start picture already fixes framing, lens, light and faces. A prompt that describes them again
+    can contradict the picture (a close-up for a wide picture) and the video model then dissolves into
+    it. The [เปิดภาพ] and [กล้อง] sections are replaced by two fixed lines; motion, expression, body,
+    speech and atmosphere stay. A prompt without sections is left as it is."""
+    import re as _re
+    parts = _re.split(r"(?m)^(?=\[[^\]\n]{1,20}\])", str(prompt or "").strip())
+    heads = [(_re.match(r"\[([^\]\n]{1,20})\]", p) or [None, ""])[1] for p in parts]
+    if not any(h in ("เปิดภาพ", "กล้อง") for h in heads):
+        return str(prompt or "").strip()
+    kept = [p.rstrip() for p, h in zip(parts, heads) if h not in ("เปิดภาพ", "กล้อง") and p.strip()]
+    fixed = ["[เปิดภาพ] เริ่มจากภาพเริ่มต้นที่แนบมาทุกประการ: ขนาดภาพ มุมกล้อง เลนส์ แสง องค์ประกอบ ตำแหน่งและหน้าตาตัวละครตามรูป",
+             "[กล้อง] กล้องนิ่ง หรือเคลื่อนช้ามากเล็กน้อยโดยขนาดภาพไม่เปลี่ยน ไม่ซูม ไม่ตัด ไม่เฟด"]
+    return "\n".join(fixed + kept)
+
+
 def reconcile_video_prompt(scene: dict) -> tuple:
     """(video prompt, note). The prompt must open on the same shot size as the picture it starts from.
 
     Written without seeing the picture, a video prompt may describe a close-up for a wide start image;
     the video model then cross-fades from the picture into the close-up it was told to make."""
-    prompt = str(scene.get("video_prompt") or scene.get("prompt") or "").strip()
+    prompt = motion_only_prompt(str(scene.get("video_prompt") or scene.get("prompt") or "").strip())
     picture, said = shot_size(scene.get("prompt")), shot_size(prompt)
     if not picture or not said or picture == said:
         return prompt, ""
