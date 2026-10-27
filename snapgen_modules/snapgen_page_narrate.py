@@ -1593,7 +1593,7 @@ VIDEO_GROK_LITE_MODEL = "grok-1.5-lite"
 VIDEO_MODEL_LABELS = {
     "auto": "อัตโนมัติ (Grok / Vela)",
     VIDEO_GROK_LOWER_MODEL: "Grok Lower · 1080p",
-    VIDEO_GROK_LITE_MODEL: "Grok Lite · 1080p",
+    VIDEO_GROK_LITE_MODEL: "Grok Lite · 720p / 1080p",
 }
 VIDEO_MUSE_MODEL = "muse-ai-video"
 VIDEO_MUSE_LABEL = "Muse AI · 10s · ฟรี"
@@ -1603,6 +1603,8 @@ VIDEO_CHEAP_MODEL = "vela-ai-video"
 GROK_CLIP_SECONDS = (6, 10, 15)  # lengths grok-lower accepts; AI Slow 2x doubles a clip
 VELA_CLIP_SECONDS = 5  # vela-ai-video only makes 5 s
 VIDEO_AUTO_AVG_SECONDS = 8  # average shot length used to size the plan
+CLIP_CHOICE_LABELS = {0: "อัตโนมัติ (ตามความยาวช็อต)", 6: "6 วินาที", 10: "10 วินาที", 15: "15 วินาที"}
+VIDEO_RESOLUTIONS = ("1080p", "720p")  # Grok Lite
 SHOT_LIMIT = 12.0  # longer shots are split into continuing shots
 CLIP_STRETCH = 1.15  # a clip may be slowed this much unnoticed to fill its shot
 # Economy (Slow 2x on every shot): fewer, longer shots — one clip (grok 10 s + Slow 2x) covers up to 20 s.
@@ -1634,7 +1636,7 @@ def clip_limit(scene: dict) -> float:
     return 20.0 if scene.get("slow") else SHOT_LIMIT
 
 
-def assign_clips(scenes: list, duration: float, economy: bool = False) -> None:
+def assign_clips(scenes: list, duration: float, economy: bool = False, clip_choice: int = 0) -> None:
     """Store each shot's model, clip length and Slow 2x choice from its narration length.
 
     ``economy``: every shot without a spoken line buys a short clip and plays it Slow 2x
@@ -1648,6 +1650,9 @@ def assign_clips(scenes: list, duration: float, economy: bool = False) -> None:
         scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
             length, (economy or bool(scene.get("slow"))) and not spoken, bool(scene.get("cheap")) and not spoken,
             1.0 if spoken else CLIP_STRETCH)
+        if clip_choice and not spoken:  # the user fixed the clip length: every narration shot is that long, normal speed
+            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_AUTO_MODEL, int(clip_choice), False
+            scene["slow"] = False
 
 
 def clip_label(scene: dict) -> str:
@@ -2310,16 +2315,23 @@ def video_shots(segments: list, target: float = 8.0, limit: float = SHOT_LIMIT) 
 def plan_video(segments: list, duration: float, names: list, era: str, ask, horror: bool = False,
                progress=None, out: list | None = None, batch: int = 20, script: str = "",
                direction: dict | None = None, refs: list | None = None, aspect: str = "16:9",
-               economy: bool = False) -> list:
+               economy: bool = False, clip_choice: int = 0) -> list:
     """Video mode plan: program-cut shots, GPT writes each one, every shot gets a clip choice.
 
     ``ask(prompt) -> dict`` talks to GPT.  Shots GPT skipped are asked again
     once; any still missing reuse the narration text so nothing is left blank.
     Spoken lines of ``script`` become their own shots (no slow motion).
     ``economy``: longer shots (about 14 s, up to 20 s = grok 10 s Slow 2x), fewer cuts, all slowed.
+    ``clip_choice``: 6 / 10 / 15 fixes the clip length: shots are cut to about that many seconds, no Slow 2x.
     """
     lines = split_dialogue(segments, script) if script else segments
-    shots = video_shots(lines, ECONOMY_TARGET, ECONOMY_LIMIT) if economy else video_shots(lines)
+    if clip_choice:
+        economy = False
+        shots = video_shots(lines, float(clip_choice), float(clip_choice) * CLIP_STRETCH)
+        era = era + (f". ทุกช็อตยาวประมาณ {clip_choice} วินาที เล่นความเร็วปกติ ไม่สโลว์ — เขียนแต่ละช็อตเป็นภาพเดียวต่อเนื่อง "
+                     f"ที่เล่าเหตุการณ์ของช่วง {clip_choice} วินาทีนั้นได้ครบ")
+    else:
+        shots = video_shots(lines, ECONOMY_TARGET, ECONOMY_LIMIT) if economy else video_shots(lines)
     if economy:
         era = era + ECONOMY_NOTE
     scenes = out if out is not None else []
@@ -2378,9 +2390,10 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
     if economy:
         for scene in scenes:
             scene["slow"] = not scene.get("dialogue")
-    split = split_long_scenes(scenes, duration, 0, limit_for=clip_limit)
+    split = split_long_scenes(scenes, duration, 0,
+                              limit_for=(lambda scene: float(clip_choice) * CLIP_STRETCH) if clip_choice else clip_limit)
     scenes[:] = split
-    assign_clips(scenes, duration, economy)
+    assign_clips(scenes, duration, economy, clip_choice)
     return scenes
 
 
@@ -3125,6 +3138,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     film_var = tk.BooleanVar(value=True)  # เล่าภาพ เรื่องผี: old film look on the video
     economy_var = tk.BooleanVar(value=True)  # ออโต้: Slow 2x on every shot, longer shots, about half the credit
     video_model_var = tk.StringVar(value=VIDEO_MODEL_LABELS["auto"])
+    clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
+    video_res_var = tk.StringVar(value="720p")
     image_provider_var = tk.StringVar(value=GPT_WEB_LABEL)
     maxplus_credit_var = tk.StringVar(value="MaxPlus คงเหลือ: —")
     maxplus_model_info_var = tk.StringVar(value="")
@@ -3286,8 +3301,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if project is not None:
                 selected = next((key for key, label in VIDEO_MODEL_LABELS.items()
                                  if label == video_model_var.get()), None)
-                project["video_model"] = selected or next((key for key, label in SEEDANCE_MODELS.items()
-                                                            if label == video_model_var.get()), "auto")
+                chosen = selected or next((key for key, label in SEEDANCE_MODELS.items()
+                                           if label == video_model_var.get()), "auto")
+                if chosen != VIDEO_GROK_LITE_MODEL and project.get("video_model") == VIDEO_GROK_LITE_MODEL and not messagebox.askyesno(
+                        "โมเดลวิดีโอ",
+                        f"ค่าเริ่มต้นคือ {VIDEO_MODEL_LABELS[VIDEO_GROK_LITE_MODEL]} (ถูกที่สุดในรายการ: 720p · 10 วินาที ราว 7 เครดิตตามหน้าเว็บ) "
+                        f"โมเดลที่เลือก ({video_model_var.get()}) อาจใช้เครดิตมากกว่านี้ ใช้ต่อไหม?", parent=page):
+                    video_model_var.set(VIDEO_MODEL_LABELS[VIDEO_GROK_LITE_MODEL])
+                    return
+                project["video_model"] = chosen
                 save_project()
             refresh_clip_info()
 
@@ -3383,6 +3405,29 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                   values=(*VIDEO_MODEL_LABELS.values(), *SEEDANCE_MODELS.values()))
         model_menu.pack(side="left", padx=6)
         model_menu.bind("<<ComboboxSelected>>", video_model_changed)
+
+        def clip_choice_changed(_event=None):
+            project = state.get("project")
+            if project is not None:
+                project["clip_choice"] = next((n for n, label in CLIP_CHOICE_LABELS.items()
+                                               if label == clip_choice_var.get()), 0)
+                save_project()  # a plan made for another length is asked about when the run starts
+
+        def video_res_changed(_event=None):
+            project = state.get("project")
+            if project is not None:
+                project["video_resolution"] = video_res_var.get() if video_res_var.get() in VIDEO_RESOLUTIONS else "720p"
+                save_project()
+
+        tk.Label(model_row, text="ความยาวคลิป", bg=bg).pack(side="left", padx=(10, 0))
+        clip_menu = ttk.Combobox(model_row, textvariable=clip_choice_var, width=22, state="readonly",
+                                 values=tuple(CLIP_CHOICE_LABELS.values()))
+        clip_menu.pack(side="left", padx=6)
+        clip_menu.bind("<<ComboboxSelected>>", clip_choice_changed)
+        tk.Label(model_row, text="ความละเอียด (Grok Lite)", bg=bg).pack(side="left", padx=(6, 0))
+        res_menu = ttk.Combobox(model_row, textvariable=video_res_var, width=7, state="readonly", values=VIDEO_RESOLUTIONS)
+        res_menu.pack(side="left", padx=6)
+        res_menu.bind("<<ComboboxSelected>>", video_res_changed)
     else:
         tk.Label(options, text="ภาพ", bg=bg).pack(side="left")
         ttk.Combobox(options, textvariable=aspect_var, values=list(SIZES), width=6, state="readonly").pack(side="left", padx=(4, 14))
@@ -3679,9 +3724,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(
                 project.get("storyboard_provider"), GPT_WEB_LABEL))
             refresh_maxplus_model_info()
+            if "clip_choice" not in project:
+                # A new story starts on the cheap default (Grok Lite 720p, 10 s clips); a plan that already
+                # exists keeps the automatic length it was made with.
+                fresh = not project.get("scenes") and not project.get("done", {}).get("plan")
+                project["clip_choice"] = 10 if fresh else 0
+                if fresh and not project.get("video_model"):
+                    project["video_model"], project["video_resolution"] = VIDEO_GROK_LITE_MODEL, "720p"
             video_model = str(project.get("video_model") or "auto")
             video_model_var.set(VIDEO_MODEL_LABELS.get(video_model, SEEDANCE_MODELS.get(
                 video_model, VIDEO_MODEL_LABELS["auto"])))
+            clip_choice_var.set(CLIP_CHOICE_LABELS.get(int(project.get("clip_choice") or 0), CLIP_CHOICE_LABELS[0]))
+            video_res_var.set(project.get("video_resolution") or "720p")
         else:
             image_provider_var.set(IMAGE_PROVIDER_LABELS.get(
                 project.get("image_provider"), GPT_WEB_LABEL))
@@ -4996,7 +5050,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             plan_video(segments, float(project["duration"]), names, era, ask,
                        horror=project.get("style_mode") == "เรื่องผี", progress=progress, out=scenes_so_far,
                        script=story_script(), direction=project.setdefault("direction", {}),
-                       refs=attachment_names(), aspect=desired_aspect(), economy=economy_on())
+                       refs=attachment_names(), aspect=desired_aspect(), economy=economy_on(),
+                       clip_choice=int(project.get("clip_choice") or 0))
+            project["planned_clip_choice"] = int(project.get("clip_choice") or 0)
             if project["direction"]:
                 (folder / "director_plan.json").write_text(
                     json.dumps(project["direction"], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -6618,6 +6674,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 False,
                 1.0 if dialogue else CLIP_STRETCH,
             )
+            fixed = int((state["project"] or {}).get("clip_choice") or 0)
+            if fixed and not dialogue:
+                seconds, slow = fixed, False
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = selected_model, seconds, slow
         elif scene.get("clip_model") in SEEDANCE_MODELS:
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
@@ -6656,7 +6715,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             set_slot_config(cfg, clip_model,
                             str(scene.get("clip_seconds") or GROK_CLIP_SECONDS[0]),
                             state["project"].get("aspect") or "16:9",
-                            "1080p" if clip_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL) else None)
+                            (state["project"].get("video_resolution") or "1080p")
+                            if clip_model == VIDEO_GROK_LITE_MODEL else
+                            "1080p" if clip_model == VIDEO_GROK_LOWER_MODEL else None)
             runtime["_ai_slow2x_override"] = bool(scene.get("clip_slow"))
             dialogue_var = cfg.get("dialogue")
             if hasattr(dialogue_var, "set") and not scene.get("dialogue"):
@@ -7077,8 +7138,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                     "ออโต้ใช้ไฟล์แนบชุดเดียวกับ flow สร้างวิดีโอ", parent=page)
                 return
             # Plans made for one fixed clip length (before grok-lower 6/10/15 + Slow 2x) need re-planning.
-            changed_clip = project.get("done", {}).get("plan") and project.get("video_model") != VIDEO_AUTO_MODEL
-            project.update({"clip_seconds": VIDEO_AUTO_AVG_SECONDS, "video_model": VIDEO_AUTO_MODEL})
+            chosen_model = project.get("video_model")
+            keeps_choice = chosen_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL, VIDEO_MUSE_MODEL, *SEEDANCE_MODELS)
+            changed_clip = bool(project.get("done", {}).get("plan") and (
+                (not keeps_choice and chosen_model != VIDEO_AUTO_MODEL)
+                or int(project.get("clip_choice") or 0) != int(project.get("planned_clip_choice") or 0)))
+            project.update({"clip_seconds": VIDEO_AUTO_AVG_SECONDS,
+                            "video_model": chosen_model if keeps_choice else VIDEO_AUTO_MODEL})
         else:
             changed_clip = False
         wanted = desired_count()

@@ -9,10 +9,10 @@ MODEL = "grok-lower"
 LABEL = "Grok Lower — เสียเครดิต 50%"
 API_URL = "https://api.snapgen.ai/uapi/v1/video-gen/grok-lower"
 GROK_LITE_MODEL = "grok-1.5-lite"
-GROK_LITE_LABEL = "Grok 1.5 Lite · 1080p"
+GROK_LITE_LABEL = "Grok 1.5 Lite · 720p / 1080p"
 GROK_LITE_API_URL = "https://api.snapgen.ai/uapi/v1/video-gen/grok-1.5-lite"
 SUPPORTED_DURATIONS = ("6", "10", "15")
-GROK_LITE_RESOLUTIONS = ("1080p",)
+GROK_LITE_RESOLUTIONS = ("720p", "1080p")  # first = default (cheaper: 720p 10 s about 7 credits)
 
 
 def build_command(api_key, prompt, image, resolution, duration, aspect, mode, model=MODEL):
@@ -23,7 +23,11 @@ def build_command(api_key, prompt, image, resolution, duration, aspect, mode, mo
     api_url = {MODEL: API_URL, GROK_LITE_MODEL: GROK_LITE_API_URL}.get(model)
     if not api_url:
         raise ValueError(f"ไม่รองรับโมเดล Grok: {model}")
-    resolution = "1080p" if model == GROK_LITE_MODEL else str(resolution or "480p").strip()
+    if model == GROK_LITE_MODEL:
+        resolution = str(resolution or "").strip()
+        resolution = resolution if resolution in GROK_LITE_RESOLUTIONS else GROK_LITE_RESOLUTIONS[0]
+    else:
+        resolution = str(resolution or "480p").strip()
     source = Path(str(image or "").strip())
     if not source.is_file():
         raise RuntimeError("ไม่พบรูปเริ่มต้นสำหรับ Grok")

@@ -3096,7 +3096,8 @@ if callable(_core_duration_values_for_model):
                 and str(_duration_cfg.get("duration").get() or "").strip() not in GROK_LOWER_DURATIONS
             ):
                 _duration_cfg["duration"].set(GROK_LOWER_DURATIONS[0])
-            if str(_duration_cfg.get("model").get() or "").strip() == GROK_LITE_MODEL:
+            if (str(_duration_cfg.get("model").get() or "").strip() == GROK_LITE_MODEL
+                    and str(_duration_cfg["resolution"].get() or "").strip() not in GROK_LITE_RESOLUTIONS):
                 _duration_cfg["resolution"].set(GROK_LITE_RESOLUTIONS[0])
     except Exception as _duration_patch_error:
         print(f"[SnapGen] LTX duration menu refresh failed: {_duration_patch_error}", flush=True)
@@ -3187,8 +3188,9 @@ if callable(_original_generate_one) and not getattr(_original_generate_one, "_sn
             if hasattr(cfg.get(key), "get")
         }
         if is_grok_lite:
-            values["resolution"] = GROK_LITE_RESOLUTIONS[0]
-            cfg["resolution"].set(GROK_LITE_RESOLUTIONS[0])
+            if values.get("resolution") not in GROK_LITE_RESOLUTIONS:
+                values["resolution"] = GROK_LITE_RESOLUTIONS[0]
+            cfg["resolution"].set(values["resolution"])
         if model in SEEDANCE_MODELS:
             return g["run_json"](_build_seedance_command(
                 g["api_key_var"].get(), model, prompt, img,
@@ -3935,7 +3937,8 @@ def _add_minimax_h3_to_model_menu(i):
                 and tv == str(resolution_var)
                 and str(model_var.get() or "") in (GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS)
             ):
-                if str(model_var.get() or "") == GROK_LITE_MODEL:
+                if (str(model_var.get() or "") == GROK_LITE_MODEL
+                        and str(resolution_var.get() or "") not in GROK_LITE_RESOLUTIONS):
                     resolution_var.set(GROK_LITE_RESOLUTIONS[0])
                 resolutions = (GROK_LITE_RESOLUTIONS if model_var.get() == GROK_LITE_MODEL
                                else (("720p",) if model_var.get() in SEEDANCE_MODELS else ("480p", "720p")))
@@ -4390,7 +4393,7 @@ def _install_actual_video_credit():
         camera_name = str(cfg.get("camera_movement").get() or "อัตโนมัติ").strip()
         if camera_name != "อัตโนมัติ":
             g["append_log"](i, f"ใช้มุมกล้องจาก Slot: {camera_name}")
-        if model_for_job == GROK_LITE_MODEL:
+        if model_for_job == GROK_LITE_MODEL and str(cfg["resolution"].get() or "") not in GROK_LITE_RESOLUTIONS:
             cfg["resolution"].set(GROK_LITE_RESOLUTIONS[0])
         if model_for_job in (GROK_LOWER_MODEL, GROK_LITE_MODEL) and str(cfg["duration"].get() or "").strip() not in GROK_LOWER_DURATIONS:
             cfg["duration"].set(GROK_LOWER_DURATIONS[0])
