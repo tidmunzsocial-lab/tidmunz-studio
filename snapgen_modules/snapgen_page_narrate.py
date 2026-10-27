@@ -2741,7 +2741,9 @@ def motion_request(items: list, era: str, horror: bool = False) -> str:
         "[บทพูด] เขียนทุกช็อต: 'ไม่มีบทพูด — ทุกคนปากปิด' หรือ 'มีบทพูด: ชื่อ พูดว่า …' ตามข้อมูลบทพูดของช็อตนั้นเท่านั้น; "
         "[การหันหน้า] เขียนทุกช็อตจากรูปจริง: แต่ละคนหันหน้าเข้ากล้อง หันข้าง หรือหันหลัง และคงทิศนั้นตลอดคลิป "
         "(คนที่หันหลังห้ามหันหน้ามา); "
-        "[กล้อง] ขนาดภาพ มุม และการเคลื่อนกล้อง (นิ่ง/ดอลลี่/แพน/แทร็ก/ถือกล้อง); "
+        "[กล้อง] ขนาดภาพ มุม และการเคลื่อนกล้อง (นิ่ง/ดอลลี่/แพน/แทร็ก/ถือกล้อง) — ขนาดภาพต้องคงเดิมตลอดคลิป "
+        "ห้ามเขียนให้กล้องซูมหรือดอลลี่เข้าใกล้จนภาพกว้างกลายเป็นภาพใกล้ (โมเดลวิดีโอจะตัดหรือละลายภาพไปเป็นภาพใกล้แทน) "
+        "ช็อตกว้างให้กล้องนิ่งหรือเคลื่อนช้ามากเล็กน้อยและตัวละครยืนนิ่งขยับแค่ลมหายใจ ผ้า ผม; "
         "[บรรยากาศ] สิ่งรอบตัวที่ขยับ (น้ำ ลม ฝุ่น ไฟ ผม ผ้า) แสงและอารมณ์. "
         "anatomy = เฉพาะเรื่องร่างกายที่ต้องระวังในเฟรมนี้ (ท่าตอนเริ่ม ส่วนที่เห็น/ถูกบัง ส่วนที่ต้องขยับ) "
         "ไม่ต้องทวน 'ร่างกาย' ที่ให้ไว้. "
@@ -2809,7 +2811,12 @@ VIDEO_NEGATIVE = ("ตัวหนังสือ, ลายน้ำ, ตัว
 # First line of every clip request: AI video likes to cut to new scenes inside one clip.
 ONE_SHOT_RULE = ("ช็อตเดียวต่อเนื่องตลอดคลิป (one continuous shot): กล้องตัวเดียว สถานที่เดียว เวลาเดียว "
                  "เริ่มจากภาพเริ่มต้นและอยู่ในฉากนั้นจนจบคลิป ห้ามตัดฉาก ห้ามตัดไปช็อตอื่น ห้ามเปลี่ยนสถานที่ "
-                 "ห้ามเพิ่มคนหรือกิจกรรมที่ไม่ได้สั่ง ทำเฉพาะการกระทำที่เขียนไว้ด้านล่าง.")
+                 "ห้ามเพิ่มคนหรือกิจกรรมที่ไม่ได้สั่ง ทำเฉพาะการกระทำที่เขียนไว้ด้านล่าง. "
+                 "ขนาดภาพและการจัดองค์ประกอบต้องเหมือนภาพเริ่มต้นตลอดคลิป: ห้ามซูมหรือดอลลี่เข้าไปใกล้ใบหน้าจนภาพกว้างกลายเป็นภาพใกล้ "
+                 "ห้ามเปลี่ยนขนาดภาพ ห้ามเฟดหรือละลายภาพ กล้องนิ่งหรือเคลื่อนช้ามากเพียงเล็กน้อย "
+                 "ตัวละครยืนหรืออยู่ตำแหน่งเดิม ขยับเฉพาะลมหายใจ ผ้า ผม สีหน้า "
+                 "(keep the same shot size and framing as the first frame for the whole clip: no zoom-in, no push-in to a close-up, "
+                 "no cross-fade, no cut; the camera stays locked or drifts very slightly).")
 CONTINUITY_VERSION = 2  # rules changed: records made before this are built again (text only)
 # Someone seen from behind in the first frame has no face there: when AI video turns them round
 # it invents a face that is not the character's.
@@ -6337,12 +6344,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             jump = early_jump(clip)
         except Exception:
             jump = 0.0
-        begin = jump + 0.25  # the cross-fade ends a little after its middle
-        if jump and length - begin >= 3.0 and begin < float(scene.get("clip_use_until") or length) - 2.0:
-            scene["clip_use_from"] = round(begin, 2)
-            log(f"🔎 ช็อต {index + 1}: ภาพกระโดดเป็นอีกมุมที่วินาที {jump:g} — เริ่มใช้คลิปตั้งแต่วินาที {begin:.2f}")
-        else:
-            scene.pop("clip_use_from", None)
+        scene.pop("clip_use_from", None)
+        if jump and verdict != "redo":
+            # The shot left the planned framing at once (a wide shot dissolved into a face): the rest of the clip
+            # is another composition, so it is not used as if it were this shot. It has to be made again.
+            verdict, reason = "redo", f"ภาพกระโดดไปเป็นอีกมุมที่วินาที {jump:g} (ไม่ใช่ช็อตตามแผน)"
+            scene["clip_review"] = {"verdict": verdict, "reason": reason}
         save_project()
         mark = {"pass": "✓ ผ่าน", "trim": f"✂ ใช้ถึงวินาที {scene.get('clip_use_until', '-')}", "redo": "⚠ ควรเจนใหม่"}[verdict]
         log(f"🔎 ผู้ตรวจคลิปช็อต {index + 1}: {mark}" + (f" — {reason}" if reason else ""))
@@ -6352,13 +6359,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         source = scene["clip"]
         usable = media_duration(source)
         until = float(scene.get("clip_use_until") or 0)
-        begin = float(scene.get("clip_use_from") or 0)
         head = ""
         if 0.5 < until < usable:
             head, usable = f"trim=duration={until:.3f},setpts=PTS-STARTPTS,", until
-        if 0 < begin < usable - 2.0:  # skip the ghosted start (cross-fade into another framing)
-            head += f"trim=start={begin:.3f},setpts=PTS-STARTPTS,"
-            usable -= begin
         return source, head + clip_fit_filter(usable, length, width, height, spoken=bool(scene.get("dialogue")))
 
     def review_clips_selected():
