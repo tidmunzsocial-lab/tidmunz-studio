@@ -17436,6 +17436,8 @@ if root:
 
         def open_if_needed():
             # The extension is installed in the program's Chrome: open that window so work can start.
+            if g.get("chatgpt_page") is not None:
+                return  # the ChatGPT page opens (and keeps) the program's Chrome itself; a second open = a second window
             if (not snapgen_chrome_relay.RELAY.status()["connected"]
                     and snapgen_chrome_relay.extension_in_program_chrome()):
                 snapgen_chrome_relay.open_program_chrome()

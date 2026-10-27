@@ -203,6 +203,7 @@ class ChatGPTPage:
         self.pids_at = 0.0
         self.searching = False
         self.opened = False
+        self.reopened_at = 0.0  # last time this page opened the program's Chrome by itself
         self.layout()
         relay.INSIDE_PROGRAM = True
         root.after(1000, self.watch)
@@ -267,7 +268,10 @@ class ChatGPTPage:
                 windows = chrome_windows(self.pids) if self.pids else []
                 if windows:
                     hwnd = windows[0]
-                elif want_open:
+                elif want_open or self.should_reopen():
+                    # Also without the user asking: jobs need a window (a Chrome left running with its last window
+                    # closed answers "No current window"), so the program opens its Chrome, out of sight, by itself.
+                    self.reopened_at = time.time()
                     hwnd = find_or_open()
                     self.pids_at = 0.0
             finally:
@@ -278,6 +282,15 @@ class ChatGPTPage:
                 pass
 
         threading.Thread(target=work, daemon=True).start()
+
+    def should_reopen(self) -> bool:
+        """Open the program's Chrome on its own: at start and when its window is gone, at most once a minute."""
+        if time.time() - self.reopened_at < 60:
+            return False
+        try:
+            return relay.extension_in_program_chrome()
+        except Exception:
+            return False
 
     def attach(self, hwnd, asked: bool) -> None:
         if not hwnd:
