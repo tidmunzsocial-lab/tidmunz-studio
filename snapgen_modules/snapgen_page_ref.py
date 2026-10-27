@@ -1027,6 +1027,42 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     for _w in (gallery, gallery_canvas, gallery_inner, gallery_scroll):
         _rg_bind_wheel(_w)
 
+    def _ref_plain_file(path, stem):
+        """Keep a finished Ref picture under its plain name (<name>.png), whichever way it was made.
+
+        Both routes (SnapGen API and GPT Web) hand back a unique file (ref_<name>_<id>.png, name_<time>.png ...).
+        The story pages find a character's sheet by the character name, so the picture is renamed to the name.
+        A picture already there is not lost: it moves to the "_เก่า" folder with a time stamp."""
+        source = Path(str(path or ""))
+        if not source.is_file():
+            return str(path)
+        safe = re.sub(r'[<>:"/\|?*\x00-\x1f]', "_", " ".join(str(stem or "").split()))[:80].strip(" .")
+        if not safe:
+            return str(path)
+        target = Path(export_ref_dir) / (safe + (source.suffix.lower() or ".png"))
+        try:
+            if source.resolve() == target.resolve():
+                return str(source)
+            if target.exists():
+                old_dir = Path(export_ref_dir) / "_เก่า"
+                old_dir.mkdir(exist_ok=True)
+                shutil.move(str(target), str(old_dir / f"{safe}_{time.strftime('%Y%m%d-%H%M%S')}{target.suffix}"))
+            shutil.move(str(source), str(target))
+            gone = {os.path.normcase(str(source)), os.path.normcase(str(target))}
+            ref_gallery_paths[:] = [q for q in ref_gallery_paths if os.path.normcase(str(Path(q))) not in gone]
+            return str(target)
+        except OSError as exc:
+            _ref_log(f"[Ref] ตั้งชื่อไฟล์เป็นชื่อธรรมดาไม่สำเร็จ ใช้ชื่อเดิม: {exc}")
+            return str(path)
+
+    def _ref_plain_stem(stem):
+        """A file stem back to the plain name (ref_x_<id>_แก้ไข -> x); other names stay as they are."""
+        try:
+            from snapgen_page_narrate import reference_character_name
+            return reference_character_name(stem) or str(stem)
+        except Exception:
+            return str(stem)
+
     def _normalize_ref_output(path, name):
         """Enforce Ref sheet layout after image generation.
 
@@ -1148,6 +1184,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     }
                     out = _ref_image_request(options, prompt, f"{Path(p).stem}_แก้ไข", [p], payload, comment)
                     out = _normalize_ref_output(out, str(g.get("_ref_selected_name") or Path(p).stem))
+                    out = _ref_plain_file(out, _ref_plain_stem(Path(p).stem))
                     root.after(0, lambda out=out: (
                         _ref_gallery_add(str(out), True, is_ghost=is_ghost),
                         _ref_log(f"[แก้ Ref] ✓ {out}"), _notify_done(),
@@ -2208,6 +2245,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     out = _ref_image_request(options, prompt, file_hint,
                         [ref_image] if ref_image else [], payload)
                     out = _normalize_ref_output(out, name)
+                    out = _ref_plain_file(out, file_hint)
                     if auto and entity_kind in ("character", "location"):
                         _ref_mark_done(entity_kind, name, out)
                     root.after(0, lambda out=out, ghost=bool(ghost_design): (

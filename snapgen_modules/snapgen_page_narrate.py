@@ -5697,10 +5697,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if video_mode:
                 ref_paths = attachments_for(scene)
                 # Say what is attached, so a missing character sheet is seen on the first picture, not after 20.
-                have = {n.casefold() for n, _p in character_ref_files(attachment_folder(), scene.get("characters") or [])}
-                lost = [c for c in scene.get("characters") or [] if str(c).strip().casefold() not in have]
-                log(f"ฉาก {i + 1}: แนบรูปอ้างอิง {len(ref_paths)} รูป — " + (", ".join(Path(p).stem for p in ref_paths) or "ไม่มี")
-                    + (f" · ⚠ ไม่พบรูปตัวละคร: {', '.join(map(str, lost))}" if lost else ""))
+                try:
+                    have = {n.casefold() for n, _p in character_ref_files(attachment_folder(), scene.get("characters") or [])}
+                    lost = [c for c in scene.get("characters") or [] if str(c).strip().casefold() not in have]
+                    log(f"ฉาก {i + 1}: แนบรูปอ้างอิง {len(ref_paths)} รูป — " + (", ".join(Path(p).stem for p in ref_paths) or "ไม่มี")
+                        + (f" · ⚠ ไม่พบรูปตัวละคร: {', '.join(map(str, lost))}" if lost else ""))
+                except Exception:
+                    pass  # information only
             else:
                 same = project.get("same_person") or {}
                 shown = list(scene.get("characters") or [])
