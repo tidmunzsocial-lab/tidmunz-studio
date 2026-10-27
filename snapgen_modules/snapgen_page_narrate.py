@@ -1442,7 +1442,9 @@ def drop_duplicate_segments(segments: list) -> list:
             a, b = _NOT_MATCHED.sub("", str(seg["text"])), _NOT_MATCHED.sub("", str(nxt["text"]))
             if a and b and (a[:12] in b or b[:12] in a):
                 continue
-        kept.append(seg)
+        # A sentence cannot start with a vowel sign ("าะเจ้าหญิง…" is the cut-off start of "เพราะ…").
+        cleaned = re.sub(r"^[ะาำัิีึืฺุู็่้๊๋์]+", "", str(seg["text"]).lstrip())
+        kept.append(dict(seg, text=cleaned) if cleaned and cleaned != seg["text"] else seg)
     return kept
 
 
@@ -4891,6 +4893,21 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if repaired:
             (folder / "transcript.json").write_text(json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8")
             log("ข้อความถอดเสียงเดิมยาวเกินเสียงจริง (ช็อตจะมาก่อนเสียง) — จับคู่กับบทใหม่แล้ว")
+        if video_mode and project.get("audio") and os.path.isfile(str(project["audio"])):
+            # Also fixes a transcript saved earlier: no need to listen again, only compare it with the script.
+            try:
+                before = json.dumps(segments, ensure_ascii=False)
+                fixed = drop_duplicate_segments(segments)
+                fixed = correct_with_script(fixed, story_script())
+                fixed = recover_missing_speech(fixed, story_script(),
+                                               speech_runs(project["audio"], ffmpeg_path()), log)
+                if json.dumps(fixed, ensure_ascii=False) != before:
+                    segments = fixed
+                    (folder / "transcript.json").write_text(json.dumps(segments, ensure_ascii=False, indent=2),
+                                                            encoding="utf-8")
+                    log("แก้ข้อความถอดเสียงให้ตรงกับบท (ตัดประโยคซ้ำ / แก้คำที่ฟังผิด / ใส่บทพูดที่ขาด) แล้ว")
+            except Exception as exc:
+                log(f"เทียบข้อความถอดเสียงกับบทไม่ได้ ใช้ของเดิม: {exc}")
         context = project.get("context") or {}
         names = [c.get("name") for c in context.get("characters", []) if c.get("name")]
         era = (context.get("story") or {}).get("era") or ""
