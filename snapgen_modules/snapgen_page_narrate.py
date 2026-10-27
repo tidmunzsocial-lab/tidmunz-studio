@@ -1604,7 +1604,8 @@ GROK_CLIP_SECONDS = (6, 10, 15)  # lengths grok-lower accepts; AI Slow 2x double
 VELA_CLIP_SECONDS = 5  # vela-ai-video only makes 5 s
 VIDEO_AUTO_AVG_SECONDS = 8  # average shot length used to size the plan
 CLIP_CHOICE_LABELS = {0: "อัตโนมัติ (ตามความยาวช็อต)", 6: "6 วินาที", 10: "10 วินาที", 15: "15 วินาที"}
-VIDEO_RESOLUTIONS = ("1080p", "720p")  # Grok Lite
+VIDEO_RESOLUTIONS = ("720p", "1080p")  # Grok Lite (720p first: about 7 credits for 10 s)
+VIDEO_PRICE_MODELS = ("grok-1.5-lite", "grok-lower", "sd-2-lower", "sd-2-5-lower", "muse-ai-video")
 SHOT_LIMIT = 12.0  # longer shots are split into continuing shots
 CLIP_STRETCH = 1.15  # a clip may be slowed this much unnoticed to fill its shot
 # Economy (Slow 2x on every shot): fewer, longer shots — one clip (grok 10 s + Slow 2x) covers up to 20 s.
@@ -3138,6 +3139,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     film_var = tk.BooleanVar(value=True)  # เล่าภาพ เรื่องผี: old film look on the video
     economy_var = tk.BooleanVar(value=True)  # ออโต้: Slow 2x on every shot, longer shots, about half the credit
     video_model_var = tk.StringVar(value=VIDEO_MODEL_LABELS["auto"])
+    price_line_var = tk.StringVar(value="ราคาวันนี้: กำลังอ่านจากเว็บ SnapGen ...")
+    prices = {"data": None}
     clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
     video_res_var = tk.StringVar(value="720p")
     image_provider_var = tk.StringVar(value=GPT_WEB_LABEL)
@@ -3312,6 +3315,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 project["video_model"] = chosen
                 save_project()
             refresh_clip_info()
+            try:
+                update_price_line()
+            except NameError:  # the controls are built after this handler
+                pass
 
         def refresh_maxplus_model_info():
             provider = next((key for key, label in VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.items()
@@ -3412,12 +3419,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 project["clip_choice"] = next((n for n, label in CLIP_CHOICE_LABELS.items()
                                                if label == clip_choice_var.get()), 0)
                 save_project()  # a plan made for another length is asked about when the run starts
+            update_price_line()
 
         def video_res_changed(_event=None):
             project = state.get("project")
             if project is not None:
                 project["video_resolution"] = video_res_var.get() if video_res_var.get() in VIDEO_RESOLUTIONS else "720p"
                 save_project()
+            update_price_line()
 
         tk.Label(model_row, text="ความยาวคลิป", bg=bg).pack(side="left", padx=(10, 0))
         clip_menu = ttk.Combobox(model_row, textvariable=clip_choice_var, width=22, state="readonly",
@@ -3428,6 +3437,35 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         res_menu = ttk.Combobox(model_row, textvariable=video_res_var, width=7, state="readonly", values=VIDEO_RESOLUTIONS)
         res_menu.pack(side="left", padx=6)
         res_menu.bind("<<ComboboxSelected>>", video_res_changed)
+        tk.Label(settings_parent, textvariable=price_line_var, bg=bg, fg="#475569", anchor="w", justify="left",
+                 wraplength=1100).pack(fill="x", padx=10, pady=(0, 3))
+
+        def update_price_line():
+            import snapgen_prices
+            data = prices.get("data")
+            if not data:
+                return
+            project = state.get("project") or {}
+            model = project.get("video_model")
+            model = model if model in VIDEO_PRICE_MODELS else VIDEO_AUTO_MODEL
+            seconds = int(project.get("clip_choice") or 0) or 10
+            resolution = (project.get("video_resolution") or "720p") if model == VIDEO_GROK_LITE_MODEL else (
+                "1080p" if model == VIDEO_GROK_LOWER_MODEL else "720p" if model in SEEDANCE_MODELS else None)
+            price_line_var.set(snapgen_prices.summary(data["rows"], seconds, model, resolution,
+                                                      data.get("stale", False), data.get("at", 0)))
+
+        def refresh_prices():
+            def work():
+                import snapgen_prices
+                try:
+                    cache = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Tidmunz Studio" / "snapgen_data" / "video_prices.json"
+                    prices["data"] = snapgen_prices.fetch(cache)
+                except Exception:
+                    prices["data"] = {"rows": [], "at": 0, "stale": True}
+                ui(update_price_line)
+            threading.Thread(target=work, daemon=True).start()
+
+        refresh_prices()
     else:
         tk.Label(options, text="ภาพ", bg=bg).pack(side="left")
         ttk.Combobox(options, textvariable=aspect_var, values=list(SIZES), width=6, state="readonly").pack(side="left", padx=(4, 14))
