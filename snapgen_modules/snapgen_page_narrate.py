@@ -1430,6 +1430,113 @@ def correct_with_script(segments: list, script: str) -> list:
     return fixed
 
 
+def drop_duplicate_segments(segments: list) -> list:
+    """Whisper sometimes writes a sentence twice: a ~0.1 s stub, then the full one.
+
+    The stub eats the script words, so the real sentence after it is no longer matched
+    (names stay misheard).  A stub that the next sentence repeats is dropped."""
+    kept = []
+    for i, seg in enumerate(segments):
+        nxt = segments[i + 1] if i + 1 < len(segments) else None
+        if nxt and float(seg["end"]) - float(seg["start"]) < 0.5 and float(nxt["start"]) <= float(seg["end"]) + 0.3:
+            a, b = _NOT_MATCHED.sub("", str(seg["text"])), _NOT_MATCHED.sub("", str(nxt["text"]))
+            if a and b and (a[:12] in b or b[:12] in a):
+                continue
+        kept.append(seg)
+    return kept
+
+
+def speech_runs(audio, ffmpeg: str, noise: str = "-38dB", pause: float = 0.35) -> list:
+    """[(start, end)] stretches of the audio that are not silent (a pause shorter than ``pause`` s stays inside)."""
+    proc = subprocess.run([ffmpeg, "-hide_banner", "-i", str(audio), "-af", f"silencedetect=noise={noise}:d={pause}",
+                           "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          creationflags=NO_WINDOW, timeout=600)
+    err = proc.stderr or ""
+    length = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
+    total = (int(length.group(1)) * 3600 + int(length.group(2)) * 60 + float(length.group(3))) if length else 0.0
+    starts = [float(x) for x in re.findall(r"silence_start:\s*(-?\d+(?:\.\d+)?)", err)]
+    ends = [float(x) for x in re.findall(r"silence_end:\s*(-?\d+(?:\.\d+)?)", err)]
+    runs, at = [], 0.0
+    for k, s in enumerate(starts):
+        if s - at > 0.05:
+            runs.append((at, s))
+        at = ends[k] if k < len(ends) else total
+    if total - at > 0.05:
+        runs.append((at, total))
+    return runs
+
+
+def recover_missing_speech(segments: list, script: str, runs: list, log=None, min_gap: float = 2.0,
+                           letters_per_second: float = 11.0) -> list:
+    """Put back script lines that Whisper skipped although the audio is speaking there.
+
+    Between two heard sentences the script may hold more text than was heard (Whisper dropped it);
+    when the audio really has speech in that gap, the missing script text is split into its
+    spoken lines and narration and spread over the gap's speech, each starting where speech starts
+    after a pause.  Gaps with no matching sound (narrator skipped the text) stay empty."""
+    text = re.sub(r"\s+", " ", script)
+    anchors, cursor = [], 0
+    for seg in segments:
+        heard = str(seg["text"]).strip()
+        found = text.find(heard, cursor) if heard else -1
+        if 0 <= found - cursor <= 800:
+            anchors.append((found, found + len(heard)))
+            cursor = found + len(heard)
+        else:
+            anchors.append(None)
+    speak = re.compile(r"([^\s:：“”\"]{1,40})\s*[:：]\s*[“\"](.+?)[”\"]")
+    out, added = [], 0
+    for i, seg in enumerate(segments):
+        out.append(seg)
+        nxt = segments[i + 1] if i + 1 < len(segments) else None
+        if nxt is None or anchors[i] is None or anchors[i + 1] is None:
+            continue
+        g0, g1 = float(seg["end"]), float(nxt["start"])
+        missing = text[anchors[i][1]:anchors[i + 1][0]].strip()
+        letters = len(_NOT_MATCHED.sub("", missing))
+        if letters < 8 or g1 - g0 < min_gap:
+            continue
+        inside = [(max(a, g0), min(b, g1)) for a, b in runs if b > g0 and a < g1 and min(b, g1) - max(a, g0) > 0.05]
+        spoken = sum(b - a for a, b in inside)
+        if spoken < max(1.5, 0.5 * letters / letters_per_second):
+            continue  # not enough sound for that much text: the narrator left it out
+        units, last = [], 0
+        for m in speak.finditer(missing):
+            if m.start() > last:
+                units.append(missing[last:m.start()].strip())
+            units.append(m.group(2).strip())
+            last = m.end()
+        if last < len(missing):
+            units.append(missing[last:].strip())
+        units = [u for u in units if len(_NOT_MATCHED.sub("", u)) >= 2]
+        if not units:
+            continue
+        weight = [len(_NOT_MATCHED.sub("", u)) for u in units]
+        silence_ends = [inside[k + 1][0] for k in range(len(inside) - 1)]  # where speech resumes after a pause
+        cum, begins = 0.0, [inside[0][0]]
+        for w in weight[:-1]:
+            cum += w
+            target = spoken * cum / sum(weight)  # position on the speech-only clock
+            at, wall = target, inside[-1][1]
+            for a, b in inside:
+                if at <= b - a:
+                    wall = a + at
+                    break
+                at -= b - a
+            near = min(silence_ends, key=lambda s: abs(s - wall), default=None)
+            begins.append(near if near is not None and abs(near - wall) <= 2.0 else wall)
+        ends = begins[1:] + [inside[-1][1]]
+        for u, a, b in zip(units, begins, ends):
+            if b > a:
+                last_run = max((rb for ra, rb in inside if ra < b), default=b)
+                out.append({"start": round(a, 2), "end": round(b, 2), "text": u,
+                            "spoken_end": round(min(b, last_run), 2)})  # where the voice really stops
+                added += 1
+    if added and callable(log):
+        log(f"กู้เสียงพูดที่ Whisper ทิ้ง {added} ท่อน จากบท (เสียงในไฟล์ยังพูดอยู่ช่วงนั้น)")
+    return sorted(out, key=lambda s: (float(s["start"]), float(s["end"])))
+
+
 def cut_part_from_full(script: str, heard: str) -> str:
     """The part of a whole-story script that the narration covers (by where its first and last words
     are found), extended to whole lines. "" when the script is not much longer than the narration."""
@@ -2111,7 +2218,7 @@ def split_dialogue(segments: list, script: str) -> list:
     lines = script_dialogues(script)
     if not lines or not segments:
         return [dict(s) for s in segments]
-    chars, times, owner = [], [], []
+    chars, times, owner, stops = [], [], [], []
     for i, seg in enumerate(segments):
         text = str(seg["text"]) + " "
         letters = len(_NOT_MATCHED.sub("", text))
@@ -2121,6 +2228,11 @@ def split_dialogue(segments: list, script: str) -> list:
             times.append(_char_time(seg, k, letters))
             owner.append(i)
             k += 0 if _NOT_MATCHED.match(ch) else 1
+            # when the voice has said this far (the sentence's own end includes the silence after it)
+            if seg.get("spoken_end") is not None and letters:
+                stops.append(float(seg["start"]) + (float(seg["spoken_end"]) - float(seg["start"])) * k / letters)
+            else:
+                stops.append(_char_time(seg, k, letters))
     keep = [p for p, ch in enumerate(chars) if not _NOT_MATCHED.match(ch)]
     full = "".join(chars[p] for p in keep)
     label = [None] * len(chars)
@@ -2144,6 +2256,8 @@ def split_dialogue(segments: list, script: str) -> list:
                 piece["dialogue"], piece["line"] = lines[label[p]]
             out.append(piece)
         out[-1]["text"] += ch
+        if label[p] is not None and not _NOT_MATCHED.match(ch):
+            out[-1]["speech_end"] = round(stops[p], 2)
     for a, b in zip(out, out[1:] + [None]):
         a["end"] = b["start"] if b else float(segments[-1]["end"])
         a["text"] = re.sub(r"\s+", " ", a.pop("_key") and a["text"]).strip(" “”\"")
@@ -2172,6 +2286,8 @@ def video_shots(segments: list, target: float = 8.0, limit: float = SHOT_LIMIT) 
         shot = {"start": 0.0 if not shots else seg["start"], "end": seg["end"], "text": seg["text"]}
         if seg.get("dialogue"):
             shot["dialogue"], shot["line"] = seg["dialogue"], seg.get("line") or seg["text"]
+            if seg.get("speech_end") is not None:
+                shot["speech_end"] = seg["speech_end"]
         shots.append(shot)
     # A short last shot joins the one before it when that still fits.
     if (len(shots) > 1 and not shots[-1].get("dialogue") and not shots[-2].get("dialogue")
@@ -2243,6 +2359,8 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
                 scene["transition"] = str(item["transition"]).strip().lower()
             if shot.get("dialogue"):  # must stay in sync with the voice: real speed, full quality
                 scene.update(dialogue=shot["dialogue"], line=shot["line"], slow=False, cheap=False)
+                if shot.get("speech_end") is not None and shot["speech_end"] > shot["start"]:
+                    scene["speech_seconds"] = round(shot["speech_end"] - shot["start"], 1)
             scenes.append(scene)
         if progress:
             progress(min(len(shots), first + batch), len(shots), group[0]["start"])
@@ -2256,9 +2374,24 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
     return scenes
 
 
+def speech_note(shot: dict) -> str:
+    """How long the voice really speaks in a dialogue shot, and that the mouth must stop after it.
+
+    The clip is at least 6 s but the line is often 1–5 s: "speak the whole clip" makes the mouths keep
+    moving after the voice has stopped."""
+    seconds = shot.get("speech_seconds")
+    if not shot.get("dialogue") or not seconds:
+        if shot.get("speech_end") is not None and shot.get("start") is not None and shot.get("dialogue"):
+            seconds = round(float(shot["speech_end"]) - float(shot["start"]), 1)
+        else:
+            return ""
+    return (f"พูดจริงยาว {seconds:g} วินาที — ให้พูดประโยคนี้จบภายใน {seconds:g} วินาทีแรกของคลิป "
+            "แล้วปิดปากนิ่ง ไม่พูดต่อ ไม่ขยับปากอีกจนจบคลิป")
+
+
 def _shot_lines(numbered: list) -> str:
     return "\n".join(f"[{n}] {s['start']:.1f}–{s['end']:.1f} ({s['end'] - s['start']:.0f} วิ) "
-                     + (f"บทพูดของ {s['dialogue']}: “{s['line']}”" if s.get("dialogue") else s["text"])
+                     + (f"บทพูดของ {s['dialogue']}: “{s['line']}” ({speech_note(s)})" if s.get("dialogue") else s["text"])
                      for n, s in numbered)
 
 
@@ -2531,7 +2664,8 @@ def video_plan_request(numbered: list, names: list, previous: str, era: str, hor
         "7) " + REALISM_NOTE + ". "
         "ห้ามวาดคนเล่าเรื่อง ผู้บรรยาย ไมโครโฟน หรือห้องอัดเสียง. ไม่มีตัวหนังสือในภาพ. "
         "ช็อต 'บทพูดของ X' = ภาพใกล้ระดับอก/ใบหน้าของ X กำลังพูดประโยคนั้น เห็นปากชัด สีหน้าและท่าทางตรงกับคำพูด "
-        "(video_prompt ให้ X ขยับปากพูดตลอดคลิปด้วยความเร็วปกติ) ช็อตนี้ slow=false cheap=false เสมอ. "
+        "(video_prompt ให้ X ขยับปากพูดด้วยความเร็วปกติเฉพาะตามจำนวนวินาทีที่ระบุไว้ใน 'พูดจริงยาว … วินาที' ของช็อตนั้น "
+        "แล้วปิดปากนิ่งจนจบคลิป; ห้ามเขียนว่าพูดตลอดคลิป) ช็อตนี้ slow=false cheap=false เสมอ. "
         + (HORROR_NOTE if horror else "")
         + f"ยุค/บรรยากาศ: {era}. ตัวละครที่ใช้ได้ (ใช้ชื่อตรงตัวเท่านั้น): {', '.join(names) or '-'}. "
         + refs_note(refs)
@@ -4566,6 +4700,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             save_project()
             log(f"บทที่เลือกเป็นบทเต็ม — ตัดเฉพาะท่อนที่ตรงกับเสียงให้แล้ว ({len(part)} ตัวอักษร จาก {len(whole)}) "
                 "ดูได้ที่ บท_ท่อนนี้.txt")
+        segments = drop_duplicate_segments(segments)
         try:
             corrected = correct_with_script(segments, story_script())
             changed = sum(1 for a, b in zip(segments, corrected) if a["text"] != b["text"])
@@ -4573,6 +4708,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             segments = corrected
         except Exception as exc:
             log(f"แก้คำตามบทไม่ได้ ใช้ข้อความจากเสียงแทน: {exc}")
+        if video_mode:  # dialogue cuts need every spoken line present
+            try:
+                segments = recover_missing_speech(segments, story_script(),
+                                                  speech_runs(project["audio"], ffmpeg_path()), log)
+            except Exception as exc:
+                log(f"กู้เสียงพูดที่ถูกข้ามไม่ได้: {exc}")
         (folder / "transcript.json").write_text(json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8")
         log(f"✓ ถอดเสียงได้ {len(segments)} ประโยค")
 
@@ -5808,7 +5949,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 "after": str(scenes[i + 1].get("prompt") or "")[:220] if i + 1 < len(scenes) else "",
                 "planned": scene.get("video_prompt_planned") or scene.get("video_prompt") or "",
                 "continuity": scene.get("continuity"),
-                "dialogue": f"{scene['dialogue']} พูดว่า “{scene.get('line', '')}”" if scene.get("dialogue") else "",
+                "dialogue": (f"{scene['dialogue']} พูดว่า “{scene.get('line', '')}” {speech_note(scene)}".strip()
+                             if scene.get("dialogue") else ""),
                 "bodies": bodies, "notes": "; ".join(scene.get("fix_notes") or [])})
         return items
 
@@ -5929,7 +6071,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             prompt = f"ร่างกายที่ต้องคงไว้ตลอดคลิป: {anatomy}\n{prompt}"
         # Speech is stated at the top of every request, both ways: video models weigh the opening lines most.
         speech = (f"[บทพูด] มีบทพูด: {scene['dialogue']} พูดว่า “{scene.get('line', '')}” ขยับปากพูดด้วยความเร็วปกติ "
-                  "คนอื่นในเฟรมไม่พูด" if scene.get("dialogue") else f"[บทพูด] {NO_TALK_LINE}")
+                  + (speech_note(scene) + " " if speech_note(scene) else "")
+                  + "คนอื่นในเฟรมไม่พูด" if scene.get("dialogue") else f"[บทพูด] {NO_TALK_LINE}")
         # The user's 🛠 fix of this shot ("it walked into the house by itself") is its own section, read first:
         # never mixed into the shot's main forbidden list. Whoever the fix keeps from leaving their spot is
         # told positively to stay in place (naming the walk only invites it).
