@@ -256,8 +256,21 @@ def enhance_image(path, log=None, model="rhea-1", scale=2):
             return str(path)
         keep = src.parent / "_original"
         keep.mkdir(exist_ok=True)
-        shutil.copyfile(src, keep / src.name)
-        os.replace(tmp, src)
+        saved = keep / src.name
+        already = saved.is_file()
+        if not already:
+            shutil.copyfile(src, saved)
+        for attempt in range(6):   # Windows refuses the swap while another program still has the file open
+            try:
+                os.replace(tmp, src)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    tmp.unlink(missing_ok=True)
+                    if not already:
+                        saved.unlink(missing_ok=True)   # nothing changed: do not claim it was enhanced
+                    raise
+                time.sleep(1.5)
         say(f"[ภาพ] เพิ่มรายละเอียด {src.name} ✓ ({time.time() - started:.0f} วินาที)")
     except Exception as e:
         say(f"[ภาพ] เพิ่มรายละเอียดไม่สำเร็จ — ใช้ภาพเดิม: {e}")
