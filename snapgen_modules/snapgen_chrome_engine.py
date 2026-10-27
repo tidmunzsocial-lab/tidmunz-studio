@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import os
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -70,14 +71,27 @@ class ChromeTransport:
         raise ProviderError("Deep Research is not available through the Chrome tab")
 
     def _job(self, job: dict) -> dict:
-        info = _relay_info()
-        if not info.get("port"):
-            raise ProviderError("Tidmunz Chrome relay is not running")
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{info['port']}/job?token={info.get('token', '')}",
-            data=json.dumps(job).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(request, timeout=JOB_WAIT) as response:
-            result = json.loads(response.read().decode("utf-8"))
+        import time
+        result = None
+        for attempt in range(4):  # the relay file can be briefly missing/unreachable while Tidmunz restarts it
+            info = _relay_info()
+            if info.get("port"):
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{info['port']}/job?token={info.get('token', '')}",
+                    data=json.dumps(job).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                try:
+                    with urllib.request.urlopen(request, timeout=JOB_WAIT) as response:
+                        result = json.loads(response.read().decode("utf-8"))
+                    break
+                except ConnectionRefusedError:
+                    pass
+                except urllib.error.URLError as exc:
+                    if not isinstance(getattr(exc, "reason", None), ConnectionRefusedError):
+                        raise
+            time.sleep(3)
+        if result is None:
+            raise ProviderError("Tidmunz Chrome relay is not running — เปิดโปรแกรม Tidmunz Studio ให้ทำงานอยู่แล้วลองใหม่ "
+                                "(โปรแกรมใช้ ChatGPT ผ่าน Chrome เท่านั้น)")
         error = str(result.get("error") or "")
         if error:
             if result.get("not_found") or "conversation failed: 404" in error:
@@ -191,10 +205,8 @@ def _document_text(data: bytes, name: str) -> str:
 
 def chrome_provider_for_account(config, account: str | None):
     """A ChatGPTProvider backed by the Chrome tab when the extension is connected, else None."""
-    # SNAPGEN_ENGINE=web only means "not Codex" (set when Codex became opt-in), so it keeps Chrome;
-    # "replay" forces the old website replay, "codex" forces Codex.
-    if os.environ.get("SNAPGEN_ENGINE", "").strip().lower() in ("replay", "codex") or not chrome_connected():
-        return None
+    # Chrome is the only route: no fallback to the website replay (ChatGPT refuses it) or Codex.
+    # If Tidmunz's relay is down the job fails with a clear message instead of a silent wrong route.
     from chatgpt_api.providers.chatgpt.provider import ChatGPTProvider
     provider = ChatGPTProvider(ChromeTransport())  # type: ignore[arg-type]
     setattr(provider, "_chatgpt_api_account", account)

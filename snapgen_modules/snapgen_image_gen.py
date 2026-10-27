@@ -296,28 +296,39 @@ def send_ref_story_type_lock(
     }
     if state.get("account_alias"):
         payload["chatgpt_account"] = state["account_alias"]
-    try:
-        log(f"[ประเภทเรื่อง] ส่งกฎ {label} เข้า GPT ในประวัติเรื่องหลักเดิม...")
-        with _queue_lock:
-            request = urllib.request.Request(
-                f"{BRIDGE_URL}/v1/chat/completions",
-                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {BRIDGE_KEY}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-                result = json.loads(response.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:1200]
-        raise RuntimeError(f"ส่งกฎประเภทเรื่องไม่สำเร็จ HTTP {exc.code}: {body}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"ส่งกฎประเภทเรื่องไม่สำเร็จ: {exc}") from exc
+    previous_conversation_id = str(state.get("conversation_id") or "").strip()
+    result = None
+    for attempt in range(2):
+        try:
+            log(f"[ประเภทเรื่อง] ส่งกฎ {label} เข้า GPT ในประวัติเรื่องหลักเดิม..." if attempt == 0
+                else f"[ประเภทเรื่อง] ส่งกฎ {label} เข้าห้องแชตใหม่...")
+            with _queue_lock:
+                request = urllib.request.Request(
+                    f"{BRIDGE_URL}/v1/chat/completions",
+                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {BRIDGE_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                    result = json.loads(response.read().decode("utf-8", errors="replace"))
+            break
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:1200]
+            if attempt == 0 and previous_conversation_id and _is_conversation_lost(body):
+                # The saved ChatGPT chat was deleted / is not in this Chrome account: start a fresh one
+                # (the rule is sent again in full, so nothing else is needed from the old chat).
+                log("[ประเภทเรื่อง] ห้องแชตเดิมหายจากบัญชี ChatGPT — เปิดห้องใหม่ให้เรื่องนี้")
+                payload["metadata"] = {}
+                previous_conversation_id = ""
+                continue
+            raise RuntimeError(f"ส่งกฎประเภทเรื่องไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"ส่งกฎประเภทเรื่องไม่สำเร็จ: {exc}") from exc
     if isinstance(result.get("error"), dict):
         raise RuntimeError(str(result["error"].get("message") or result["error"]))
-    previous_conversation_id = str(state.get("conversation_id") or "").strip()
     returned_conversation_id = str(result.get("conversation_id") or "").strip()
     returned_parent_message_id = str(result.get("parent_message_id") or "").strip()
     if not returned_conversation_id or not returned_parent_message_id:

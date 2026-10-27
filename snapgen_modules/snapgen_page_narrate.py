@@ -958,6 +958,12 @@ STEADY_ZOOM_MAX = 0.15
 FILM_LOOK = ("eq=eval=frame:saturation=0.6:contrast=0.96:gamma=1.12:brightness='0.03+0.025*(random(0)-0.5)',"
              "colorbalance=rm=0.05:gm=0.02:bm=-0.05:rh=0.03:bh=-0.03,"
              "noise=alls=24:allf=t+u,vignette=angle=PI/7")
+# Same look, cheaper: the static colour grade runs once on the still (before zoompan) instead of on
+# every 1080p frame; only the per-frame brightness flicker, grain and vignette stay per frame.
+FILM_GRADE = ("eq=saturation=0.6:contrast=0.96:gamma=1.12:brightness=0.03,"
+              "colorbalance=rm=0.05:gm=0.02:bm=-0.05:rh=0.03:bh=-0.03")
+FILM_FRAME = ("eq=eval=frame:brightness='0.025*(random(0)-0.5)',"
+              "noise=alls=24:allf=t+u,vignette=angle=PI/7")
 
 # Thai ghosts GPT often does not know. Looks follow common Thai folklore and
 # are phrased for film (no gore words) so image models do not refuse.
@@ -1627,9 +1633,10 @@ def zoompan_filter(motion: str, frames: int, width: int, height: int, steady: bo
         z, x, y = f"1+0.15*{progress}", centre_x, centre_y
     big_w, big_h = width * 2, height * 2
     return (
+        (FILM_GRADE + "," if film else "") +
         f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase,crop={big_w}:{big_h},"
         f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps={FPS},"
-        + (FILM_LOOK + "," if film else "") + "format=yuv420p"
+        + (FILM_FRAME + "," if film else "") + "format=yuv420p"
     )
 
 
@@ -1817,7 +1824,7 @@ def render_narrate_cached(project, folder, ffmpeg, force=False, log=None, progre
         finally:
             temp.unlink(missing_ok=True)
 
-    workers = min(2, max(1, (os.cpu_count() or 4) // 3))
+    workers = min(4, max(2, (os.cpu_count() or 4) // 2))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         pending = {pool.submit(render_piece, p): p for p in todo}
         for n, future in enumerate(as_completed(pending), 1):
