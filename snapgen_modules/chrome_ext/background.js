@@ -155,8 +155,23 @@ async function waitLoaded(tabId, limitMs) {
   }
 }
 
+// Chrome can refuse to navigate the work tab ("Navigation rejected": a leave-site prompt, a stuck or
+// discarded page). Then drop that tab and open a fresh one, so one bad tab never fails every job.
+async function freshTab(tabId, url) {
+  try { await chrome.tabs.remove(tabId); } catch (e) {}
+  try { await chrome.storage.session.remove("tabId"); } catch (e) {}
+  const id = await workerTab();
+  await chrome.tabs.update(id, {url});
+  return id;
+}
+
 async function openPage(tabId, url) {
-  await chrome.tabs.update(tabId, {url});
+  try {
+    await chrome.tabs.update(tabId, {url});
+  } catch (e) {
+    if (!/navigation rejected|no tab with id|cannot access/i.test(String(e && e.message || e))) throw e;
+    tabId = await freshTab(tabId, url);
+  }
   // Do not wait for "complete": ChatGPT keeps loading in the background; the composer is what counts.
   let seen = "", reloaded = false;
   const start = Date.now();
@@ -172,7 +187,7 @@ async function openPage(tabId, url) {
         return {state: "", page};
       });
     } catch (e) {}  // still navigating
-    if (ready && ready.state === "ok") return;
+    if (ready && ready.state === "ok") return tabId;
     if (ready && ready.page) seen = ready.page;
     if (ready && ready.state === "challenge")
       throw new Error("ChatGPT asks to confirm you are human — open the program's Chrome window and confirm, then try again");
@@ -190,9 +205,9 @@ async function inPage(tabId, func, args) {
 }
 
 async function runJob(job) {
-  const tabId = await workerTab();
+  let tabId = await workerTab();
   const url = job.conversation_id ? `https://chatgpt.com/c/${job.conversation_id}` : "https://chatgpt.com/";
-  await openPage(tabId, url);
+  tabId = await openPage(tabId, url);
   // Messages already in an existing chat, read before sending: if the send's own answer is lost, a chat that
   // gained messages shows the job went out.
   let known = null;
