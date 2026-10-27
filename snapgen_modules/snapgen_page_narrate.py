@@ -3644,6 +3644,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(lambda p=percent, t=title: (bar.configure(value=p), stage_var.set(f"{t} ... {p}%")))
                 break
             done_weight += weight
+        state["detail"] = detail
         ui(detail_var.set, detail)
 
     def check_stop():
@@ -3651,6 +3652,54 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             raise Stopped()
 
     # ── Bridge calls (this story's own GPT history) ──
+    def queued_bridge(send, what="GPT"):
+        """Take the shared GPT queue, then send — the page always says what it waits for, and ⏸ หยุด works.
+
+        Before, a busy queue (another page holding it) or a Bridge that never answered looked like a
+        frozen "วางแผนช่วง 1/6": nothing changed for up to 30 minutes and Stop waited for it too.
+        The queue is released only when the request really ends, so requests never overlap.
+        """
+        lock = g.get("_bridge_queue_lock") or threading.Lock()
+        base = state.get("detail") or ""
+        started, told = time.time(), False
+        while not lock.acquire(timeout=1):
+            check_stop()
+            waited = int(time.time() - started)
+            owner = g.get("_bridge_queue_owner") or "งานหน้าอื่น (รูป AI / วิดีโอ / Prompt-Ref)"
+            if waited % 5 == 0:
+                ui(detail_var.set, f"{base} · รอคิว GPT: {owner} ใช้อยู่ {fmt_time(waited)} — กด ⏸ หยุด ได้")
+            if waited >= 60 and not told:
+                told = True
+                log(f"⏳ รอคิว GPT นานแล้ว 1 นาที: {owner} ยังใช้อยู่ — รอให้เสร็จ หรือหยุดงานนั้นก่อน")
+        result, done = {}, threading.Event()
+
+        def worker():
+            try:
+                result["value"] = send()
+            except BaseException as exc:  # handed to the waiting thread
+                result["error"] = exc
+            finally:
+                g["_bridge_queue_owner"] = None
+                lock.release()
+                done.set()
+        g["_bridge_queue_owner"] = f"{work_dir_name} ({what})"
+        threading.Thread(target=worker, daemon=True).start()
+        asked, warned = time.time(), False
+        while not done.wait(1):
+            waited = int(time.time() - asked)
+            if waited % 5 == 0:
+                ui(detail_var.set, f"{base} · รอ {what} ตอบ {fmt_time(waited)}")
+            if waited >= 180 and not warned:
+                warned = True
+                log(f"⚠ {what} ยังไม่ตอบ 3 นาที — ดูแถบล่าง (Chrome/GPT) ว่าทำงานอยู่ไหม "
+                    "ถ้าค้าง กด ⏸ หยุด แล้ว ▶ ทำต่อ (งานที่ทำแล้วไม่หาย)")
+            if state["stop"]:
+                raise Stopped()  # the request ends in the background and frees the queue itself
+        ui(detail_var.set, base)
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
     def open_bridge(request) -> dict:
         """POST to the Bridge; an error says what the Bridge said, not just "HTTP Error 409: Conflict"."""
         try:
@@ -3686,20 +3735,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json; charset=utf-8"},
             method="POST")
-        moved = False
-        lock = g.get("_bridge_queue_lock") or threading.Lock()
-        with lock:
+        def send():
             wait_free = g.get("_wait_bridge_free")
             if callable(wait_free):
                 wait_free(log_fn=log)
             try:
                 with urllib.request.urlopen(request, timeout=600) as response:
-                    data = json.loads(response.read().decode("utf-8", errors="replace"))
+                    return json.loads(response.read().decode("utf-8", errors="replace")), False
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
-                moved = "codex history moved" in detail and body.get("metadata")
-                if not moved:
-                    raise RuntimeError(f"Bridge HTTP {exc.code}: {detail[:600]}") from exc
+                if "codex history moved" in detail and body.get("metadata"):
+                    return {}, True
+                raise RuntimeError(f"Bridge HTTP {exc.code}: {detail[:600]}") from exc
+        data, moved = queued_bridge(send)
         if moved:
             # ChatGPT now goes through Codex, which cannot open a history made on the ChatGPT
             # website: the story starts its Codex history (script and Context first), then asks again.
@@ -5350,8 +5398,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json; charset=utf-8"},
             method="POST")
-        with g.get("_bridge_queue_lock") or threading.Lock():
-            data = open_bridge(request)
+        data = queued_bridge(lambda: open_bridge(request))
         message = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         return str(message)
 
@@ -5430,8 +5477,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         request = urllib.request.Request(
             g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body).encode("utf-8"),
             headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"}, method="POST")
-        with g.get("_bridge_queue_lock") or threading.Lock():
-            data = open_bridge(request)
+        data = queued_bridge(lambda: open_bridge(request))
         reply = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         parsed = parse_json_reply(str(reply)) or {}
         try:
@@ -5927,8 +5973,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         request = urllib.request.Request(
             g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body).encode("utf-8"),
             headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"}, method="POST")
-        with g.get("_bridge_queue_lock") or threading.Lock():
-            data = open_bridge(request)
+        data = queued_bridge(lambda: open_bridge(request))
         return parse_json_reply(str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")) or {}
 
     def review_clip_prompt(scene, index):
