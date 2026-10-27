@@ -4244,14 +4244,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         raise RuntimeError(f"{label} ไม่สำเร็จ: {last}")
 
     def active_bridge_account() -> str:
-        """The account chosen with Bridge Manager 'Use' (CHATGPT_ACCOUNT in the Bridge .env; name only)."""
-        bridge_dir = Path(str(runtime.get("BRIDGE_DIR") or g.get("BRIDGE_DIR") or Path.home() / "chatgpt-api"))
-        try:
-            for line in (bridge_dir / ".env").read_text(encoding="utf-8").splitlines():
-                if line.strip().startswith("CHATGPT_ACCOUNT="):
-                    return line.split("=", 1)[1].strip()
-        except OSError:
-            pass
+        """There is no account switch any more: ChatGPT is whatever account the program's Chrome is signed in to.
+        (This used to read CHATGPT_ACCOUNT from the old Bridge's .env, and a leftover file made every story
+        look 'moved to another account' and start a new history.)"""
         return ""
 
     def follow_active_account():
