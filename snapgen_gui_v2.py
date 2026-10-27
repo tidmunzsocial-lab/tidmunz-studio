@@ -819,6 +819,20 @@ try:
         )
 
     g["ingest_image_story_context"] = _ingest_main_story_context
+    def _ensure_main_story_history():
+        """Make the story's ChatGPT chat from the saved script + Context (blocking; call from a thread)."""
+        master = json.loads((BASE / "prompt_ref_context.json").read_text(encoding="utf-8"))
+        if not globals()["_ensure_prompt_ref_story_text"]():
+            raise RuntimeError("ยังไม่มีไฟล์บทของเรื่องนี้ — เลือกไฟล์บทที่หน้า Prompt-Ref ก่อน")
+        lock = globals().get("_bridge_queue_lock")
+        if lock is not None:
+            with lock:
+                globals()["_wait_bridge_free"]()
+                globals()["_attach_loaded_context_to_history"](master)
+        else:
+            globals()["_attach_loaded_context_to_history"](master)
+
+    g["ensure_main_story_history"] = _ensure_main_story_history
     g["has_ref_story_history"] = g["has_main_story_history"]
     g["get_ref_story_title"] = _main_story_title
     g["has_story_face_history"] = g["has_main_story_history"]

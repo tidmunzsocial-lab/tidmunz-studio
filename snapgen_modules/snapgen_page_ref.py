@@ -2009,7 +2009,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         _ref_log("[auto-ref] ขอหยุด — จะหยุดหลังรูปที่กำลังสร้างเสร็จ")
     g["stop_auto_ref"] = stop_auto_ref
     
-    def _run_ref_jobs(names, auto=False, ref_image=None, entity_kind=""):
+    def _run_ref_jobs(names, auto=False, ref_image=None, entity_kind="", _auto_history_tried=False):
         names = [n.strip() for n in names if n and n.strip()]
         if not names:
             _ref_log("ไม่มีชื่อสำหรับสร้าง Ref")
@@ -2032,6 +2032,24 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         title = current_ref_title() if callable(current_ref_title) else ""
         if options["provider"] == "gpt_web" and not isolated_character_auto and (not valid_ref_story or not title):
             ref_story_title_var.set("")
+            ensure_history = g.get("ensure_main_story_history")
+            if callable(ensure_history) and not _auto_history_tried:
+                # No chat in ChatGPT for this story yet: send the story + Context once, then carry on.
+                _ref_log("[บทเรื่อง] ยังไม่มีประวัติเรื่องหลัก — สร้างให้อัตโนมัติจากบท + Context แล้วทำต่อ...")
+                ref_job_running[0] = True
+
+                def _start_history():
+                    try:
+                        ensure_history()
+                        root.after(0, lambda: (ref_job_running.__setitem__(0, False), _run_ref_jobs(
+                            names, auto=auto, ref_image=ref_image, entity_kind=entity_kind, _auto_history_tried=True)))
+                    except Exception as exc:
+                        message = str(exc)[:400]
+                        root.after(0, lambda: (ref_job_running.__setitem__(0, False), _ref_log(
+                            "[บทเรื่อง] สร้างประวัติเรื่องอัตโนมัติไม่สำเร็จ: " + message +
+                            " — ตรวจว่ามีไฟล์บทและ Context ของเรื่องนี้ใน Prompt-Ref")))
+                threading.Thread(target=_start_history, daemon=True).start()
+                return
             _ref_log("[บทเรื่อง] ยังไม่มีประวัติเรื่องหลัก — เริ่มเรื่องจาก Prompt-Ref ก่อน")
             return
         ref_story_title_var.set(title)
