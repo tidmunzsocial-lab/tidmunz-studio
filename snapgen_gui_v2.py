@@ -11417,15 +11417,6 @@ def _open_prompt_bank_ai():
                 g["show_error"]("สรุปไฟล์ต้นฉบับ", "ไฟล์ต้นฉบับว่าง")
                 return
             uploaded_story_context[0] = full_story
-            ts_email = tailscale_up()
-            if not ts_email:
-                st.set("❌ Tailscale ไม่ได้รัน — เปิด Tailscale ก่อน")
-                g["show_error"]("Tailscale ไม่ได้รัน", "เปิด Tailscale ก่อน แล้วกด สรุปข้อมูลต้นฉบับ อีกครั้ง")
-                return
-            if ts_email != REQUIRED_TAILSCALE_EMAIL:
-                st.set(f"❌ Tailscale ล็อกอินผิด ({ts_email})")
-                g["show_error"]("Tailscale ล็อกอินผิด", f"ต้องใช้อีเมล: {REQUIRED_TAILSCALE_EMAIL}\nปัจจุบัน: {ts_email}")
-                return
             sum_btn.config(state="disabled"); st.set("GPT กำลังสรุปข้อมูลต้นฉบับ...")
             def worker():
                 try:
@@ -13649,15 +13640,6 @@ def _restore_image_mode_latest():
         ref_folder_state = g.get("img_ref_folder") or img_ref_folder
         raw_prompt=prompt_widget.get("1.0",tk.END).strip()
         if not raw_prompt: return g.get("show_error", lambda t,m: _img_log(m))("สร้างรูป","ใส่ prompt ก่อน")
-        ts_email = tailscale_up()
-        if not ts_email:
-            _img_log("❌ Tailscale ไม่ได้รัน — เปิด Tailscale ก่อนสร้างรูป")
-            g.get("show_error", lambda t,m: None)("Tailscale ไม่ได้รัน", "เปิด Tailscale ก่อน แล้วกดสร้างรูปอีกครั้ง")
-            return
-        if ts_email != REQUIRED_TAILSCALE_EMAIL:
-            _img_log(f"❌ Tailscale ล็อกอินผิด ({ts_email}) — ต้องใช้ {REQUIRED_TAILSCALE_EMAIL}")
-            g.get("show_error", lambda t,m: None)("Tailscale ล็อกอินผิด", f"ต้องใช้อีเมล: {REQUIRED_TAILSCALE_EMAIL}\nปัจจุบัน: {ts_email}")
-            return
         run = _story_run_for_prompt(prompt_index)
         storyboard_derived = bool(
             run and prompt_index not in (None, 11)
@@ -13947,12 +13929,6 @@ def _restore_image_mode_latest():
                 root.after(0, lambda: _img_log("[auto] 🎬 Storyboard reference กำลังสร้าง..."))
                 storyboard_path = None
                 try:
-                    ts_email = tailscale_up()
-                    if not ts_email or ts_email != REQUIRED_TAILSCALE_EMAIL:
-                        root.after(0, lambda: _img_log("[auto] ❌ Tailscale ไม่พร้อม — หยุด"))
-                        _auto_gen_state["running"] = False
-                        root.after(0, lambda: (auto_gen_btn.config(text="🎬 Auto-Gen", bg="#FF6F00"), _set_image_action_buttons_running(False)))
-                        return
                     sb_prompt = _auto_storyboard_prompt()
                     if not sb_prompt:
                         root.after(0, lambda: _img_log("[auto] Storyboard: ไม่เจอ prompt — ข้าม"))
@@ -14013,10 +13989,6 @@ def _restore_image_mode_latest():
                     root.after(0, lambda n=n: _img_log(f"[auto] ซีน {n}/{queue_nums[-1]} — กำลังสร้าง..."))
                     root.after(0, lambda p=p: (img_prompt_text.delete("1.0", tk.END), img_prompt_text.insert("1.0", p)))
                     try:
-                        ts_email = tailscale_up()
-                        if not ts_email or ts_email != REQUIRED_TAILSCALE_EMAIL:
-                            root.after(0, lambda: _img_log("[auto] ❌ Tailscale ไม่พร้อม — หยุด"))
-                            break
                         run = _story_run_for_prompt(n)
                         panel_path = None
                         if run and storyboard_path and n != 11:
@@ -14773,11 +14745,9 @@ def _install_image_bridge_status():
             def done():
                 bridge_status_refreshing[0] = False
                 bridge_status_ready[0] = True
-                if not ts_email:
-                    set_light("#F44336", "Bridge: ตรวจไม่ได้ | GPT: — | Tailscale: ไม่พร้อม")
-                elif ts_email != REQUIRED_TAILSCALE_EMAIL:
-                    set_light("#F44336", f"Bridge: ตรวจไม่ได้ | GPT: — | Tailscale: ผิดบัญชี")
-                elif data:
+                # Tailscale no longer decides whether GPT works (it only serves the phone page), so a
+                # missing or different Tailscale login must not turn this light red.
+                if data:
                     # The Bridge health response exposes the full email from
                     # its decrypted active ChatGPT capture. Never substitute
                     # the Tailscale login here: they are separate identities.
