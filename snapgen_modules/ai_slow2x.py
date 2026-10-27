@@ -182,6 +182,51 @@ def _probe_video(ffmpeg, path):
     has_audio = any("Audio:" in line for line in text.splitlines())
     return fps, has_audio
 
+def _topaz_dirs():
+    """(ffmpeg.exe, models dir) of an installed Topaz Video AI, or None."""
+    roots = [os.environ.get("TVAI_HOME", ""), r"C:\Program Files\Topaz Labs LLC\Topaz Video AI",
+             r"C:\Program Files\Topaz Video AI"]
+    models = [os.environ.get("TVAI_MODEL_DIR", ""),
+              os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "Topaz Labs LLC", "Topaz Video AI", "models")]
+    exe = next((Path(r) / "ffmpeg.exe" for r in roots if r and (Path(r) / "ffmpeg.exe").is_file()), None)
+    mdir = next((Path(m) for m in models if m and Path(m).is_dir()), None)
+    return (exe, mdir) if exe and mdir else None
+
+
+def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="iris-3", fi_model="apo-8"):
+    """Slow-mo + upscale to 4K with the installed Topaz Video AI. Returns path or None (caller falls back)."""
+    found = _topaz_dirs()
+    if not found:
+        return None
+    exe, mdir = found
+    probe = subprocess.run([str(exe), "-hide_banner", "-i", str(inp)], capture_output=True, text=True,
+                           timeout=30, encoding="utf-8", errors="replace")
+    line = next((l for l in ((probe.stderr or "") + (probe.stdout or "")).splitlines() if "Video:" in l), "")
+    m = re.search(r"(?:,|\s)(\d{2,5})x(\d{2,5})(?:,|\s|\[)", line)
+    w, h = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
+    tw, th = (2160, 3840) if h > w else (3840, 2160)   # vertical clips -> vertical 4K
+    env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
+    # Interpolate first (cheaper at the source size), then upscale to 4K.
+    vf = (f"tvai_fi=model={fi_model}:slowmo={int(factor)}:fps={source_fps:g}:device=0:vram=1:instances=1,"
+          f"tvai_up=model={up_model}:scale=0:w={tw}:h={th}:blend=0:device=0:vram=1:instances=1,"
+          f"scale={tw}:{th}:flags=lanczos,format=yuv420p")   # Topaz rounds sizes; pin the exact 4K frame
+    cmd =[str(exe), "-hide_banner", "-y", "-i", str(inp)]
+    if has_audio:
+        cmd += ["-af", ",".join(["atempo=0.5"] * (2 if int(factor) >= 4 else 1)), "-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-an"]
+    cmd += ["-vf", vf, "-c:v", "hevc_nvenc", "-preset", "p5", "-b:v", "60M", "-pix_fmt", "yuv420p",
+            "-tag:v", "hvc1", "-movflags", "+faststart", str(out)]
+    say(f"[slow2x] ใช้ Topaz Video AI | {w}x{h} → {tw}x{th} | {up_model} + {fi_model} | Slow {factor}x")
+    started = time.time()
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=3 * 3600, encoding="utf-8", errors="replace", env=env)
+    if r.returncode or not _video_ok(out):
+        say("[slow2x] Topaz ทำไม่สำเร็จ — ใช้ RIFE แทน: " + ((r.stderr or "")[-300:].strip() or "unknown"))
+        return None
+    say(f"[slow2x] Topaz ✓ {Path(out).name} ({time.time() - started:.0f} วินาที)")
+    return str(out)
+
+
 def _load_rife_choice(rife) -> dict:
     """This PC's RIFE set-up that gives clean frames ({gpu, model}), or {broken} — kept next to RIFE."""
     try:
@@ -345,11 +390,19 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
     # RIFE generates the missing in-between frames. Encoding those frames at
     # the original FPS doubles duration without cutting temporal resolution.
     try:
-        rife = ensure_rife_tool(log=say)
         ffmpeg = ensure_ffmpeg_tool(log=say)
         source_fps, has_audio = _probe_video(ffmpeg, inp)
         if mute_audio:
             has_audio = False
+        if int(factor) in (2, 4) and _topaz_dirs():
+            try:
+                done = _topaz_slow(inp, out, factor, source_fps, has_audio, say)
+            except Exception as e:
+                say(f"[slow2x] Topaz error — ใช้ RIFE แทน: {e}")
+                done = None
+            if done:
+                return done
+        rife = ensure_rife_tool(log=say)
         say(f"[slow2x] ใช้ RIFE AI | ต้นฉบับ {source_fps:g} FPS | Slow {factor}x")
         _started = time.time()
         tmp_dir = Path(tempfile.mkdtemp(prefix="snapgen_rife_"))
