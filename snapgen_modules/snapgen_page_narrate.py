@@ -43,13 +43,23 @@ try:
 except ImportError:
     from snapgen_credit_guard import image_billing, image_response_items, record_image_billing, credit_consent_required, credit_warning_text
 try:
-    from .snapgen_seedance_video import MODELS as SEEDANCE_MODELS, auto_clip_settings, scene_references
+    from .snapgen_seedance_video import (MODELS as SEEDANCE_MODELS, DURATIONS as SEEDANCE_DURATIONS,
+                                         auto_clip_settings, scene_references)
 except ImportError:
     try:
-        from snapgen_seedance_video import MODELS as SEEDANCE_MODELS, auto_clip_settings, scene_references
+        from snapgen_seedance_video import (MODELS as SEEDANCE_MODELS, DURATIONS as SEEDANCE_DURATIONS,
+                                            auto_clip_settings, scene_references)
     except ImportError:
         # Narration mode does not need the separate Video Auto/Seedance helpers.
         SEEDANCE_MODELS = {}
+        SEEDANCE_DURATIONS = {}
+try:
+    from . import snapgen_prices
+except ImportError:
+    try:
+        import snapgen_prices
+    except ImportError:
+        snapgen_prices = None  # the price line is only information: the page works without it
 
 MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
@@ -3141,6 +3151,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     video_model_var = tk.StringVar(value=VIDEO_MODEL_LABELS["auto"])
     price_line_var = tk.StringVar(value="ราคาวันนี้: กำลังอ่านจากเว็บ SnapGen ...")
     prices = {"data": None}
+    clip_labels = {"map": dict(CLIP_CHOICE_LABELS)}  # seconds -> menu text; rebuilt from the website's price list
     clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
     video_res_var = tk.StringVar(value="720p")
     image_provider_var = tk.StringVar(value=GPT_WEB_LABEL)
@@ -3416,7 +3427,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def clip_choice_changed(_event=None):
             project = state.get("project")
             if project is not None:
-                project["clip_choice"] = next((n for n, label in CLIP_CHOICE_LABELS.items()
+                project["clip_choice"] = next((n for n, label in clip_labels["map"].items()
                                                if label == clip_choice_var.get()), 0)
                 save_project()  # a plan made for another length is asked about when the run starts
             update_price_line()
@@ -3441,22 +3452,42 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                  wraplength=1100).pack(fill="x", padx=10, pady=(0, 3))
 
         def update_price_line():
-            import snapgen_prices
             data = prices.get("data")
-            if not data:
+            if not data or snapgen_prices is None:
                 return
             project = state.get("project") or {}
             model = project.get("video_model")
             model = model if model in VIDEO_PRICE_MODELS else VIDEO_AUTO_MODEL
             seconds = int(project.get("clip_choice") or 0) or 10
-            resolution = (project.get("video_resolution") or "720p") if model == VIDEO_GROK_LITE_MODEL else (
-                "1080p" if model == VIDEO_GROK_LOWER_MODEL else "720p" if model in SEEDANCE_MODELS else None)
+            resolution = (project.get("video_resolution") or "720p") if model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else (
+                "720p" if model in SEEDANCE_MODELS else None)
             price_line_var.set(snapgen_prices.summary(data["rows"], seconds, model, resolution,
                                                       data.get("stale", False), data.get("at", 0)))
+            # The menus follow the website: lengths and resolutions it sells for this model, with today's credits.
+            resolutions, durations = snapgen_prices.options(data["rows"], model)
+            if durations:
+                labels = {0: CLIP_CHOICE_LABELS[0]}
+                for length in durations:
+                    credit = snapgen_prices.cost(data["rows"], model, resolution, length)
+                    labels[length] = f"{length} วินาที" + (f" · {credit:g} เครดิต" if credit is not None else "")
+                clip_labels["map"] = labels
+                clip_menu.configure(values=tuple(labels.values()))
+                fixed = int(project.get("clip_choice") or 0)
+                if fixed and fixed not in durations:
+                    fixed = min(durations, key=lambda d: abs(d - fixed))
+                    project["clip_choice"] = fixed
+                    save_project()
+                clip_choice_var.set(labels.get(fixed, labels[0]))
+            res_menu.configure(values=resolutions or VIDEO_RESOLUTIONS)
+            if resolutions and video_res_var.get() not in resolutions:
+                video_res_var.set(resolutions[0])
+                project["video_resolution"] = resolutions[0]
+                save_project()
 
         def refresh_prices():
             def work():
-                import snapgen_prices
+                if snapgen_prices is None:
+                    return
                 try:
                     cache = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Tidmunz Studio" / "snapgen_data" / "video_prices.json"
                     prices["data"] = snapgen_prices.fetch(cache)
@@ -3772,7 +3803,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             video_model = str(project.get("video_model") or "auto")
             video_model_var.set(VIDEO_MODEL_LABELS.get(video_model, SEEDANCE_MODELS.get(
                 video_model, VIDEO_MODEL_LABELS["auto"])))
-            clip_choice_var.set(CLIP_CHOICE_LABELS.get(int(project.get("clip_choice") or 0), CLIP_CHOICE_LABELS[0]))
+            clip_choice_var.set(clip_labels["map"].get(int(project.get("clip_choice") or 0), CLIP_CHOICE_LABELS[0]))
             video_res_var.set(project.get("video_resolution") or "720p")
         else:
             image_provider_var.set(IMAGE_PROVIDER_LABELS.get(
@@ -6697,6 +6728,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         seedance_refs = []
         if selected_model in SEEDANCE_MODELS:
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = auto_clip_settings(selected_model, scene)
+            fixed = int((state["project"] or {}).get("clip_choice") or 0)
+            if fixed and not scene.get("dialogue") and str(fixed) in SEEDANCE_DURATIONS.get(selected_model, ()):
+                scene["clip_seconds"], scene["clip_slow"] = fixed, False
             candidates = match_reference_files(" ".join([*(scene.get("characters") or []), str(scene.get("location") or "")]),
                                                attachment_folder())
             seedance_refs = scene_references(scene, candidates)
@@ -6753,9 +6787,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             set_slot_config(cfg, clip_model,
                             str(scene.get("clip_seconds") or GROK_CLIP_SECONDS[0]),
                             state["project"].get("aspect") or "16:9",
-                            (state["project"].get("video_resolution") or "1080p")
-                            if clip_model == VIDEO_GROK_LITE_MODEL else
-                            "1080p" if clip_model == VIDEO_GROK_LOWER_MODEL else None)
+                            (state["project"].get("video_resolution") or "720p")
+                            if clip_model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else None)
             runtime["_ai_slow2x_override"] = bool(scene.get("clip_slow"))
             dialogue_var = cfg.get("dialogue")
             if hasattr(dialogue_var, "set") and not scene.get("dialogue"):

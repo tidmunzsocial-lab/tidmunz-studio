@@ -65,6 +65,23 @@ def cost(rows: list, model: str, resolution: str | None, seconds: int) -> float 
     return best
 
 
+def options(rows: list, model: str) -> tuple:
+    """(resolutions, durations) the price list offers for a program model id, in order; () when it lists none."""
+    _label, name, _res, fallback = MODELS.get(model, (None, model, (), ()))
+    resolutions, durations = [], []
+    for row in rows:
+        if row.get("model_name") != name:
+            continue
+        resolution, duration = row.get("resolution"), row.get("video_duration")
+        if resolution and resolution not in resolutions:
+            resolutions.append(resolution)
+        if duration and int(duration) not in durations:
+            durations.append(int(duration))
+    order = {"480p": 0, "720p": 1, "1080p": 2}
+    resolutions.sort(key=lambda r: order.get(r, 9))
+    return tuple(resolutions), tuple(sorted(durations)) or tuple(fallback)
+
+
 def table(rows: list, seconds: int) -> list:
     """[(credits, label, model id, resolution)] for every model/resolution the program can use, cheapest first."""
     out = []
