@@ -5739,7 +5739,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             for i, path in found.items():
                 scenes[i]["clip"] = str(path)
                 scenes[i]["clip_slow"] = path.stem.endswith("_สโลว์")
-                for key in ("clip_review", "clip_use_until", "clip_cuts", "clip_error"):
+                for key in ("clip_review", "clip_use_until", "clip_use_from", "clip_cuts", "clip_error"):
                     scenes[i].pop(key, None)
             save_project()
             ui(refresh_table)
@@ -6233,6 +6233,27 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     cuts.append(at)
         return cuts
 
+    def early_jump(path) -> float:
+        """Second where the picture jumps (cut or cross-fade) within the first 1.5 s, else 0.
+
+        The video model often leaves the start image at once and dissolves into another framing (a wide shot
+        into a close-up).  Such a jump sits too near the start for detect_clip_cuts, so the clip began with a
+        ghosted double picture.  The part after the jump is the real clip."""
+        import numpy as np
+        raw = subprocess.run([ffmpeg_path(), "-loglevel", "error", "-t", "3", "-i", str(path), "-vf",
+                              "fps=24,scale=64:36,format=rgb24", "-f", "rawvideo", "-"],
+                             capture_output=True, creationflags=NO_WINDOW).stdout
+        size = 64 * 36 * 3
+        frames = np.frombuffer(raw, np.uint8)
+        frames = frames[: frames.size // size * size].reshape(-1, 36, 64, 3).astype(np.float32)
+        if len(frames) < 14:
+            return 0.0
+        change = np.abs(frames[6:] - frames[:-6]).mean(axis=(1, 2, 3))  # pictures a quarter second apart
+        spike = int(change[:36].argmax())
+        if change[spike] >= 6 and change[spike] >= 2.5 * float(np.median(change)):
+            return round((spike + 3) / 24, 2)
+        return 0.0
+
     def frames_sheet_url(path, seconds: float, start_image=None) -> tuple:
         """(data URL of ONE picture: the intended start frame on top, the clip's frames below; seconds between frames).
 
@@ -6312,6 +6333,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             scene["clip_use_until"] = round(until, 2)
         else:
             scene.pop("clip_use_until", None)
+        try:
+            jump = early_jump(clip)
+        except Exception:
+            jump = 0.0
+        begin = jump + 0.25  # the cross-fade ends a little after its middle
+        if jump and length - begin >= 3.0 and begin < float(scene.get("clip_use_until") or length) - 2.0:
+            scene["clip_use_from"] = round(begin, 2)
+            log(f"🔎 ช็อต {index + 1}: ภาพกระโดดเป็นอีกมุมที่วินาที {jump:g} — เริ่มใช้คลิปตั้งแต่วินาที {begin:.2f}")
+        else:
+            scene.pop("clip_use_from", None)
         save_project()
         mark = {"pass": "✓ ผ่าน", "trim": f"✂ ใช้ถึงวินาที {scene.get('clip_use_until', '-')}", "redo": "⚠ ควรเจนใหม่"}[verdict]
         log(f"🔎 ผู้ตรวจคลิปช็อต {index + 1}: {mark}" + (f" — {reason}" if reason else ""))
@@ -6321,9 +6352,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         source = scene["clip"]
         usable = media_duration(source)
         until = float(scene.get("clip_use_until") or 0)
+        begin = float(scene.get("clip_use_from") or 0)
         head = ""
         if 0.5 < until < usable:
             head, usable = f"trim=duration={until:.3f},setpts=PTS-STARTPTS,", until
+        if 0 < begin < usable - 2.0:  # skip the ghosted start (cross-fade into another framing)
+            head += f"trim=start={begin:.3f},setpts=PTS-STARTPTS,"
+            usable -= begin
         return source, head + clip_fit_filter(usable, length, width, height, spoken=bool(scene.get("dialogue")))
 
     def review_clips_selected():
@@ -6464,7 +6499,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         shutil.move(str(old), str(backup_dir / f"{old.stem}_ก่อนทำสโลว์ใหม่_{time.strftime('%Y%m%d-%H%M%S')}{old.suffix}"))
                     shutil.move(str(fresh), str(target))
                     scene["clip"], scene["clip_slow"] = str(target), True
-                    for key in ("clip_review", "clip_use_until", "clip_cuts"):
+                    for key in ("clip_review", "clip_use_until", "clip_use_from", "clip_cuts"):
                         scene.pop(key, None)
                     if ai_slow2x.video_has_streaks(target, normal_clip_of(scene, i)):
                         # RIFE still streaky on this PC: FFmpeg's slow is less smooth but never streaky.
@@ -7373,7 +7408,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 scene["image"] = out
                 scene["identity_repair"] = record
                 for key in ("error", "bad", "motion_image", "seen", "prompt_review", "clip", "clip_normal",
-                            "clip_review", "clip_error", "clip_use_until", "clip_cuts"):
+                            "clip_review", "clip_error", "clip_use_until", "clip_use_from", "clip_cuts"):
                     scene.pop(key, None)
                 for key in ("motion", "clips", "video"):
                     project.setdefault("done", {}).pop(key, None)
@@ -7575,7 +7610,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         log(f"🎬 กำลังเจนวิดีโอใหม่: ช็อต {shots}")
         ui(stage_var.set, f"กำลังเจนวิดีโอใหม่ ช็อต {shots}")
         for i in selected:
-            for key in ("clip", "clip_normal", "clip_error", "clip_review", "clip_use_until", "clip_cuts"):
+            for key in ("clip", "clip_normal", "clip_error", "clip_review", "clip_use_until", "clip_use_from", "clip_cuts"):
                 project["scenes"][i].pop(key, None)
         project["done"].pop("clips", None)
         stage_clips(selected)
