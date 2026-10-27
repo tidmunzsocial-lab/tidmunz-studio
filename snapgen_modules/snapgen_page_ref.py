@@ -935,9 +935,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             if callable(base_fn):
                 base_url = str(base_fn()).rstrip("/").replace("/v1", "")
             else:
-                host = globals().get("BRIDGE_HOST", "127.0.0.1")
-                port = globals().get("BRIDGE_PORT", 8000)
-                base_url = f"http://{host}:{port}"
+                base_url = __import__("snapgen_chrome_relay").api_root()
             req = _urlreq.Request(base_url + "/health", headers={"Authorization": "Bearer local-dev-key"})
             with _urlreq.urlopen(req, timeout=3) as resp:
                 data = _json.loads(resp.read().decode("utf-8", errors="replace"))

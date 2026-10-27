@@ -268,7 +268,8 @@ CLASSIFY_PROMPT = """คุณคือคนคัดเครื่องแ�
 ตัดสินเข้ม: ของหวือหวา โชว์เนื้อ ไซไฟ เกราะ ชุดแฟชั่นจัด = 0. ผมทรงทันสมัยจัด/ย้อมสีจัด = 0-1."""
 
 
-def classify_sheet(images, kinds, bridge="http://127.0.0.1:8000/v1", api_key="local-dev-key", timeout=600):
+def classify_sheet(images, kinds, bridge=None, api_key="local-dev-key", timeout=600):
+    bridge = bridge or __import__("snapgen_chrome_relay").api_root() + "/v1"
     sheet = contact_sheet(images)
     buffer = io.BytesIO()
     sheet.save(buffer, "JPEG", quality=85)
@@ -295,8 +296,9 @@ def classify_sheet(images, kinds, bridge="http://127.0.0.1:8000/v1", api_key="lo
     return {int(row.get("n", 0)): row for row in rows if isinstance(row, dict)}
 
 
-def upload_quota_wait(bridge="http://127.0.0.1:8000/v1", api_key="local-dev-key"):
+def upload_quota_wait(bridge=None, api_key="local-dev-key"):
     """Seconds until ChatGPT file_upload quota resets when it is used up, else 0."""
+    bridge = bridge or __import__("snapgen_chrome_relay").api_root() + "/v1"
     import datetime
     try:
         request = urllib.request.Request(bridge.rstrip("/") + "/chatgpt/usage",

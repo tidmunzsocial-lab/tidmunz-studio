@@ -375,7 +375,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 "temperature": 0.1,
             }
             req = urllib.request.Request(
-                "http://127.0.0.1:8000/v1/chat/completions",
+                __import__("snapgen_chrome_relay").api_root() + "/v1/chat/completions",
                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                 headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"},
                 method="POST",
@@ -413,7 +413,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 "temperature": 0.1,
             }
             req = urllib.request.Request(
-                "http://127.0.0.1:8000/v1/chat/completions",
+                __import__("snapgen_chrome_relay").api_root() + "/v1/chat/completions",
                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                 headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"},
                 method="POST",

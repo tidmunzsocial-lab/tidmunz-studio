@@ -493,8 +493,8 @@ if not exist "snapgen_modules\snapgen_error_reporter.py" (
   echo   [FAIL] Missing: snapgen_modules\snapgen_error_reporter.py
   set "MISSING_PROJECT=1"
 )
-if not exist "snapgen_modules\snapgen_bridge_cursor_patch.py" (
-  echo   [FAIL] Missing: snapgen_modules\snapgen_bridge_cursor_patch.py
+if not exist "snapgen_modules\snapgen_chrome_api.py" (
+  echo   [FAIL] Missing: snapgen_modules\snapgen_chrome_api.py
   set "MISSING_PROJECT=1"
 )
 if not exist "snapgen_modules\ai_slow2x.py" (
@@ -591,7 +591,7 @@ if errorlevel 1 (
 
 where curl >nul 2>nul
 if errorlevel 1 (
-  echo   [WARN] curl not found - needed for Bridge API calls.
+  echo   [WARN] curl not found.
 ) else (
   echo   curl OK
 )
@@ -601,7 +601,7 @@ if errorlevel 1 (
   echo   [WARN] Tailscale not found - SnapGen still checks the shared Tailscale login.
   echo          Open Settings and press Auto Repair to install it automatically.
 ) else (
-  echo   Tailscale OK - this machine uses its own Bridge: 127.0.0.1:8000
+  echo   Tailscale OK
 )
 
 if /I "%~1"=="--check" (

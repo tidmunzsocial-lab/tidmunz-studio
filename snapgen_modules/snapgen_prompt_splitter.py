@@ -14,8 +14,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-BRIDGE_URL = "http://127.0.0.1:8000/v1/chat/completions"
-BRIDGE_HEALTH_URL = "http://127.0.0.1:8000/health"
+
+
+def _api_root() -> str:
+    """The program's own ChatGPT API (Chrome extension) — no separate Bridge any more."""
+    import snapgen_chrome_relay
+    return snapgen_chrome_relay.api_root()
+
+
 BRIDGE_KEY = "local-dev-key"
 MODEL = "auto"
 BRIDGE_TIMEOUT_SECONDS = 620
@@ -139,14 +145,14 @@ def _extract_json(text: str) -> dict[str, Any]:
 def check_bridge(timeout: int = 3) -> None:
     try:
         req = urllib.request.Request(
-            BRIDGE_HEALTH_URL,
+            _api_root() + "/health",
             headers={"Authorization": f"Bearer {BRIDGE_KEY}"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if getattr(resp, "status", 200) >= 400:
-                raise ConnectionError("GPT Bridge ไม่พร้อมใช้งาน")
+                raise ConnectionError("ช่องทาง GPT (Chrome) ไม่พร้อมใช้งาน")
     except Exception as exc:
-        raise ConnectionError("GPT Bridge ไม่พร้อม กรุณารอให้สถานะ GPT บนโปรแกรมเป็นพร้อม แล้วลองใหม่") from exc
+        raise ConnectionError("ช่องทาง GPT (Chrome) ไม่พร้อม — เปิด Chrome ของโปรแกรมแล้วลองใหม่") from exc
 
 
 def call_bridge_chat(system_prompt: str, user_prompt: str, timeout: int = BRIDGE_TIMEOUT_SECONDS) -> str:
@@ -160,7 +166,7 @@ def call_bridge_chat(system_prompt: str, user_prompt: str, timeout: int = BRIDGE
         "temperature": 0.2,
     }
     req = urllib.request.Request(
-        BRIDGE_URL,
+        _api_root() + "/v1/chat/completions",
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": f"Bearer {BRIDGE_KEY}", "Content-Type": "application/json"},
         method="POST",

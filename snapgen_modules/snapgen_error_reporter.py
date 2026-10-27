@@ -437,39 +437,6 @@ def install_tk_watchdog(root, *, threshold_seconds=45) -> None:
     threading.Thread(target=monitor, name="SnapGenUIWatchdog", daemon=True).start()
 
 
-def install_bridge_watchdog(
-    url="http://127.0.0.1:8000/health", api_key="local-dev-key",
-    *, interval_seconds=60, failure_limit=3,
-) -> None:
-    """Report a Bridge that dies after it was healthy; ignore normal startup."""
-    state = {"was_healthy": False, "failures": 0, "reported": False}
-
-    def monitor():
-        while True:
-            error = "health response was not ready"
-            try:
-                request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
-                with urllib.request.urlopen(request, timeout=4) as response:
-                    payload = response.read(2048).decode("utf-8", "replace")
-                healthy = response.status == 200 and '"ok"' in payload and "true" in payload.lower()
-            except Exception as exc:
-                healthy = False
-                error = str(exc)
-            if healthy:
-                state.update(was_healthy=True, failures=0, reported=False)
-            elif state["was_healthy"]:
-                state["failures"] += 1
-                if state["failures"] >= int(failure_limit) and not state["reported"]:
-                    state["reported"] = True
-                    _enqueue(
-                        "Bridge watchdog", "Local ChatGPT Bridge stopped responding",
-                        f"Bridge was healthy, then failed {state['failures']} consecutive checks. Last error: {error}",
-                    )
-            time.sleep(max(0.05, float(interval_seconds)))
-
-    threading.Thread(target=monitor, name="SnapGenBridgeWatchdog", daemon=True).start()
-
-
 def install_exception_hooks() -> None:
     def sys_hook(exc_type, exc_value, exc_traceback):
         report_exception("unhandled main thread", exc_type, exc_value, exc_traceback)

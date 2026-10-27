@@ -163,7 +163,7 @@ def install(g: dict, root: tk.Misc) -> tk.Frame:
                     "temperature": 0.1,
                 }
                 request = urllib.request.Request(
-                    str(g.get("CHATGPT_API_BASE", "http://127.0.0.1:8000/v1")).rstrip("/") + "/chat/completions",
+                    str(g.get("CHATGPT_API_BASE") or __import__("snapgen_chrome_relay").api_root() + "/v1").rstrip("/") + "/chat/completions",
                     data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                     headers={
                         "Authorization": f"Bearer {g.get('CHATGPT_API_KEY', 'local-dev-key')}",
