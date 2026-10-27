@@ -167,7 +167,9 @@ def test_auto_model_selection_save_then_restart_load(tmp_path):
               VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS={"gpt_web": "GPT Web"},
               GPT_WEB_LABEL="GPT Web", image_provider_var=Var("GPT Web"),
               refresh_maxplus_model_info=lambda: None, refresh_snapgen_credit_warning=lambda: None,
-              toggle_settings=lambda show: None)
+              toggle_settings=lambda show: None, VIDEO_GROK_LITE_MODEL="grok-1.5-lite",
+              CLIP_CHOICE_LABELS={0: "อัตโนมัติ", 10: "10 วินาที"}, clip_choice_var=Var(""), video_res_var=Var("720p"),
+              messagebox=None, page=None)
     for key, value in dict(script_var="", audio_var="", aspect_var="16:9", count_var="36", subtitle_var=False,
                            economy_var=True, film_var=False, style_var="ปกติ").items():
         ns[key] = Var(value)
