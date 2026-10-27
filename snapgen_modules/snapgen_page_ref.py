@@ -447,6 +447,15 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             import json as _json
             data = _json.loads(context_text)
             if isinstance(data, dict):
+                # The Context's own "locations" list is the inventory. Scene titles in scene_map and the
+                # key_places summary are not places (they turned 12 places into 29 Refs), so they are
+                # only used when the Context has no locations list at all.
+                listed = data.get("locations")
+                if isinstance(listed, list) and listed:
+                    for place in listed:
+                        add_place(place)
+                    if items:
+                        return items
                 for key in ("locations", "places", "key_locations", "key_places", "สถานที่"):
                     places = data.get(key, []) or []
                     if isinstance(places, dict):
@@ -2008,6 +2017,38 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         _ref_log("[auto-ref] ขอหยุด — จะหยุดหลังรูปที่กำลังสร้างเสร็จ")
     g["stop_auto_ref"] = stop_auto_ref
     
+    ref_done_path = Path(BASE) / "meta" / "ref_done.json"
+
+    def _ref_done_story():
+        get_title = g.get("get_ref_story_title")
+        try:
+            return str(get_title() if callable(get_title) else "")
+        except Exception:
+            return ""
+
+    def _ref_done_load():
+        try:
+            data = json.loads(ref_done_path.read_text(encoding="utf-8"))
+            if data.get("story") == _ref_done_story() and isinstance(data.get("items"), dict):
+                return data["items"]
+        except (OSError, ValueError, AttributeError):
+            pass
+        return {}
+
+    def _ref_already_done(kind, name):
+        path = _ref_done_load().get(f"{kind}:{name}")
+        return bool(path) and Path(path).is_file()
+
+    def _ref_mark_done(kind, name, path):
+        items = _ref_done_load()
+        items[f"{kind}:{name}"] = str(path)
+        try:
+            ref_done_path.parent.mkdir(parents=True, exist_ok=True)
+            ref_done_path.write_text(json.dumps({"story": _ref_done_story(), "items": items},
+                                                ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
     def _run_ref_jobs(names, auto=False, ref_image=None, entity_kind="", _auto_history_tried=False):
         names = [n.strip() for n in names if n and n.strip()]
         if not names:
@@ -2024,6 +2065,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         options = _ref_request_options()
         if options is None:
             return
+        if auto and entity_kind in ("character", "location"):
+            # Resume: Refs already made for this story are kept; only the missing ones are made.
+            todo = [n for n in names if not _ref_already_done(entity_kind, n)]
+            if len(todo) < len(names):
+                _ref_log(f"[auto-ref] ทำไว้แล้ว {len(names) - len(todo)} จาก {len(names)} — ข้าม และทำต่อที่เหลือ "
+                         "(กด 🧹 ล้างรูป ถ้าอยากทำใหม่ทั้งหมด)")
+            if not todo:
+                _ref_log("[auto-ref] ครบทุกรายการแล้ว ไม่มีอะไรต้องสร้างเพิ่ม")
+                return
+            names = todo
         isolated_character_auto = bool(auto and entity_kind == "character")
         has_ref_story = g.get("has_ref_story_history")
         current_ref_title = g.get("get_ref_story_title")
@@ -2157,6 +2208,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     out = _ref_image_request(options, prompt, file_hint,
                         [ref_image] if ref_image else [], payload)
                     out = _normalize_ref_output(out, name)
+                    if auto and entity_kind in ("character", "location"):
+                        _ref_mark_done(entity_kind, name, out)
                     root.after(0, lambda out=out, ghost=bool(ghost_design): (
                         _ref_log(f"✓ {out}"), _ref_gallery_add(out, True, is_ghost=ghost), _notify_done()
                     ))
@@ -2227,6 +2280,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     g["generate_auto_ref"] = generate_auto_ref
     
     def clear_ref_gallery():
+        try:
+            ref_done_path.unlink(missing_ok=True)  # cleared pictures must be made again by Auto
+        except OSError:
+            pass
         for child in gallery_inner.winfo_children():
             child.destroy()
         ref_gallery_images.clear()

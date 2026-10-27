@@ -379,12 +379,14 @@ def install(g: dict, root: tk.Misc) -> tk.Frame:
     label("เวลาเริ่ม", 2)
     time_row = tk.Frame(form, bg="#FFFFFF")
     time_row.grid(row=2, column=1, columnspan=2, sticky="ew", pady=5)
-    tk.Entry(time_row, textvariable=start_var, width=14, relief="solid", bd=1,
-             font=(SNAPGEN_UI_FONT, 10)).pack(side="left")
+    start_entry = tk.Entry(time_row, textvariable=start_var, width=14, relief="solid", bd=1,
+                           font=(SNAPGEN_UI_FONT, 10))
+    start_entry.pack(side="left")
     tk.Label(time_row, text="เวลาจบ", bg="#FFFFFF", fg="#374151",
              font=(SNAPGEN_UI_FONT, 10)).pack(side="left", padx=(18, 8))
-    tk.Entry(time_row, textvariable=end_var, width=14, relief="solid", bd=1,
-             font=(SNAPGEN_UI_FONT, 10)).pack(side="left")
+    end_entry = tk.Entry(time_row, textvariable=end_var, width=14, relief="solid", bd=1,
+                         font=(SNAPGEN_UI_FONT, 10))
+    end_entry.pack(side="left")
     tk.Label(time_row, text="เว้นว่าง = จนจบไฟล์", bg="#FFFFFF", fg="#9CA3AF",
              font=(SNAPGEN_UI_FONT, 9)).pack(side="left", padx=8)
 
@@ -400,6 +402,37 @@ def install(g: dict, root: tk.Misc) -> tk.Frame:
         font=(SNAPGEN_UI_FONT, 9, "bold"),
     )
     play_btn.pack(side="left", padx=(8, 0))
+
+    def apply_typed_time(side, _event=None):
+        """Enter / leaving the box: the selection edge and the play position jump to the typed time."""
+        duration = float(waveform["duration"] or 0.0)
+        var = start_var if side == "left" else end_var
+        text = var.get().strip()
+        if duration <= 0 or (side == "right" and not text):
+            return
+        try:
+            typed = seconds(text or "00:00:00")
+        except ValueError:
+            status_var.set("เวลาไม่ถูกต้อง — พิมพ์แบบ 1:30 หรือ 00:01:30")
+            return
+        gap = min(0.1, duration)
+        typed = max(0.0, min(duration, typed))
+        if side == "left":
+            typed = min(typed, max(0.0, waveform["end"] - gap))
+            waveform["start"] = typed
+        else:
+            typed = max(typed, min(duration, waveform["start"] + gap))
+            waveform["end"] = typed
+        var.set(clock(typed))
+        stop_preview()
+        waveform["playhead"] = typed
+        update_waveform_selection()
+        status_var.set(f"ไปที่ {clock(typed)} แล้ว — กดเล่นเพื่อฟังจากจุดนี้")
+
+    start_entry.bind("<Return>", lambda e: apply_typed_time("left", e))
+    start_entry.bind("<FocusOut>", lambda e: apply_typed_time("left", e))
+    end_entry.bind("<Return>", lambda e: apply_typed_time("right", e))
+    end_entry.bind("<FocusOut>", lambda e: apply_typed_time("right", e))
 
     def move_playhead_to(side):
         stop_preview()
