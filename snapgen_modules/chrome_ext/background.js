@@ -144,7 +144,11 @@ async function workerTab() {
   if (id === null) {
     let tab;
     try {
-      tab = await chrome.tabs.create({url: "https://chatgpt.com/", active: false, pinned: true});
+      // Name the window: the program's Chrome window sits inside Tidmunz, and Chrome may not count it as the
+      // "current" window, so a tab without a windowId fails with "No current window" although a window is open.
+      const wins = await chrome.windows.getAll({windowTypes: ["normal"]});
+      const where = wins.length ? {windowId: wins[0].id} : {};
+      tab = await chrome.tabs.create({url: "https://chatgpt.com/", active: false, pinned: true, ...where});
     } catch (e) {
       if (!/No current window/i.test(String(e && e.message || e))) throw e;
       // The service worker can stay connected after the profile's last window closed.
