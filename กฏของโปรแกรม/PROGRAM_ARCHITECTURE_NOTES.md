@@ -31,32 +31,26 @@
 
 - ตรวจและใช้ Python ของ `.venv312`
 - จัดตำแหน่งโฟลเดอร์เก่าให้เข้ารูปแบบปัจจุบัน
-- ตรวจ Bridge และเปิด Bridge เมื่อจำเป็น
+- เปิดช่องทาง ChatGPT ผ่านส่วนขยาย Chrome ของโปรแกรม (ไม่มี Bridge แล้ว)
 - โหลดแกนโปรแกรมจาก `__pycache__/snapgen_core.cpython-312.pyc`
 - ติดตั้ง patch/UI adapters เพิ่มจาก source ด้านล่าง
 
 ไฟล์ `.pyc` เป็นส่วนสำคัญของโปรแกรม ไม่ใช่ cache ธรรมดาที่ลบได้
 
-## 2. Bridge, GPT และ Tailscale
+## 2. ChatGPT, Chrome และ Tailscale
 
-อ่านรายละเอียดทั้งหมดที่ `กฏของโปรแกรม/BRIDGE_TEAM_ARCHITECTURE.md`
-
-สรุป:
+ไม่มี Bridge แยก (chatgpt-api ที่ `127.0.0.1:8000`) แล้ว — ถอดออกจากโปรแกรมทั้งหมด
 
 ```text
-แต่ละเครื่อง → SnapGen ของตัวเอง → Bridge ของตัวเอง → GPT บัญชีเดียวกัน
+หน้าต่างๆ ของโปรแกรม → ChatGPT API ของโปรแกรมเอง (127.0.0.1, token อยู่ใน path)
+                      → ส่วนขยาย "Tidmunz ChatGPT" ใน Chrome ของโปรแกรม → chatgpt.com
 ```
 
-ทุกเครื่องใช้ Tailscale บัญชี/เครือข่ายเดียวกัน แต่ไม่มี Central Bridge
-
-ค่าที่ต้องแยกให้ออก:
-
-```text
-SnapGen ติดต่อ Bridge       = 127.0.0.1
-Bridge process เปิดบริการ   = 0.0.0.0
-```
-
-ห้ามเปลี่ยนสองค่านี้จากการคาดเดา
+- `snapgen_chrome_relay.py` = คิวงานกับส่วนขยาย + เสิร์ฟ API ที่ `/<token>/v1/...`
+- `snapgen_chrome_api.py` = แปลงคำขอแบบเดิมของทุกหน้า (`chat/completions`, `chatgpt/vision`,
+  `images/generations`, `images/edits`) เป็นงานของส่วนขยาย แล้วตอบรูปแบบเดิมกลับ
+- ประวัติเรื่องยังเป็นแชต chatgpt.com จริง (conversation_id) ทุกเครื่องใช้บัญชีที่ล็อกอินใน Chrome ของโปรแกรมเครื่องนั้น
+- Tailscale ใช้ตรวจสถานะเครือข่ายเท่านั้น
 
 ## 3. Restore — มีปุ่มเดียว
 
@@ -436,6 +430,6 @@ SnapGen ไม่ได้ออกแบบมาสำหรับคอมเ
 - Log ทุกหน้าที่มี ERROR/FAILED/Exception/ล้มเหลว/ไม่สำเร็จต้องเข้าระบบกลาง รวม Video, Image, Ref, Prop, นิทาน, คาราโอเกะ และตัดเสียง
 - ต้องจับ startup/runtime console, unhandled GUI/thread exception, Python fatal crash, โปรแกรมปิดไม่สมบูรณ์ครั้งก่อน และ UI ค้างเกิน 45 วินาที พร้อม thread stack
 - Session sentinel ต้องเขียน heartbeat แบบเบาทุก 2 วินาทีและทำเครื่องหมาย clean ตอนปิดปกติ; ถ้าเครื่องดับ/process crash ให้รายงานเมื่อเปิดครั้งถัดไป
-- Prompt-Ref ต้องอ่าน conversation cursor ได้ทั้ง response layout ใหม่/เก่า; ถ้า Bridge เครื่องผู้ใช้ไม่คืน cursor ให้ refresh source โดยรักษา secrets/accounts, patch, restart และ retry เฉพาะ Context upload หนึ่งครั้ง ห้ามให้ผู้ใช้รีสตาร์ต Bridge เอง และห้ามใช้ retry นี้กับงานสร้างภาพ
+- Prompt-Ref ต้องอ่าน conversation cursor ได้ทั้ง response layout ใหม่/เก่า (`snapgen_chrome_api.extract_cursor`); ไม่มี Bridge ให้ซ่อม/รีสตาร์ตแล้ว
 - ประวัติ Prompt-Ref ต้องผูกกับ SHA-256 ของบทที่อัปจริง: ถ้าผู้ใช้เลือก/แก้ไฟล์ใหม่ ห้ามใช้ cursor เก่าแม้ cursor ยังอยู่ ต้องอัปบทใหม่ก่อนสร้าง Context เพื่อกัน GPT ตอบจากเรื่องเก่า
 - Prompt-Ref ต้องส่งเนื้อหาไทยเป็น `input_text` แบ่งส่วนใน turn แรกจนได้ `STORY_READY` แล้วจึงแนบไฟล์ต้นฉบับใน turn ที่สองของประวัติเดิม เพราะ ChatGPT Web file parser บางเครื่องแปลง UTF-8 ไทยเป็น `????`; ห้ามส่งไฟล์พร้อมข้อความหลักใน turn เดียวและห้ามให้ผลอ่านไฟล์ทับ FULL_STORY_PART

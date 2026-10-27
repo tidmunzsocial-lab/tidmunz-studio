@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Job queue between the Bridge and the "Tidmunz ChatGPT" Chrome extension.
+"""Job queue between the program and the "Tidmunz ChatGPT" Chrome extension.
 
-Runs inside Tidmunz Studio on 127.0.0.1 only. The Bridge posts a job to /job and
-waits; the extension long-polls /next, runs the job in the user's own ChatGPT tab
-and posts /result. Every call except /status and /pair needs the token. A folder
-install reads it from config.js; the Web Store build gets it from /pair, which
-answers Chrome extensions only. The Bridge reads it from chrome_relay.json.
+Runs inside Tidmunz Studio on 127.0.0.1 only. The program's pages call the ChatGPT API at
+/<token>/v1/... (snapgen_chrome_api, which replaced the separate Bridge); each request becomes a
+job. The extension long-polls /next, runs the job in the user's own ChatGPT tab and posts
+/result. Every call except /status and /pair needs the token. A folder install reads it from
+config.js; the Web Store build gets it from /pair, which answers Chrome extensions only.
 """
 from __future__ import annotations
 
@@ -129,7 +129,7 @@ class _Relay:
             slot["result"] = result
             slot["event"].set()
 
-    # Bridge side
+    # program side
     def run(self, job: dict) -> dict:
         job = dict(job)
         if not self.status()["connected"]:
@@ -248,8 +248,26 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(length).decode("utf-8") or "{}") if length else {}
 
+    def _api(self, method: str, path: str) -> bool:
+        """/<token>/v1/... : the program's ChatGPT API (the token sits in the path, so the pages'
+        existing "base + /chat/completions" calls carry it without any header changes)."""
+        prefix = f"/{RELAY.token}/"
+        if not RELAY.token or not path.startswith(prefix):
+            return False
+        import snapgen_chrome_api
+        try:
+            body = self._body() if method == "POST" else {}
+        except ValueError:
+            self._send(400, {"error": {"code": "bad_json", "message": "bad json"}})
+            return True
+        code, payload = snapgen_chrome_api.handle(method, "/" + path[len(prefix):], body, RELAY.run, RELAY.status())
+        self._send(code, payload)
+        return True
+
     def do_GET(self):
         path, query = self._query()
+        if self._api("GET", path):
+            return
         if path == "/status":
             return self._send(200, RELAY.status())
         if path == "/pair":
@@ -284,6 +302,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path, query = self._query()
+        if self._api("POST", path):
+            return
         if not self._allowed(query):
             return self._send(403, {"error": "bad token"})
         try:
@@ -335,6 +355,12 @@ def _write_extension(source: Path, token: str, port: int) -> None:
     config_path = target / "config.js"
     if not config_path.is_file() or config_path.read_text(encoding="utf-8") != config:
         config_path.write_text(config, encoding="utf-8")
+
+
+def api_root() -> str:
+    """http://127.0.0.1:<port>/<token> — the program's ChatGPT API (add /v1/...)."""
+    info = start(lambda *_a: None)
+    return f"http://127.0.0.1:{info['port']}/{info['token']}"
 
 
 def start(log=print) -> dict:

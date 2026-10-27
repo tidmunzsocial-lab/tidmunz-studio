@@ -725,7 +725,7 @@ def install(g: dict, root: tk.Misc, parent: tk.Misc) -> dict:
             "temporary_chat": True,
         }
         request = urllib.request.Request(
-            "http://127.0.0.1:8000/v1/chatgpt/vision",
+            __import__("snapgen_chrome_relay").api_root() + "/v1/chatgpt/vision",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"},
             method="POST",

@@ -8,7 +8,6 @@ application and the current Windows user profile.
 from __future__ import annotations
 
 import importlib.util
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,15 +20,10 @@ import tempfile
 import time
 import urllib.request
 import urllib.parse
-import venv
 import zipfile
 
 
-BRIDGE_RELEASE_VERSION = "1.0.1"
-BRIDGE_ZIP_URL = "https://github.com/tidmunzsocial-lab/snapgen-chatgpt-bridge/releases/download/v1.0.1/snapgen-bridge-v1.0.1.zip"
 BRIDGE_ZIP_SHA256 = "ad0d1df5295a32e312a6949299549e1121d891d83e9c3821b37f0f202bba5f01"
-BRIDGE_RELEASE_FILE = ".snapgen_bridge_release.json"
-MAIN_BRIDGE_HOST = "127.0.0.1"
 REQUIRED_APP_PACKAGES = (
     ("PIL", "Pillow"),
     ("qcloud_cos", "cos-python-sdk-v5"),
@@ -64,99 +58,6 @@ def _download(url: str, destination: Path, log):
     log("กำลังดาวน์โหลดจากอินเทอร์เน็ต...")
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as out:
         shutil.copyfileobj(response, out, length=1024 * 1024)
-
-
-def _bridge_source_ok(path: Path) -> bool:
-    return (path / "pyproject.toml").is_file() and (path / "chatgpt_api").is_dir()
-
-def _bridge_release_ok(path: Path) -> bool:
-    try:
-        data = json.loads((path / BRIDGE_RELEASE_FILE).read_text(encoding="utf-8"))
-        return _bridge_source_ok(path) and str(data.get("version")) == BRIDGE_RELEASE_VERSION
-    except (OSError, ValueError, TypeError):
-        return False
-
-
-def _install_bridge_source(bridge_dir: Path, log, *, refresh=False):
-    """Install pinned company Bridge without touching accounts or outputs."""
-    if _bridge_release_ok(bridge_dir) and not refresh:
-        log(f"✓ Bridge รุ่น {BRIDGE_RELEASE_VERSION} พร้อม")
-        return
-    bridge_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="snapgen-bridge-") as td:
-        temp = Path(td)
-        archive = temp / "bridge.zip"
-        _download(BRIDGE_ZIP_URL, archive, log)
-        actual_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
-        if actual_hash != BRIDGE_ZIP_SHA256:
-            raise RuntimeError(f"ไฟล์ Bridge เสียหรือไม่ตรงรุ่น: SHA256={actual_hash}")
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(temp / "extract")
-        roots = [p for p in (temp / "extract").iterdir() if p.is_dir()]
-        if not roots or not _bridge_release_ok(roots[0]):
-            raise RuntimeError("ไฟล์ Bridge ที่ดาวน์โหลดมาไม่สมบูรณ์")
-        # Overlay source only; existing secrets/accounts and outputs survive.
-        # refresh=True repairs old Bridge code on ordinary user machines
-        # without deleting account captures or forcing a second login.
-        shutil.copytree(roots[0], bridge_dir, dirs_exist_ok=True)
-    if not _bridge_release_ok(bridge_dir):
-        raise RuntimeError("ติดตั้ง Bridge แล้วแต่รุ่นไม่ตรง")
-    log(f"✓ ติดตั้ง Bridge รุ่น {BRIDGE_RELEASE_VERSION} แล้ว")
-
-def refresh_bridge_source(bridge_dir, log=print):
-    """Refresh executable Bridge code while preserving user accounts/data."""
-    bridge = Path(bridge_dir).expanduser().resolve()
-    _install_bridge_source(bridge, log, refresh=True)
-    return _ensure_bridge_venv(bridge, log)
-
-def bridge_release_ready(bridge_dir) -> bool:
-    """Return True only for exact Bridge source shipped to every workstation."""
-    return _bridge_release_ok(Path(bridge_dir).expanduser().resolve())
-
-
-def rebuild_bridge_runtime(bridge_dir, log=print):
-    """Rebuild executable Bridge code/venv while preserving accounts and data."""
-    bridge = Path(bridge_dir).expanduser().resolve()
-    # Account captures live under secrets/. Never remove that folder.
-    for relative in ("chatgpt_api", "chatgpt_api.egg-info", ".venv"):
-        target = (bridge / relative).resolve()
-        if target.parent != bridge:
-            raise RuntimeError(f"พาธซ่อม Bridge ไม่ปลอดภัย: {target}")
-        if target.is_dir():
-            shutil.rmtree(target, ignore_errors=False)
-        elif target.exists():
-            target.unlink()
-    for cache in bridge.rglob("__pycache__") if bridge.is_dir() else ():
-        try:
-            shutil.rmtree(cache, ignore_errors=True)
-        except OSError:
-            pass
-    log("ล้างเฉพาะ Bridge runtime แล้ว — เก็บ Account เดิมไว้")
-    _install_bridge_source(bridge, log, refresh=True)
-    return _ensure_bridge_venv(bridge, log)
-
-
-def _ensure_bridge_venv(bridge_dir: Path, log) -> Path:
-    py = bridge_dir / ".venv" / "Scripts" / "python.exe"
-    if py.is_file():
-        test = _run([py, "-c", "import sys; print(sys.version)"], timeout=30)
-        if test.returncode == 0:
-            log("✓ Python ของ Bridge ใช้งานได้")
-        else:
-            shutil.rmtree(bridge_dir / ".venv", ignore_errors=True)
-    if not py.is_file():
-        log("กำลังสร้าง Python environment สำหรับ Bridge...")
-        venv.EnvBuilder(with_pip=True, clear=False).create(bridge_dir / ".venv")
-    if not py.is_file():
-        raise RuntimeError("สร้าง Python environment ของ Bridge ไม่สำเร็จ")
-    result = _run([py, "-m", "pip", "install", "--disable-pip-version-check", "-e", "."], cwd=bridge_dir)
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "ติดตั้ง Bridge dependencies ไม่สำเร็จ")[-2000:])
-    check = _run([py, "-c", "import chatgpt_api; print('OK')"], cwd=bridge_dir, timeout=60)
-    if check.returncode:
-        raise RuntimeError((check.stderr or check.stdout or "import chatgpt_api ไม่สำเร็จ")[-1500:])
-    log("✓ Bridge dependencies พร้อม")
-    return py
 
 
 def _find_ffmpeg(project_root: Path):
@@ -422,60 +323,9 @@ def _tailscale_state(executable: Path):
     return {"ok": backend == "Running" and bool(ips), "ips": ips, "email": str(email), "backend": backend}
 
 
-def _bridge_health(host=MAIN_BRIDGE_HOST, port=8000):
-    try:
-        req = urllib.request.Request(
-            f"http://{host}:{port}/health",
-            headers={"Authorization": "Bearer local-dev-key"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as response:
-            data = json.loads(response.read().decode("utf-8", "replace"))
-        return bool(data.get("ok")), data
-    except Exception as exc:
-        return False, {"error": str(exc)}
-
-
-def _start_bridge(bridge_dir: Path, bridge_python: Path, log, host=MAIN_BRIDGE_HOST):
-    ok, data = _bridge_health(host)
-    if ok:
-        log(f"✓ Bridge ทำงานอยู่แล้ว (account={data.get('account') or '-'})")
-        return True
-    accounts_dir = bridge_dir / "secrets" / "accounts"
-    accounts = sorted(p.name for p in accounts_dir.iterdir() if p.is_dir()) if accounts_dir.is_dir() else []
-    env = os.environ.copy()
-    env["CHATGPT_API_KEY"] = "local-dev-key"
-    env["CHATGPT_ACCOUNTS_DIR"] = "./secrets/accounts"
-    env["CHATGPT_ACCOUNT_STRATEGY"] = "auto"
-    command = [
-        bridge_python, "-m", "chatgpt_api", "serve", "--host", "0.0.0.0",
-        "--port", "8000", "--api-key", "local-dev-key",
-        "--account-strategy", "auto", "--web-timeout", "600", "--normal-chat",
-    ]
-    if accounts:
-        env["CHATGPT_ACCOUNT"] = accounts[0]
-        env["CHATGPT_ACCOUNTS"] = ",".join(accounts)
-        command += ["--account", accounts[0], "--accounts", ",".join(accounts)]
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(command, cwd=str(bridge_dir), env=env,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     creationflags=flags)
-    for _ in range(20):
-        time.sleep(1)
-        ok, data = _bridge_health(host)
-        if ok:
-            log(f"✓ Bridge เริ่มทำงานแล้ว (account={data.get('account') or '-'})")
-            return True
-    if not accounts:
-        log("⚠ Bridge ติดตั้งแล้ว แต่ยังไม่มี Account — เปิด Bridge แล้วเพิ่ม Account")
-    else:
-        log("⚠ Bridge ยังไม่ตอบสนอง — เปิด Bridge Manager เพื่อตรวจ account")
-    return False
-
-
-def repair_all(project_root, bridge_dir=None, log=print, patch_bridge=None, bridge_host=MAIN_BRIDGE_HOST):
+def repair_all(project_root, log=print, **_old_bridge_args):
     """Check and repair this machine. Returns a structured summary."""
     root = Path(project_root).resolve()
-    bridge = Path(bridge_dir or (Path.home() / "chatgpt-api")).expanduser().resolve()
     python_exe = Path(sys.executable).resolve()
     failures = []
     repaired = []
@@ -557,25 +407,16 @@ def repair_all(project_root, bridge_dir=None, log=print, patch_bridge=None, brid
         failures.append(f"Resize+sharpen: {exc}")
         log(f"✗ Resize+sharpen: {exc}")
 
-    bridge_python = None
     try:
         tailscale_exe = _ensure_tailscale(log)
         ts = _tailscale_state(tailscale_exe)
         if not ts.get("ok"):
             raise RuntimeError("Tailscale ยังไม่ได้ล็อกอิน/เชื่อมต่อ — เปิด Tailscale แล้ว Sign in หนึ่งครั้ง")
         log(f"✓ Tailscale เชื่อมต่อแล้ว: {ts.get('email') or '-'} | IP={', '.join(ts.get('ips') or [])}")
-        log("✓ เครื่องนี้ใช้ Bridge ส่วนตัวที่ 127.0.0.1:8000")
-        source_was_missing = not _bridge_source_ok(bridge)
-        _install_bridge_source(bridge, log)
-        if source_was_missing:
-            repaired.append("Bridge source")
-        bridge_python = _ensure_bridge_venv(bridge, log)
-        if callable(patch_bridge):
-            patch_bridge(bridge, lambda message: log(message))
-        _start_bridge(bridge, bridge_python, log, "127.0.0.1")
     except Exception as exc:
-        failures.append(f"Bridge: {exc}")
-        log(f"✗ Bridge: {exc}")
+        failures.append(f"Tailscale: {exc}")
+        log(f"✗ Tailscale: {exc}")
+    log("✓ ChatGPT ใช้ส่วนขยาย Chrome ของโปรแกรม (ไม่ใช้ Bridge แล้ว)")
 
     # Check only critical files that make the app unable to start.
     # Optional modules (ai_upscale, .ico, etc.) are checked later individually.
@@ -729,7 +570,7 @@ def repair_all(project_root, bridge_dir=None, log=print, patch_bridge=None, brid
         log("⚠ ไฟล์เพิ่มเติมขาด (อาจต้องอัปเดตก่อน): " + ", ".join(_missing_optional))
 
     summary = {"ok": not failures, "repaired": repaired, "failures": failures,
-               "project_root": str(root), "bridge_dir": str(bridge)}
+               "project_root": str(root)}
     report = root / "snapgen_data" / "logs" / "system_repair.json"
     report.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     if failures:

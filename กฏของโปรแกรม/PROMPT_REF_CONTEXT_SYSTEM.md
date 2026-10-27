@@ -158,8 +158,7 @@ fields ที่ core loader รู้จักในปัจจุบัน:
 
 ### `_attach_docx_and_build_prompt_ref_context(...)`
 
-- ตรวจ Bridge runtime สำหรับ DOCX
-- แนบ `.docx` จริง
+- แนบ `.docx` จริง (ช่องทาง Chrome ส่งให้ ChatGPT เป็นข้อความของไฟล์ — `snapgen_chrome_api.document_text`)
 - ขอ `FILE_READY`
 - ขอ JSON Context ใน history เดิม
 - audit + mark context ready

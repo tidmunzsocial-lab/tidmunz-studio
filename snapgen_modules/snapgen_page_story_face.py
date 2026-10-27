@@ -477,7 +477,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     if own.get("account_alias"):
                         body["chatgpt_account"] = own["account_alias"]
                 base_fn = globals().get("_chatgpt_api_base")
-                base = base_fn() if callable(base_fn) else "http://127.0.0.1:8000/v1"
+                base = base_fn() if callable(base_fn) else __import__("snapgen_chrome_relay").api_root() + "/v1"
                 request = urllib.request.Request(
                     base.rstrip("/") + "/chat/completions", data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                     headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json; charset=utf-8"},
@@ -1104,7 +1104,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     payload_data["chatgpt_account"] = own["account_alias"]
             payload = json.dumps(payload_data, ensure_ascii=False).encode("utf-8")
             base_fn = globals().get("_chatgpt_api_base")
-            base = base_fn() if callable(base_fn) else "http://127.0.0.1:8000/v1"
+            base = base_fn() if callable(base_fn) else __import__("snapgen_chrome_relay").api_root() + "/v1"
             request = urllib.request.Request(
                 base.rstrip("/") + "/chat/completions", data=payload,
                 headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json", "User-Agent": "Tidmun-Studio/1.0"},

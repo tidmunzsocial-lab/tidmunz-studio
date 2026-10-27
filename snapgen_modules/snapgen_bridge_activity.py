@@ -1,4 +1,4 @@
-"""Show Bridge work in the footer light: orange while a picture is being made, then done/failed.
+"""Show ChatGPT (Chrome) work in the footer light: orange while a picture is being made, then done/failed.
 
 Every page makes pictures through ``snapgen_image_gen.generate_image``; ``install`` wraps it once
 so the footer light and text tell the user that something is happening and when it finished.
@@ -41,8 +41,8 @@ def _idle_text(g):
         text = str(var.get()) if var is not None else ""
     except Exception:
         text = ""
-    return text if text and not text.startswith("Bridge: กำลัง") and "สร้างรูปเสร็จ" not in text \
-        and "สร้างรูปไม่สำเร็จ" not in text else (_state["idle_text"] or "Bridge: พร้อม")
+    return text if text and not text.startswith("Chrome: กำลัง") and "สร้างรูปเสร็จ" not in text \
+        and "สร้างรูปไม่สำเร็จ" not in text else (_state["idle_text"] or "Chrome ✓")
 
 
 def start(g, what="สร้างรูป"):
@@ -52,7 +52,7 @@ def start(g, what="สร้างรูป"):
         _state["running"] += 1
         count = _state["running"]
         g["_bridge_busy"] = count
-    _show(g, BUSY, f"Bridge: กำลัง{what}..." + (f" ({count} งาน)" if count > 1 else ""))
+    _show(g, BUSY, f"Chrome: กำลัง{what}..." + (f" ({count} งาน)" if count > 1 else ""))
 
 
 def finish(g, ok=True, what="สร้างรูป"):
@@ -60,9 +60,9 @@ def finish(g, ok=True, what="สร้างรูป"):
         _state["running"] = max(0, _state["running"] - 1)
         left = _state["running"]
         g["_bridge_busy"] = left
-        idle = _state["idle_text"] or "Bridge: พร้อม"
+        idle = _state["idle_text"] or "Chrome ✓"
     if left:
-        _show(g, BUSY, f"Bridge: กำลัง{what}... ({left} งาน)")
+        _show(g, BUSY, f"Chrome: กำลัง{what}... ({left} งาน)")
         return
     _show(g, DONE if ok else FAILED, f"✓ {what}เสร็จ" if ok else f"✗ {what}ไม่สำเร็จ")
     root = _root(g)

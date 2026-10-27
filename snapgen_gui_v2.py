@@ -429,37 +429,11 @@ for _base in [
         os.environ["TK_LIBRARY"] = str(tk)
         break
 
-# ── Bridge startup guard (BEFORE pyc exec) ───────────────────
-# Must run before exec(code, g) so pyc's bridge status check
-# sees the bridge as ready, not yellow/warning.
-# Every workstation owns its own Bridge. Tailscale remains available/statused,
-# but ChatGPT traffic and accounts never depend on another PC being online.
-# ---------------------------------------------------------------------------
-# DEVELOPER NOTE — DO NOT GUESS OR CHANGE THIS ARCHITECTURE SILENTLY
-#
-# Every team computer runs its OWN SnapGen app and its OWN local Bridge:
-#   local SnapGen -> local Bridge (127.0.0.1) -> the same shared GPT account
-#
-# The computers also sign in to the same Tailscale account/tailnet, but
-# Tailscale is NOT used to forward all GPT requests to one central Bridge.
-# There is no central SnapGen host. Each machine performs its own work.
-#
-# IMPORTANT: BRIDGE_HOST/BRIDGE_SERVER below are the addresses SnapGen uses
-# to contact its own Bridge, so they remain 127.0.0.1.  The Bridge PROCESS
-# intentionally starts with --host 0.0.0.0 in the original design. Do not
-# replace that bind address with 127.0.0.1 as an assumed "security fix".
-#
-# Preserve these separate roles:
-#   client connection address = 127.0.0.1
-#   Bridge process bind address = 0.0.0.0
-#
-# Do not change Bridge binding, shared GPT-account behavior, Tailscale
-# behavior, or account strategy without explicit instructions from the owner.
-# See กฏของโปรแกรม/BRIDGE_TEAM_ARCHITECTURE.md before changing Bridge networking.
-# ---------------------------------------------------------------------------
-BRIDGE_HOST = "127.0.0.1"
-BRIDGE_PORT = 8000
-BRIDGE_API_KEY = "local-dev-key"
+# ── ChatGPT channel (BEFORE pyc exec) ──────────────────────────
+# There is no separate Bridge any more. Every page sends its ChatGPT request to the program's own
+# API (snapgen_chrome_relay + snapgen_chrome_api on 127.0.0.1, token in the path), which hands it
+# to the "Tidmunz ChatGPT" extension in the program's Chrome.  Each PC uses its own Chrome login.
+BRIDGE_API_KEY = "local-dev-key"  # pages still send this header; the API ignores it
 SNAPGEN_VERBOSE_STARTUP = os.environ.get("SNAPGEN_VERBOSE_STARTUP") == "1"
 
 
@@ -467,353 +441,51 @@ def _snapgen_startup_detail(message):
     """Show routine startup detail only when explicitly requested."""
     if SNAPGEN_VERBOSE_STARTUP:
         print(message)
-def _bridge_account_mtime(bridge_dir):
-    """Newest capture time under bridge_dir/secrets/accounts (0 = no accounts)."""
-    newest = 0.0
-    try:
-        for account in (Path(bridge_dir) / "secrets" / "accounts").iterdir():
-            if account.is_dir():
-                newest = max(newest, account.stat().st_mtime, *(
-                    f.stat().st_mtime for f in account.iterdir() if f.is_file()
-                ))
-    except Exception:
-        pass
-    return newest
+def _chatgpt_api_root():
+    """http://127.0.0.1:<port>/<token> — the program's own ChatGPT API (add /v1/...).
 
-
-_BRIDGE_DIR_MEMORY = BASE / "meta" / "bridge_dir.json"
-
-
-def _remembered_bridge_dir():
-    """This machine's Bridge folder saved last time (snapgen_data is never
-    touched by Update/Restore, so the choice survives every update)."""
-    try:
-        saved = json.loads(_BRIDGE_DIR_MEMORY.read_text(encoding="utf-8")).get("path")
-        path = Path(str(saved or ""))
-        if str(saved or "").strip() and _bridge_account_mtime(path) > 0:
-            return path
-    except Exception:
-        pass
-    return None
-
-
-def _remember_bridge_dir(path):
-    try:
-        _BRIDGE_DIR_MEMORY.parent.mkdir(parents=True, exist_ok=True)
-        _BRIDGE_DIR_MEMORY.write_text(
-            json.dumps({"path": str(Path(path).resolve())}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
-
-
-def _find_bridge_dir():
-    """Pick the Bridge that holds the captured GPT accounts.
-
-    Each machine remembers its folder in snapgen_data/meta/bridge_dir.json and
-    uses it directly. Only when that folder is gone or has no accounts does it
-    search again: a second, empty chatgpt-api folder (e.g. inside a launcher
-    install) must never win over the folder that already has accounts.
+    There is no separate Bridge any more: every page's ChatGPT request is answered through the
+    "Tidmunz ChatGPT" Chrome extension (snapgen_chrome_relay + snapgen_chrome_api).
     """
-    if "SNAPGEN_BRIDGE_DIR" not in os.environ:
-        remembered = _remembered_bridge_dir()
-        if remembered is not None:
-            return remembered
-    candidates = []
-    if "SNAPGEN_BRIDGE_DIR" in os.environ:
-        candidates.append(Path(os.environ["SNAPGEN_BRIDGE_DIR"]))
-    candidates += [
-        BASE_ROOT / "chatgpt-api",
-        Path.home() / "chatgpt-api",
-    ]
-    existing = []
-    for p in candidates:
-        try:
-            if str(p) and p.exists() and p not in existing:
-                existing.append(p)
-        except Exception:
-            pass
-    with_accounts = [p for p in existing if _bridge_account_mtime(p) > 0]
-    if with_accounts:
-        chosen = max(with_accounts, key=_bridge_account_mtime)
-        _remember_bridge_dir(chosen)
-        return chosen
-    if existing:
-        return existing[0]
-    return Path.home() / "chatgpt-api"
-
-BRIDGE_DIR = _find_bridge_dir()
-BRIDGE_PYTHON = BRIDGE_DIR / ".venv" / "Scripts" / "python.exe"
-
-
-def _snapgen_force_writable(path):
-    try:
-        os.chmod(path, 0o700)
-    except Exception:
-        pass
-
-
-def _snapgen_rmtree_force(path):
-    def _onerror(func, p, _exc_info):
-        _snapgen_force_writable(p)
-        func(p)
-
-    shutil.rmtree(path, onerror=_onerror)
-
-
-def _snapgen_stop_bridge_for_dir(bridge_dir, port=8000):
-    """Stop bridge processes before deleting/updating its folder."""
-    bridge_dir = Path(bridge_dir).expanduser()
-    killed = set()
-    try:
-        resolved = str(bridge_dir.resolve()).lower()
-    except Exception:
-        resolved = str(bridge_dir).lower()
-
-    try:
-        out = subprocess.run(
-            ["wmic", "process", "get", "name,processid,commandline", "/format:csv"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-        ).stdout
-        for line in out.replace("\r", "").splitlines():
-            low = line.lower()
-            if not ("python" in low and ("chatgpt_api" in low or resolved in low)):
-                continue
-            pid = line.rsplit(",", 1)[-1].strip()
-            if pid.isdigit() and pid not in killed:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
-                killed.add(pid)
-    except Exception:
-        pass
-
-    try:
-        out = subprocess.run(
-            ["netstat", "-ano"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-        ).stdout
-        for line in out.splitlines():
-            if f":{port}" in line and "LISTENING" in line:
-                pid = line.split()[-1]
-                if pid.isdigit() and pid not in killed:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
-                    killed.add(pid)
-    except Exception:
-        pass
-
-    if killed:
-        time.sleep(1.0)
-    return killed
-
-
-def _snapgen_trash_bridge_folder(bridge_dir, trash_root=None):
-    bridge_dir = Path(bridge_dir).expanduser()
-    trash_root = Path(trash_root or (Path.home() / "trash-agent"))
-    trash_root.mkdir(parents=True, exist_ok=True)
-    dest = trash_root / ("chatgpt-api-" + time.strftime("%Y%m%d-%H%M%S"))
-
-    _snapgen_stop_bridge_for_dir(bridge_dir, BRIDGE_PORT)
-
-    startup = Path(os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))) / "Microsoft/Windows/Start Menu/Programs/Startup/chatgpt-bridge-autostart.vbs"
-    if startup.exists():
-        try:
-            shutil.move(str(startup), str(trash_root / ("chatgpt-bridge-autostart-" + time.strftime("%Y%m%d-%H%M%S") + ".vbs")))
-        except Exception:
-            pass
-
-    try:
-        shutil.move(str(bridge_dir), str(dest))
-        return dest
-    except PermissionError:
-        git_dir = bridge_dir / ".git"
-        if git_dir.exists():
-            _snapgen_rmtree_force(git_dir)
-        shutil.move(str(bridge_dir), str(dest))
-        return dest
-
-
-def _bridge_cleanup():
-    """Clear bridge cached state (artifacts table, temp images)."""
-    _bd = BRIDGE_DIR
-    db_path = _bd / "outputs" / "chatgpt-admin.sqlite"
-    img_dir = _bd / "outputs" / "chatgpt-images"
-
-    if db_path.exists():
-        try:
-            import sqlite3
-            conn = sqlite3.connect(str(db_path), timeout=5)
-            conn.execute("DELETE FROM artifacts")
-            conn.commit()
-            conn.close()
-            _snapgen_startup_detail("[SnapGen] Bridge cache cleared (artifacts table)")
-        except Exception as e:
-            print(f"[SnapGen] Could not clear artifacts: {e}")
-
-    if img_dir.is_dir():
-        try:
-            for f in img_dir.iterdir():
-                if f.is_file():
-                    f.unlink()
-            _snapgen_startup_detail("[SnapGen] Temp images cleared")
-        except Exception as e:
-            print(f"[SnapGen] Could not clear temp images: {e}")
-
-    for pyc_dir in [_bd / "chatgpt_api" / "__pycache__"]:
-        if pyc_dir.is_dir():
-            try:
-                for f in pyc_dir.iterdir():
-                    f.unlink()
-            except Exception:
-                pass
-
+    import snapgen_chrome_relay
+    return snapgen_chrome_relay.api_root()
 
 
 def _bridge_health():
+    """Old name kept for callers: True while the program's ChatGPT API (Chrome queue) runs."""
     try:
-        import urllib.request
-        req = urllib.request.Request(
-            f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/health",
-            headers={"Authorization": f"Bearer {BRIDGE_API_KEY}"}
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read())
-            return data.get("ok") is True
+        _chatgpt_api_root()
+        return True
     except Exception:
         return False
 
-def _running_bridge_sees_local_accounts():
-    """False when the Bridge already running (e.g. started earlier from an
-    empty chatgpt-api folder) does not serve the accounts saved in BRIDGE_DIR.
-    Unknown states return True so a working Bridge is never stopped by guess."""
-    try:
-        accounts_root = BRIDGE_DIR / "secrets" / "accounts"
-        local = {p.name for p in accounts_root.iterdir() if p.is_dir() and not p.name.startswith(".")}
-    except Exception:
-        return True
-    if not local:
-        return True
-    try:
-        import urllib.request
-        req = urllib.request.Request(
-            f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1/chatgpt/admin/accounts",
-            headers={"Authorization": f"Bearer {BRIDGE_API_KEY}"},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
-        rows = payload.get("accounts") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            return True
-        remote = {
-            str(row.get("account") or "") for row in rows
-            if isinstance(row, dict) and (row.get("capture_exists") or row.get("settings_exists") or row.get("stored"))
-        }
-        return bool(local & remote)
-    except Exception:
-        return True
-
 
 def _bridge_startup_sync():
-    """Start this workstation's private local Bridge."""
-    contract_ready = False
+    """Old name kept for callers: nothing to start or repair, the API lives inside the program."""
+    return _bridge_health()
+
+
+try:
+    _chatgpt_api_root()
+except Exception as _chatgpt_api_error:
+    print(f"[SnapGen] ERROR: เปิดช่องทาง ChatGPT ผ่าน Chrome ไม่สำเร็จ: {_chatgpt_api_error}")
+
+
+def _stop_leftover_bridge():
+    """An older version may have left its Bridge running in the background: stop it (once per start).
+    Only a process whose command line is `... -m chatgpt_api serve` is touched; its folder is kept."""
+    if os.name != "nt":
+        return
+    script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*chatgpt_api*serve*' } "
+              "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
     try:
-        from snapgen_system_repair import bridge_release_ready, refresh_bridge_source
-        if not bridge_release_ready(BRIDGE_DIR):
-            _snapgen_startup_detail("[SnapGen] กำลังติดตั้ง Bridge มาตรฐานสำหรับเครื่องนี้...")
-            _snapgen_stop_bridge_for_dir(BRIDGE_DIR, BRIDGE_PORT)
-            refresh_bridge_source(BRIDGE_DIR, _snapgen_startup_detail)
-        from snapgen_bridge_cursor_patch import install as _install_bridge_cursor, runtime_probe as _probe_bridge_docx
-        _cursor_changed = _install_bridge_cursor(BRIDGE_DIR, _snapgen_startup_detail)
-        contract_ready, contract_detail = _probe_bridge_docx(BRIDGE_DIR, BRIDGE_PYTHON)
-        if not contract_ready:
-            raise RuntimeError("DOCX capability probe ไม่ผ่าน: " + contract_detail)
-        if _cursor_changed:
-            _snapgen_stop_bridge_for_dir(BRIDGE_DIR, BRIDGE_PORT)
-    except Exception as _cursor_error:
-        print(f"[SnapGen] Bridge ยังไม่ครบ — กำลังติดตั้งมาตรฐานเดียวกันทุกเครื่อง: {_cursor_error}")
-        try:
-            from snapgen_system_repair import refresh_bridge_source
-            _snapgen_stop_bridge_for_dir(BRIDGE_DIR, BRIDGE_PORT)
-            refresh_bridge_source(BRIDGE_DIR, _snapgen_startup_detail)
-            from snapgen_bridge_cursor_patch import install as _install_bridge_cursor, runtime_probe as _probe_bridge_docx
-            _install_bridge_cursor(BRIDGE_DIR, _snapgen_startup_detail)
-            contract_ready, contract_detail = _probe_bridge_docx(BRIDGE_DIR, BRIDGE_PYTHON)
-            if not contract_ready:
-                raise RuntimeError("ติดตั้งแล้วแต่ DOCX capability probe ไม่ผ่าน: " + contract_detail)
-        except Exception as _contract_error:
-            print(f"[SnapGen] ERROR: ติดตั้ง Bridge มาตรฐานไม่สำเร็จ: {_contract_error}")
-            return False
-    if _bridge_health():
-        if _running_bridge_sees_local_accounts():
-            _snapgen_startup_detail("[SnapGen] Bridge ready ✓")
-            return True
-        # A Bridge from another chatgpt-api folder is still running and shows
-        # no accounts: restart it from the folder that holds the captures.
-        print(f"[SnapGen] Bridge ที่รันอยู่ไม่เห็นบัญชีใน {BRIDGE_DIR} — เปิด Bridge ใหม่จากโฟลเดอร์ที่มีบัญชี")
-        _snapgen_stop_bridge_for_dir(BRIDGE_DIR, BRIDGE_PORT)
-    _snapgen_startup_detail("[SnapGen] Cleaning bridge state...")
-    try:
-        out = subprocess.check_output(
-            f'netstat -ano | findstr ":{BRIDGE_PORT}"',
-            shell=True, text=True, timeout=5
-        )
-        for line in out.strip().split("\n"):
-            parts = line.strip().split()
-            if len(parts) >= 5 and parts[1].endswith(f":{BRIDGE_PORT}"):
-                pid = parts[-1]
-                try:
-                    subprocess.run(["taskkill", "/F", "/PID", pid],
-                                   capture_output=True, timeout=5)
-                    _snapgen_startup_detail(f"[SnapGen] Killed stale PID {pid} on port {BRIDGE_PORT}")
-                except Exception:
-                    pass
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                       capture_output=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:
         pass
 
-    _bridge_cleanup()
 
-    _snapgen_startup_detail("[SnapGen] Starting bridge...")
-    if not BRIDGE_PYTHON.exists():
-        print(f"[SnapGen] ERROR: Bridge python not found at {BRIDGE_PYTHON}")
-        return
-
-    _startup_cmd = [
-            str(BRIDGE_PYTHON), "-m", "chatgpt_api", "serve",
-            "--host", "0.0.0.0", "--port", str(BRIDGE_PORT),
-            "--api-key", BRIDGE_API_KEY,
-            "--account-strategy", "auto",
-            "--web-timeout", "600",
-            "--chat-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--upload-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--image-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--research-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--normal-chat",
-        ]
-    _accounts_root = BRIDGE_DIR / "secrets" / "accounts"
-    _accounts = sorted(p.name for p in _accounts_root.iterdir() if p.is_dir()) if _accounts_root.is_dir() else []
-    if _accounts:
-        _startup_cmd += ["--account", _accounts[0], "--accounts", ",".join(_accounts)]
-    subprocess.Popen(
-        _startup_cmd,
-        cwd=str(BRIDGE_DIR),
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-
-    for i in range(15):
-        time.sleep(1)
-        if _bridge_health():
-            _snapgen_startup_detail("[SnapGen] Bridge ready ✓")
-            return True
-    print("[SnapGen] WARNING: Bridge started but not responding after 15s")
-    return False
-
-_bridge_startup_sync()
-try:
-    if _error_reporter is not None:
-        _error_reporter.install_bridge_watchdog(
-            f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/health", BRIDGE_API_KEY
-        )
-except Exception as _bridge_watchdog_error:
-    print(f"[SnapGen] ERROR: Bridge watchdog install failed: {_bridge_watchdog_error}")
+threading.Thread(target=_stop_leftover_bridge, daemon=True).start()
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -913,9 +585,12 @@ try:
 except Exception as _local_slot_restore_error:
     print(f"[SnapGen] Local slot restore failed: {_local_slot_restore_error}", flush=True)
 
-# Override pyc's API base: each copy always uses its own local Bridge.
-g["_api_base"] = lambda: f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1"
-g["CHATGPT_API_BASE"] = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1"
+# Override pyc's API base: ChatGPT goes through the program's own API (Chrome extension), no Bridge.
+g["_api_base"] = lambda: _chatgpt_api_root() + "/v1"
+try:
+    g["CHATGPT_API_BASE"] = _chatgpt_api_root() + "/v1"
+except Exception:
+    g["CHATGPT_API_BASE"] = ""
 g["CHATGPT_API_KEY"] = "local-dev-key"
 
 def _snapgen_bridge_needs_login(msg):
@@ -1065,7 +740,7 @@ g["_snapgen_friendly_bridge_error"] = _snapgen_friendly_bridge_error
 try:
     import snapgen_image_gen as _imgmod
     _imgmod.set_config(
-        bridge_url=f"http://{BRIDGE_HOST}:{BRIDGE_PORT}",
+        bridge_url=_chatgpt_api_root(),
         bridge_key="local-dev-key",
         # Let the Bridge resolve the model from the selected account/capture.
         # Plan changes (Go/Plus/Pro) must not require editing this launcher.
@@ -6436,17 +6111,7 @@ def _add_settings_maintenance_buttons(settings_win):
                     state.set("กำลังตรวจและแก้ไข อาจมีการดาวน์โหลดเครื่องมือที่ขาด...")
                     def worker():
                         try:
-                            def patch_bridge_all(bridge_dir, patch_log):
-                                from snapgen_bridge_cursor_patch import install as install_prompt_ref_bridge
-                                install_prompt_ref_bridge(bridge_dir, patch_log)
-                                cookie_patch = g.get("_patch_bridge_cookie") or globals().get("_patch_bridge_cookie")
-                                if callable(cookie_patch):
-                                    cookie_patch(bridge_dir, patch_log)
-
-                            result = repair_mod.repair_all(
-                                BASE_ROOT, bridge_dir=BRIDGE_DIR, log=append,
-                                patch_bridge=patch_bridge_all,
-                             )
+                            result = repair_mod.repair_all(BASE_ROOT, log=append)
                             message = "พร้อมใช้งาน" if result.get("ok") else f"ยังเหลือ {len(result.get('failures', []))} ปัญหา"
                             root.after(0, lambda: state.set(message))
                         except Exception as exc:
@@ -7951,7 +7616,7 @@ def _chatgpt_api_base():
             return fn().rstrip("/")
         except Exception:
             pass
-    return g.get("CHATGPT_API_BASE", f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1").rstrip("/")
+    return (g.get("CHATGPT_API_BASE") or _chatgpt_api_root() + "/v1").rstrip("/")
 
 
 CODEX_PROMPT_MODEL = "gpt-5.4-mini"
@@ -8727,53 +8392,17 @@ def _prompt_ref_context_history_ready(story=None):
 
 
 def _extract_bridge_cursor(data):
-    """Read history cursor from current and older Bridge response layouts."""
-    from snapgen_bridge_cursor_patch import extract_cursor
+    """Read the history cursor of a ChatGPT reply."""
+    from snapgen_chrome_api import extract_cursor
     return extract_cursor(data)
 
 def _repair_prompt_ref_bridge_once():
-    """Repair old team-PC Bridge code automatically; preserve captures/accounts."""
-    with _prompt_ref_bridge_repair_lock:
-        if _prompt_ref_bridge_repaired[0]:
-            return False
-        _prompt_ref_bridge_repaired[0] = True
-        print("[SnapGen] Prompt-Ref Bridge เก่า — กำลังซ่อมและรีสตาร์ตอัตโนมัติ")
-        try:
-            from snapgen_system_repair import refresh_bridge_source
-            _snapgen_stop_bridge_for_dir(BRIDGE_DIR, BRIDGE_PORT)
-            refresh_bridge_source(BRIDGE_DIR, lambda message: print("[Bridge repair] " + str(message)))
-            from snapgen_bridge_cursor_patch import install as install_cursor
-            install_cursor(BRIDGE_DIR, lambda message: print("[Bridge repair] " + str(message)))
-            _patch_bridge_cookie(BRIDGE_DIR, lambda message: print("[Bridge repair] " + str(message)))
-            _bridge_startup_sync()
-            for _ in range(30):
-                if _bridge_health():
-                    return True
-                time.sleep(1)
-        except Exception as exc:
-            print(f"[SnapGen] ERROR: ซ่อม Bridge สำหรับ Prompt-Ref ไม่สำเร็จ: {exc}")
-        return False
+    """No separate Bridge to repair any more (ChatGPT goes through the Chrome extension)."""
+    return False
 
 
 def _rebuild_prompt_ref_bridge_once():
-    """Force a clean normal-chat runtime after health passes but chat closes."""
-    print("[SnapGen] Prompt-Ref normal-chat พัง — สร้าง Bridge runtime ใหม่อัตโนมัติ")
-    try:
-        from snapgen_system_repair import rebuild_bridge_runtime
-        _snapgen_stop_bridge_for_dir(BRIDGE_DIR, BRIDGE_PORT)
-        rebuild_bridge_runtime(BRIDGE_DIR, lambda message: print("[Bridge rebuild] " + str(message)))
-        from snapgen_bridge_cursor_patch import install as install_cursor
-        install_cursor(BRIDGE_DIR, lambda message: print("[Bridge rebuild] " + str(message)))
-        _patch_bridge_cookie(BRIDGE_DIR, lambda message: print("[Bridge rebuild] " + str(message)))
-        _bridge_startup_sync()
-        for _ in range(45):
-            if _bridge_health():
-                # Retry the original request in its saved conversation. A
-                # separate chat probe here used to replace the user's cursor.
-                return True
-            time.sleep(1)
-    except Exception as exc:
-        print(f"[SnapGen] ERROR: สร้าง Bridge runtime ใหม่ไม่สำเร็จ: {exc}")
+    """No separate Bridge to rebuild any more (ChatGPT goes through the Chrome extension)."""
     return False
 
 def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, model="auto"):
@@ -8976,15 +8605,7 @@ def _ingest_and_build_prompt_ref_context(full_story, source_file="auto"):
 
 
 def _attach_docx_and_build_prompt_ref_context(source_file, story_for_hash=""):
-    """Attach the real DOCX once, then request Context in that same history."""
-    from snapgen_bridge_cursor_patch import runtime_probe as _probe_bridge_docx
-    bridge_ready, bridge_detail = _probe_bridge_docx(BRIDGE_DIR, BRIDGE_PYTHON)
-    if not bridge_ready:
-        if not _repair_prompt_ref_bridge_once():
-            raise RuntimeError("Bridge เครื่องนี้ยังแนบ DOCX ไม่ได้: " + bridge_detail)
-        bridge_ready, bridge_detail = _probe_bridge_docx(BRIDGE_DIR, BRIDGE_PYTHON)
-        if not bridge_ready:
-            raise RuntimeError("ซ่อม Bridge แล้วแต่ยังแนบ DOCX ไม่ได้: " + bridge_detail)
+    """Attach the real DOCX once, then request Context in that same history (sent to ChatGPT as its text)."""
     source = Path(source_file).resolve()
     if not source.is_file():
         raise RuntimeError(f"ไม่พบไฟล์บทหลัก: {source}")
@@ -10492,7 +10113,7 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
     if bound_account:
         vision_payload["chatgpt_account"] = bound_account
     request = urllib.request.Request(
-        "http://127.0.0.1:8000/v1/chatgpt/vision",
+        _chatgpt_api_root() + "/v1/chatgpt/vision",
         data=json.dumps(vision_payload, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"},
         method="POST",
@@ -12639,9 +12260,9 @@ def _open_prompt_bank_ai():
             status.set("Context JSON ยังไม่อยู่ในประวัติ Prompt-Ref เดิม")
             g["show_error"]("Prompt-Ref", "วางบททั้งเรื่องในช่อง แล้วกด เริ่มเรื่องจากบทนี้ ก่อน")
             return
-        # Prompt splitting uses this workstation's Bridge at 127.0.0.1:8000,
+        # Prompt splitting uses the program's own ChatGPT API (Chrome extension),
         # exactly like image generation.  Tailscale is only connectivity/status
-        # information and must not block a healthy local Bridge.  On many PCs
+        # information and must not block it.  On many PCs
         # the Tailscale GUI is running while tailscale.exe is absent from PATH,
         # which made this page report a false "Tailscale ไม่ได้รัน".
         gen_btn.config(state="disabled"); set_status_light("#3B82F6")
@@ -13031,221 +12652,6 @@ def _run_prompt_ref_storyboard_workflow(story_text, progress=None):
 g["open_prompt_bank"] = _open_prompt_bank_ai
 
 
-def _patch_bridge_cookie(bridge_dir, log_fn=None):
-    """Auto-patch openai_compat.py + cli.py after fresh install/clone.
-    3 patches: cookie→recommended when auth present, save filter→required only, CLI filter→required only."""
-    patches = [
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '_add_admin_check(checks, "cookie", "required",',
-            '_add_admin_check(checks, "cookie", "recommended" if headers.get("authorization") else "required",',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            'if check.get("level") in {"required", "recommended"} and not check.get("ok")',
-            'if check.get("level") == "required" and not check.get("ok")',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '"gpt-image-1": "auto",\n        "dall-e-3": "auto",\n        "dall-e-2": "auto",\n        "chatgpt-image": "auto",',
-            '"gpt-image-1": "auto",\n        "dall-e-3": "auto",\n        "dall-e-2": "auto",\n        "chatgpt-image": "auto",',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '"gpt-image-1": "gpt-5-5",\n        "dall-e-3": "gpt-5-5",\n        "dall-e-2": "gpt-5-5",\n        "chatgpt-image": "gpt-5-5",',
-            '"gpt-image-1": "auto",\n        "dall-e-3": "auto",\n        "dall-e-2": "auto",\n        "chatgpt-image": "auto",',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "cli.py",
-            'if check.get("level") in {"required", "recommended"} and not check.get("ok"):',
-            'if check.get("level") == "required" and not check.get("ok"):',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            'def _accounts_for_config(config: OpenAICompatConfig) -> tuple[str, ...]:',
-            'def _snapgen_bridge_account_email(config: OpenAICompatConfig, account: str) -> str | None:\n'
-            '    """Return the full ChatGPT email for SnapGen\'s authenticated /health UI."""\n'
-            '    try:\n'
-            '        capture = CapturedRequest.from_file(resolve_account_capture_path(account, config.accounts_dir))\n'
-            '        settings_path = resolve_account_settings_path(account, config.accounts_dir)\n'
-            '        settings = load_settings_file(str(settings_path)) if settings_path.exists() else {}\n'
-            '        return detect_account_info(capture, settings).email\n'
-            '    except Exception:\n'
-            '        return None\n\n\n'
-            'def _accounts_for_config(config: OpenAICompatConfig) -> tuple[str, ...]:',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '                        "account": router.accounts[0],\n                        "accounts": list(router.accounts),',
-            '                        "account": router.accounts[0],\n                        "account_email": _snapgen_bridge_account_email(config, router.accounts[0]),\n                        "accounts": list(router.accounts),',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '_FEATURE_LIMITS: dict[tuple[str, str], int] = {}\n\n\n@dataclass(slots=True)',
-            '_FEATURE_LIMITS: dict[tuple[str, str], int] = {}\n\n'
-            '# SnapGen global image queue: every computer shares one Bridge and one image slot.\n'
-            '_SNAPGEN_IMAGE_GATE = threading.Lock()\n'
-            '_SNAPGEN_IMAGE_QUEUE_STATE_LOCK = threading.Lock()\n'
-            '_SNAPGEN_IMAGE_QUEUE_WAITING = 0\n'
-            '_SNAPGEN_IMAGE_QUEUE_RUNNING = 0\n\n\n'
-            'def _snapgen_image_queue_enter() -> None:\n'
-            '    global _SNAPGEN_IMAGE_QUEUE_WAITING, _SNAPGEN_IMAGE_QUEUE_RUNNING\n'
-            '    with _SNAPGEN_IMAGE_QUEUE_STATE_LOCK:\n'
-            '        _SNAPGEN_IMAGE_QUEUE_WAITING += 1\n'
-            '    _SNAPGEN_IMAGE_GATE.acquire()\n'
-            '    with _SNAPGEN_IMAGE_QUEUE_STATE_LOCK:\n'
-            '        _SNAPGEN_IMAGE_QUEUE_WAITING = max(0, _SNAPGEN_IMAGE_QUEUE_WAITING - 1)\n'
-            '        _SNAPGEN_IMAGE_QUEUE_RUNNING = 1\n\n\n'
-            'def _snapgen_image_queue_leave() -> None:\n'
-            '    global _SNAPGEN_IMAGE_QUEUE_RUNNING\n'
-            '    with _SNAPGEN_IMAGE_QUEUE_STATE_LOCK:\n'
-            '        _SNAPGEN_IMAGE_QUEUE_RUNNING = 0\n'
-            '    _SNAPGEN_IMAGE_GATE.release()\n\n\n'
-            'def _snapgen_image_queue_status() -> tuple[int, int]:\n'
-            '    with _SNAPGEN_IMAGE_QUEUE_STATE_LOCK:\n'
-            '        return _SNAPGEN_IMAGE_QUEUE_RUNNING, _SNAPGEN_IMAGE_QUEUE_WAITING\n\n\n'
-            '@dataclass(slots=True)',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '                _mark_stale_pending_operations(now)\n                with _CHATGPT_OPERATIONS_LOCK:',
-            '                _mark_stale_pending_operations(now)\n                image_running, image_waiting = _snapgen_image_queue_status()\n                with _CHATGPT_OPERATIONS_LOCK:',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '                        "active_operation_details": active_details,\n                        "artifact_downloads": {',
-            '                        "active_operation_details": active_details,\n'
-            '                        "image_queue": {"running": image_running, "waiting": image_waiting, "global_limit": 1},\n'
-            '                        "artifact_downloads": {',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '    if path == "/v1/chatgpt/admin/captures/save":\n        return _save_account_capture_payload(config, body)',
-            '    if path == "/v1/chatgpt/admin/captures/save":\n'
-            '        status, payload = _save_account_capture_payload(config, body)\n'
-            '        if status == 200:\n'
-            '            account = _safe_account_name(_str_or_none(body.get("account")) or config.account)\n'
-            '            if account not in router.accounts:\n'
-            '                router.accounts = tuple(dict.fromkeys((*router.accounts, account)))\n'
-            '                _configure_account_limits(config, router)\n'
-            '            payload["routing_accounts"] = list(router.accounts)\n'
-            '        return status, payload',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '        account_strategy=os.environ.get("CHATGPT_ACCOUNT_STRATEGY") or "auto",\n        image_output_dir=Path("outputs/chatgpt-images"),',
-            '        account_strategy=os.environ.get("CHATGPT_ACCOUNT_STRATEGY") or "auto",\n'
-            '        web_timeout=float(os.environ.get("CHATGPT_IMAGE_WEB_TIMEOUT") or "120"),\n'
-            '        admin_db_path=Path(os.environ.get("CHATGPT_ADMIN_DB_PATH") or "outputs/chatgpt-admin.sqlite"),\n'
-            '        image_output_dir=Path("outputs/chatgpt-images"),',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '            timeout=600,\n        )\n    finally:\n        try:\n            os.remove(payload_path)',
-            '            timeout=180,\n        )\n    finally:\n        try:\n            os.remove(payload_path)',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '            timeout=300,\n        )\n    finally:\n        try:\n            os.remove(payload_path)',
-            '            timeout=180,\n        )\n    finally:\n        try:\n            os.remove(payload_path)',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "providers" / "chatgpt" / "transport.py",
-            '            time.sleep(max(poll_interval, 0.5))\n        return []\n\n    def _download_generated_image(',
-            '            time.sleep(max(poll_interval, 0.5))\n'
-            '        try:\n'
-            '            self.stop_conversation(conversation_id, exclude_async_types=["pro_mode"])\n'
-            '        except ProviderError:\n'
-            '            pass\n'
-            '        raise ProviderError(\n'
-            '            f"ChatGPT image task did not finish within {int(max(timeout, 1.0))} seconds; "\n'
-            '            "the stuck web conversation was stopped"\n'
-            '        )\n\n'
-            '    def _download_generated_image(',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "providers" / "chatgpt" / "transport.py",
-            '        images = [self._download_generated_image(asset, headers, conversation_id) for asset in assets]',
-            '        images = [self._download_generated_image(assets[0], headers, conversation_id)]',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "providers" / "chatgpt" / "transport.py",
-            '                if _conversation_id_from_events(events) and _contains_image_task_marker(event):\n'
-            '                    task_started = True\n'
-            '                    break',
-            '                # Poll as soon as ChatGPT assigns the image conversation.\n'
-            '                if _conversation_id_from_events(events):\n'
-            '                    task_started = True\n'
-            '                    break',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "providers" / "chatgpt" / "transport.py",
-            '                poll_interval=float(request.metadata.get("poll_interval", 3.0)),',
-            '                poll_interval=float(request.metadata.get("poll_interval", 8.0)),',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "providers" / "chatgpt" / "transport.py",
-            '            if response.status_code >= 400:\n'
-            '                raise ProviderError(f"ChatGPT conversation poll failed: {response.status_code} {_body_preview(response)}")\n'
-            '            data = _json_response(response)',
-            '            if response.status_code == 429:\n'
-            '                retry_after = response.headers.get("retry-after")\n'
-            '                try:\n'
-            '                    delay = float(retry_after) if retry_after else 15.0\n'
-            '                except (TypeError, ValueError):\n'
-            '                    delay = 15.0\n'
-            '                time.sleep(max(poll_interval, min(delay, 30.0)))\n'
-            '                continue\n'
-            '            if response.status_code >= 400:\n'
-            '                raise ProviderError(f"ChatGPT conversation poll failed: {response.status_code} {_body_preview(response)}")\n'
-            '            data = _json_response(response)',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '    print("__CHATGPT_IMAGE_RESULT__" + json.dumps(result, ensure_ascii=False))',
-            '    print("__CHATGPT_IMAGE_RESULT__" + json.dumps(result, ensure_ascii=True))',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "providers" / "chatgpt" / "transport.py",
-            '        "x-openai-target-route",\n    }\n    refreshed = {',
-            '        "x-openai-target-route",\n'
-            '        "openai-sentinel-turnstile-token",\n'
-            '    }\n    refreshed = {',
-        ),
-        (
-            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '                elif path == "/v1/images/generations":\n                    response = _image_generation_subprocess(config, body)\n                elif path == "/v1/images/edits":\n                    response = asyncio.run(_image_edit(config, body, router))',
-            '                elif path == "/v1/images/generations":\n'
-            '                    _snapgen_image_queue_enter()\n'
-            '                    try:\n'
-            '                        response = _image_generation_subprocess(config, body)\n'
-            '                    finally:\n'
-            '                        _snapgen_image_queue_leave()\n'
-            '                elif path == "/v1/images/edits":\n'
-            '                    _snapgen_image_queue_enter()\n'
-            '                    try:\n'
-            '                        response = asyncio.run(_image_edit(config, body, router))\n'
-            '                    finally:\n'
-            '                        _snapgen_image_queue_leave()',
-        ),
-    ]
-    for fpath, old, new in patches:
-        try:
-            if not fpath.exists():
-                continue
-            txt = fpath.read_text(encoding="utf-8")
-            if old in txt and new not in txt:
-                fpath.write_text(txt.replace(old, new, 1), encoding="utf-8")
-                if log_fn:
-                    log_fn(f"✅ patched {fpath.name}: {old[:40]}...")
-            elif new in txt:
-                if log_fn:
-                    log_fn(f"✓ already patched {fpath.name}")
-        except Exception as e:
-            if log_fn:
-                log_fn(f"⚠ patch {fpath.name} failed: {e}")
-
-
 # Rewire existing Prompt-Ref buttons created by old pyc.
 def _rewire_prompt_buttons(w):
     try:
@@ -13482,7 +12888,7 @@ def _restore_image_mode_latest():
     g["_encode_image_b64"] = _encode_image_b64
     def _api_base():
         fn=g.get("_api_base")
-        return fn() if callable(fn) else g.get("CHATGPT_API_BASE", f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1")
+        return fn() if callable(fn) else (g.get("CHATGPT_API_BASE") or _chatgpt_api_root() + "/v1")
     def _do_image_request(payload, is_edit=False, prompt="", name_hint=None, raw_prompt=None, prompt_index=None, output_dir=None, save_sidecar=False):
         """ทุกปุ่มสร้างรูปเรียกโมดูล snapgen_image_gen.py ผ่าน adapter นี้."""
         p = prompt or raw_prompt or payload.get("prompt", "")
@@ -14707,1215 +14113,11 @@ def _restore_image_mode_latest():
 _restore_image_mode_latest()
 
 
-def _add_bridge_trash_button():
-    old_manage = g.get("manage_bridge")
-    if not callable(old_manage):
-        return
-
-    def _kill_bridge_port(port=8000):
-        try:
-            out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10).stdout
-            pids = set()
-            for line in out.splitlines():
-                if f":{port}" in line and "LISTENING" in line:
-                    parts = line.split()
-                    if parts:
-                        pids.add(parts[-1])
-            for pid in pids:
-                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-
-    def _trash_bridge_folder(win=None):
-        import shutil, time
-        from tkinter import messagebox
-        bridge_dir = Path(g.get("BRIDGE_DIR", str(Path.home() / "chatgpt-api")))
-        if not bridge_dir.exists():
-            messagebox.showinfo("GPT Bridge", f"ไม่พบโฟลเดอร์:\n{bridge_dir}")
-            return
-        try:
-            sample = []
-            total = 0
-            for root_dir, dirs, files in os.walk(bridge_dir):
-                for name in files:
-                    p = Path(root_dir) / name
-                    total += p.stat().st_size if p.exists() else 0
-                    if len(sample) < 8:
-                        sample.append(str(p.relative_to(bridge_dir)))
-        except Exception:
-            sample, total = [], 0
-        msg = (
-            "จะย้าย GPT bridge ทั้งโฟลเดอร์ไป trash-agent (ไม่ลบทิ้งถาวร)\n\n"
-            f"จาก: {bridge_dir}\n"
-            f"ขนาดประมาณ: {total/1024/1024:.1f} MB\n"
-            f"ตัวอย่างไฟล์:\n- " + "\n- ".join(sample[:8]) + "\n\n"
-            "กด OK เพื่อย้าย"
-        )
-        if not messagebox.askokcancel("ลบ GPT Bridge", msg):
-            return
-        try:
-            dest = _snapgen_trash_bridge_folder(bridge_dir)
-            messagebox.showinfo("GPT Bridge", f"ย้ายแล้ว:\n{dest}\n\nกด 📦 ติดตั้ง เพื่อลงใหม่")
-            try:
-                if win and win.winfo_exists():
-                    win.destroy()
-            except Exception:
-                pass
-        except Exception as e:
-            messagebox.showerror("ลบ GPT Bridge ไม่สำเร็จ", str(e) + "\n\nถ้ายังขึ้น Access denied ให้ปิด Chrome/โปรแกรมที่กำลังใช้ Bridge แล้วกดลบใหม่")
-
-    def manage_bridge_with_trash(*args, **kwargs):
-        before = set(root.winfo_children()) if root else set()
-        result = old_manage(*args, **kwargs)
-        try:
-            wins = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel) and w not in before]
-            win = wins[-1] if wins else None
-            if win:
-                btn = tk.Button(win, text="🗑", width=2, fg="#B71C1C", command=lambda w=win: _trash_bridge_folder(w))
-                btn.place(relx=1.0, y=6, anchor="ne")
-                btn.lift()
-        except Exception:
-            pass
-        return result
-
-    g["manage_bridge"] = manage_bridge_with_trash
-
-
-_add_bridge_trash_button()
 
 
 def _install_better_bridge_manager():
-    import socket, shutil, time
+    """The old Bridge Manager is gone: every "Bridge" button opens the Chrome extension window."""
     from tkinter import messagebox
-    BRIDGE_DIR = Path(g.get("BRIDGE_DIR", str(Path.home() / "chatgpt-api")))
-    BRIDGE_SERVER = "127.0.0.1"
-    API_KEY = g.get("CHATGPT_API_KEY", "local-dev-key")
-    bridge_proc = [None]
-    bridge_port = [8000]
-
-    def log_to(box, msg):
-        box.insert(tk.END, msg.rstrip() + "\n")
-        box.see(tk.END)
-        try: box.update_idletasks()
-        except Exception: pass
-
-    def port_open(port):
-        try:
-            with socket.create_connection((BRIDGE_SERVER, int(port)), timeout=0.4):
-                return True
-        except OSError:
-            return False
-
-    def health(port):
-        try:
-            import urllib.request
-            request = urllib.request.Request(
-                f"http://{BRIDGE_SERVER}:{port}/health",
-                headers={"Authorization": f"Bearer {API_KEY}"},
-            )
-            with urllib.request.urlopen(request, timeout=2) as response:
-                data = json.loads(response.read().decode("utf-8", "replace"))
-            return bool(data.get("ok")), data
-        except Exception as e:
-            return False, {"error": str(e)}
-
-    def remote_admin(path, body=None):
-        """Call this workstation's local Bridge Admin API."""
-        import urllib.error
-        import urllib.request
-        url = f"http://{BRIDGE_SERVER}:8000/v1/chatgpt/admin/{str(path).lstrip('/')}"
-        headers = {"Authorization": f"Bearer {API_KEY}"}
-        data = None
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(url, data=data, headers=headers, method=("POST" if body is not None else "GET"))
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                return json.loads(response.read().decode("utf-8", "replace"))
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", "replace")
-            try:
-                detail = json.loads(raw)
-            except Exception:
-                detail = raw
-            raise RuntimeError(json.dumps(detail, ensure_ascii=False) if isinstance(detail, (dict, list)) else str(detail)) from exc
-
-    def remote_account_rows():
-        try:
-            payload = remote_admin("accounts")
-            rows = payload.get("accounts") if isinstance(payload, dict) else []
-            if not isinstance(rows, list):
-                return []
-            # A Bridge with no captures starts with an internal `free`/`default`
-            # router alias so its Admin API remains reachable. Do not present
-            # that alias as a real saved Account in Settings.
-            return [
-                row for row in rows
-                if isinstance(row, dict) and (
-                    row.get("capture_exists")
-                    or row.get("settings_exists")
-                    or bool(row.get("stored"))
-                 )
-            ]
-        except Exception:
-            return []
-
-    def find_bridge_port():
-        # Fast path only. Never curl every port from UI thread; dead ports can freeze Tk.
-        first_free = None
-        for p in range(8000, 8021):
-            if port_open(p):
-                ok, data = health(p)
-                if ok:
-                    return p, "running"
-            elif first_free is None:
-                first_free = p
-        return (first_free, "free") if first_free else (8000, "blocked")
-
-    def account_dirs():
-        d = BRIDGE_DIR / "secrets" / "accounts"
-        if not d.exists():
-            return []
-        return sorted([p.name for p in d.iterdir() if p.is_dir() and not p.name.startswith(".")])
-
-    def is_primary_bridge_machine():
-        # Compatibility name retained for existing UI callbacks. Under the
-        # per-machine design every workstation is its own Bridge machine.
-        return True
-
-    def write_env(account=None):
-        accounts = account_dirs()
-        acct = account or (accounts[0] if accounts else "")
-        ordered = ([acct] if acct else []) + [name for name in accounts if name != acct]
-        lines = [
-            f"CHATGPT_API_KEY={API_KEY}",
-            "CHATGPT_ACCOUNTS_DIR=./secrets/accounts",
-            "CHATGPT_ACCOUNT_STRATEGY=auto",
-        ]
-        if acct:
-            lines += [f"CHATGPT_ACCOUNT={acct}", f"CHATGPT_ACCOUNTS={','.join(ordered)}"]
-        (BRIDGE_DIR / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return acct
-
-    def install_autostart(port=8000):
-        starter = BRIDGE_DIR / "start_bridge.py"
-        starter.write_text(
-            "import os, socket, subprocess, sys\n"
-            "from pathlib import Path\n"
-            "BASE=Path(__file__).resolve().parent\n"
-            "PY=BASE/'.venv'/'Scripts'/'pythonw.exe'\n"
-            "def openp(p):\n"
-            "    import socket\n"
-            "    try:\n"
-            f"        s=socket.create_connection(('{BRIDGE_SERVER}',p),0.4); s.close(); return True\n"
-            "    except OSError: return False\n"
-            "def load_env():\n"
-            "    env=os.environ.copy()\n"
-            "    ef=BASE/'.env'\n"
-            "    if ef.exists():\n"
-            "        for line in ef.read_text(encoding='utf-8').splitlines():\n"
-            "            line=line.strip()\n"
-            "            if line and not line.startswith('#') and '=' in line:\n"
-            "                k,v=line.split('=',1)\n"
-            "                env[k.strip()]=v.strip()\n"
-            "    return env\n"
-            "port=8000\n"
-            "if openp(port): sys.exit(0)\n"
-            "env=load_env()\n"
-            "subprocess.Popen([str(PY),'-m','chatgpt_api','serve','--host','0.0.0.0','--port',str(port),'--api-key','local-dev-key'], cwd=str(BASE), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n",
-            encoding="utf-8"
-        )
-        startup = Path(os.environ.get("APPDATA", str(Path.home()/"AppData/Roaming"))) / "Microsoft/Windows/Start Menu/Programs/Startup"
-        startup.mkdir(parents=True, exist_ok=True)
-        vbs = startup / "chatgpt-bridge-autostart.vbs"
-        vbs.write_text(f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run """{BRIDGE_DIR / ".venv" / "Scripts" / "pythonw.exe"}"" """{starter}""", 0, False\n', encoding="utf-8")
-        return vbs
-
-    def kill_bridge_servers(log_box=None):
-        killed = set()
-        try:
-            out = subprocess.run(["wmic", "process", "get", "name,processid,commandline", "/format:csv"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10).stdout
-            pids = set()
-            for line in out.replace("\
-", "\\n").splitlines():
-                low = line.lower()
-                if "chatgpt_api" in low and "serve" in low and "python" in low:
-                    pid = line.rsplit(",", 1)[-1].strip()
-                    if pid.isdigit():
-                        pids.add(pid)
-            for line in out.replace("\
-", "\\n").splitlines():
-                low = line.lower()
-                if ("bash" in low or "cmd" in low or "sh" in low) and "chatgpt_api" in low and "serve" in low:
-                    pid = line.rsplit(",", 1)[-1].strip()
-                    if pid.isdigit():
-                        pids.add(pid)
-            for pid in sorted(pids):
-                if pid not in killed:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
-                    killed.add(pid)
-        except Exception as e:
-            if log_box is not None:
-                log_to(log_box, "⚠ kill bridge เก่าไม่สำเร็จ: " + str(e))
-        return killed
-
-    def start_bridge(log_box, account=None):
-        if not (BRIDGE_DIR / ".venv" / "Scripts" / "python.exe").exists():
-            log_to(log_box, "❌ ยังไม่ได้ติดตั้ง venv — กด 📦 ติดตั้งก่อน")
-            return False
-        port, state = find_bridge_port()
-        bridge_port[0] = port
-        if state == "running":
-            ok, data = health(port)
-            wanted_accounts = account_dirs()
-            running_account = data.get("account")
-            running_strategy = str(data.get("account_strategy") or "").strip().lower()
-            need_switch = bool(account and running_account != account)
-            stale_account = bool(wanted_accounts and running_account not in wanted_accounts)
-            strategy_mismatch = running_strategy != "auto"
-            if need_switch or stale_account or strategy_mismatch:
-                if strategy_mismatch:
-                    reason = f"account strategy={running_strategy or 'ไม่ทราบ'} ไม่ใช่ auto"
-                elif need_switch:
-                    reason = f"ต้องสลับไปใช้ account={account}"
-                else:
-                    reason = f"account={running_account} ไม่อยู่ใน accounts จริง={wanted_accounts}"
-                log_to(log_box, f"⚠ Bridge รันด้วย account={running_account} — {reason} — รีสตาร์ท")
-                try:
-                    killed = kill_bridge_servers(log_box)
-                    out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10).stdout
-                    for line in out.splitlines():
-                        if f":{port}" in line and "LISTENING" in line:
-                            pid = line.split()[-1]
-                            if pid not in killed:
-                                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
-                                killed.add(pid)
-                    if killed:
-                        log_to(log_box, "ปิด bridge เก่าแล้ว: " + ", ".join(sorted(killed)))
-                    time.sleep(1)
-                    state = "free"
-                except Exception as e:
-                    log_to(log_box, "❌ รีสตาร์ท bridge ไม่สำเร็จ: " + str(e))
-                    return False
-            else:
-                log_to(log_box, f"✅ Bridge เครื่องนี้รันอยู่แล้ว: http://{BRIDGE_SERVER}:{port}/v1 | account={running_account}")
-                return True
-        if state == "blocked":
-            log_to(log_box, "❌ port 8000-8020 เต็มทั้งหมด — ปิดโปรแกรมที่กิน port ก่อน")
-            return False
-        acct = write_env(account)
-        kill_bridge_servers(log_box)
-        env = os.environ.copy()
-
-        if acct:
-            all_accounts = account_dirs()
-            ordered_accounts = [acct] + [name for name in all_accounts if name != acct]
-            env["CHATGPT_ACCOUNT"] = acct
-            env["CHATGPT_ACCOUNTS"] = ",".join(ordered_accounts)
-        env["CHATGPT_ACCOUNTS_DIR"] = "./secrets/accounts"
-        env["CHATGPT_CHAT_CONCURRENCY"] = "free=1,go=1,plus=1,pro=1"
-        env["CHATGPT_UPLOAD_CONCURRENCY"] = "free=1,go=1,plus=1,pro=1"
-        env["CHATGPT_IMAGE_CONCURRENCY"] = "free=1,go=1,plus=1,pro=1"
-        env["CHATGPT_RESEARCH_CONCURRENCY"] = "free=1,go=1,plus=1,pro=1"
-        cmd = [
-            str(BRIDGE_DIR/".venv"/"Scripts"/"python.exe"), "-m", "chatgpt_api", "serve",
-            "--host", "0.0.0.0", "--port", str(port), "--api-key", API_KEY,
-            "--account-strategy", "auto", "--web-timeout", "600",
-            "--chat-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--upload-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--image-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--research-concurrency", "free=1,go=1,plus=1,pro=1",
-            "--normal-chat",
-        ]
-        if acct:
-            cmd += ["--account", acct, "--accounts", ",".join(ordered_accounts)]
-
-        log_to(log_box, f"เริ่ม Bridge เครื่องนี้: http://{BRIDGE_SERVER}:{port}/v1" + (f" | account={acct}" if acct else " | ยังไม่มี account"))
-        bridge_proc[0] = subprocess.Popen(cmd, cwd=str(BRIDGE_DIR), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-        for _ in range(30):
-            ok, data = health(port)
-            if ok:
-                running = str(data.get("account") or "")
-                if acct and running != acct:
-                    log_to(log_box, f"⚠ Bridge ยังเป็น account={running} ไม่ใช่ {acct} — รอใหม่")
-                    time.sleep(1)
-                    continue
-                log_to(log_box, f"✅ Bridge เครื่องนี้พร้อมใช้: http://{BRIDGE_SERVER}:{port}/v1 | account={data.get('account')}")
-                return True
-            time.sleep(1)
-        try:
-            out = bridge_proc[0].stdout.read(1200) if bridge_proc[0].stdout else ""
-        except Exception:
-            out = ""
-        log_to(log_box, "❌ Bridge เริ่มไม่ติด\n" + (out or "ไม่มี log จาก process"))
-        log_to(log_box, "วิธีแก้: กด 🗑 ลบ bridge → กด 📦 ติดตั้งใหม่ → วาง cURL → 🔑 เพิ่ม Account")
-        return False
-
-    def trash_bridge(win=None):
-        bridge_dir = BRIDGE_DIR
-        if not bridge_dir.exists():
-            messagebox.showinfo("GPT Bridge", f"ไม่พบโฟลเดอร์:\n{bridge_dir}")
-            return
-        sample=[]; total=0
-        for rd, _dirs, files in os.walk(bridge_dir):
-            for name in files:
-                p=Path(rd)/name
-                try: total += p.stat().st_size
-                except Exception: pass
-                if len(sample)<8: sample.append(str(p.relative_to(bridge_dir)))
-        if not messagebox.askokcancel("ลบ GPT Bridge", "จะย้ายทั้งโฟลเดอร์ไป trash-agent (ไม่ลบถาวร)\n\nจาก: " + str(bridge_dir) + f"\nขนาดประมาณ: {total/1024/1024:.1f} MB\n\n- " + "\n- ".join(sample[:8])):
-            return
-        try:
-            if bridge_proc[0]:
-                bridge_proc[0].terminate()
-        except Exception:
-            pass
-        try:
-            dest = _snapgen_trash_bridge_folder(bridge_dir)
-            messagebox.showinfo("GPT Bridge", f"ย้ายแล้ว:\n{dest}\n\nกด 📦 ติดตั้ง เพื่อลงใหม่")
-            if win and win.winfo_exists(): win.destroy()
-        except Exception as e:
-            messagebox.showerror("ลบ GPT Bridge ไม่สำเร็จ", str(e) + "\n\nถ้ายังขึ้น Access denied ให้ปิด Chrome/โปรแกรมที่กำลังใช้ Bridge แล้วกดลบใหม่")
-
-    def manage_bridge_new():
-        # Settings dialog may own a modal grab; release it or Bridge Manager cannot receive clicks.
-        try:
-            grabbed = root.grab_current()
-            if grabbed:
-                grabbed.grab_release()
-        except Exception:
-            pass
-        win = tk.Toplevel(root)
-        win.title("ChatGPT API Bridge Manager")
-        win.geometry("760x620")
-        win.transient(root)
-        try:
-            win.grab_set()
-        except Exception:
-            pass
-        header = tk.Frame(win); header.pack(fill="x", padx=8, pady=6)
-        tk.Label(header, text="GPT Bridge", font=(SNAPGEN_UI_FONT, 12, "bold")).pack(side="left")
-        tk.Button(header, text="🗑", width=2, fg="#B71C1C", command=lambda: trash_bridge(win)).pack(side="right")
-        status = tk.StringVar(value="กำลังตรวจสอบ...")
-        tk.Label(win, textvariable=status, anchor="w", fg="#555").pack(fill="x", padx=8)
-        curl_frame = tk.LabelFrame(win, text="วาง cURL จาก ChatGPT")
-        curl_frame.pack(fill="both", expand=True, padx=8, pady=6)
-        tk.Label(curl_frame, text="ใช้ได้ 2 ทาง: 1) เปิดและจับอัตโนมัติ แล้วส่งข้อความ 1 ครั้ง  2) F12 > Network > Copy as cURL แล้วกดวางจาก Clipboard (เพิ่ม Account ให้อัตโนมัติ)", fg="#555", wraplength=700, justify="left").pack(anchor="w", padx=6, pady=(4,0))
-        curl_box = tk.Text(curl_frame, height=8, wrap="word")
-        curl_box.pack(fill="both", expand=True, padx=6, pady=6)
-        browser_row = tk.Frame(curl_frame)
-        browser_row.pack(fill="x", padx=6, pady=(0, 6))
-        account_frame = tk.LabelFrame(win, text="Accounts")
-        account_frame.pack(fill="x", padx=8, pady=(0,6))
-        log_frame = tk.LabelFrame(win, text="Log")
-        log_frame.pack(fill="both", expand=True, padx=8, pady=6)
-        log_box = tk.Text(log_frame, height=10, bg="#111", fg="#E0E0E0", insertbackground="#E0E0E0")
-        log_box.pack(fill="both", expand=True, padx=4, pady=4)
-
-        def _chatgpt_capture_url():
-            return "https://chatgpt.com/?snapgen_capture=1"
-
-        def _find_chrome_exe():
-            candidates = [
-                Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-                Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-                Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Google" / "Chrome" / "Application" / "chrome.exe",
-            ]
-            for p in candidates:
-                if p.exists():
-                    return p
-            return None
-
-        capture_port = [None]
-        capture_process = [None]
-
-        def _pick_capture_port():
-            """Pick a free local DevTools port instead of assuming 9223 is free."""
-            import socket
-            for port in range(9223, 9244):
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                        sock.bind(("127.0.0.1", port))
-                    return port
-                except OSError:
-                    continue
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", 0))
-                return int(sock.getsockname()[1])
-
-        def _existing_capture_port():
-            """Reuse an already-open SnapGen Browser instead of losing its port."""
-            import urllib.request
-            for port in range(9223, 9244):
-                try:
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.15) as response:
-                        tabs = json.loads(response.read().decode("utf-8", "replace"))
-                    if any(
-                        tab.get("type") == "page" and "chatgpt.com" in str(tab.get("url", ""))
-                        for tab in tabs
-                     ):
-                        return port
-                except Exception:
-                    continue
-            return None
-
-        def open_snapgen_chrome():
-            chrome = _find_chrome_exe()
-            if not chrome:
-                log_to(log_box, "❌ ไม่พบ Chrome — ติดตั้ง Google Chrome ก่อน")
-                return False
-            # Browser data is machine/user specific. Keeping it inside the copied
-            # project can carry another PC's locks and broken DevTools state.
-            local_appdata = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
-            profile_dir = local_appdata / "TidMunStudio" / "SnapGenChromeProfile"
-            profile_dir.mkdir(parents=True, exist_ok=True)
-            port = _existing_capture_port() or _pick_capture_port()
-            capture_port[0] = port
-            try:
-                capture_process[0] = subprocess.Popen(
-                    [
-                        str(chrome),
-                        f"--user-data-dir={profile_dir}",
-                        "--profile-directory=Default",
-                        f"--remote-debugging-port={port}",
-                        "--remote-debugging-address=127.0.0.1",
-                        "--remote-allow-origins=*",
-                        "--new-window",
-                        _chatgpt_capture_url(),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                 )
-                log_to(log_box, f"เปิด SnapGen Chrome profile แล้ว (พอร์ต {port}): {profile_dir}")
-                log_to(log_box, "Chrome ปกติที่เปิดอยู่จับ request เองไม่ได้ ต้องใช้หน้าต่างนี้สำหรับจับ Account")
-                log_to(log_box, "ล็อกอิน ChatGPT ในหน้าต่างนี้ แล้วสร้างรูปทดสอบ 1 ครั้ง โปรแกรมจะจับ Account ให้เอง")
-                return True
-            except Exception as e:
-                log_to(log_box, "❌ เปิด SnapGen Chrome profile ไม่สำเร็จ: " + str(e))
-                capture_port[0] = None
-                return False
-
-        capture_running = [False]
-
-        def _shell_quote(value):
-            return "'" + str(value).replace("'", "'\"'\"'") + "'"
-
-        def _request_to_curl(url, method, headers, post_data):
-            header_lines = []
-            skip = {"content-length", "host", "origin", "referer"}
-            for key, value in (headers or {}).items():
-                k = str(key)
-                if k.lower() in skip:
-                    continue
-                header_lines.append(f"  -H {_shell_quote(k + ': ' + str(value))}")
-            parts = [f"curl {_shell_quote(url)}"]
-            if method and str(method).upper() != "GET":
-                parts.append(f"  -X {str(method).upper()}")
-            parts.extend(header_lines)
-            if post_data:
-                parts.append(f"  --data-raw {_shell_quote(post_data)}")
-            return " \\\n".join(parts)
-
-        def _valid_chatgpt_message_payload(post_data):
-            try:
-                data = json.loads(str(post_data or ""))
-            except Exception:
-                return False, "body ไม่ใช่ JSON"
-            if not isinstance(data, dict):
-                return False, "body ไม่ใช่ object"
-            action = data.get("action")
-            messages = data.get("messages")
-            if action not in {"next", "variant", "continue"}:
-                return False, "ยังไม่ใช่ request ที่ส่งข้อความจริง"
-            if action == "next" and not isinstance(messages, list):
-                return False, "ยังไม่มี messages"
-            if action == "next" and not messages:
-                return False, "messages ว่าง"
-            return True, ""
-
-        def _ensure_websocket_client():
-            try:
-                import websocket  # noqa: F401
-                return True
-            except Exception:
-                pass
-            py = Path(sys.executable)
-            log_to(log_box, "กำลังติดตั้ง websocket-client สำหรับจับ request อัตโนมัติ...")
-            r = subprocess.run(
-                [str(py), "-m", "pip", "install", "websocket-client"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
-            )
-            if r.returncode:
-                log_to(log_box, "❌ ติดตั้ง websocket-client ไม่สำเร็จ: " + (r.stderr or r.stdout)[-800:])
-                return False
-            try:
-                import websocket  # noqa: F401
-                return True
-            except Exception as e:
-                log_to(log_box, "❌ import websocket-client ไม่สำเร็จ: " + str(e))
-                return False
-
-        def _chrome_json(path):
-            import urllib.request
-            port = capture_port[0]
-            if not port:
-                raise RuntimeError("ยังไม่มีพอร์ต SnapGen Browser")
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}" + path, timeout=3) as response:
-                return json.loads(response.read().decode("utf-8", "replace"))
-
-        def _find_chatgpt_ws_url(timeout=45):
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                try:
-                    tabs = _chrome_json("/json/list")
-                    # Always prefer the tab opened by this capture button. On PCs
-                    # that restore several ChatGPT tabs, choosing the first tab
-                    # silently listens to the wrong conversation.
-                    for tab in tabs:
-                        url = str(tab.get("url", ""))
-                        if tab.get("type") == "page" and "chatgpt.com" in url and "snapgen_capture=1" in url:
-                            ws = tab.get("webSocketDebuggerUrl")
-                            if ws:
-                                return ws
-                    for tab in tabs:
-                        if tab.get("type") == "page" and "chatgpt.com" in str(tab.get("url", "")):
-                            ws = tab.get("webSocketDebuggerUrl")
-                            if ws:
-                                return ws
-                    for tab in tabs:
-                        if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
-                            return tab.get("webSocketDebuggerUrl")
-                except Exception:
-                    pass
-                time.sleep(1)
-            return None
-
-        def start_auto_capture():
-            if capture_running[0]:
-                log_to(log_box, "กำลังจับ request อยู่แล้ว — ไปที่ SnapGen Browser แล้วกดสร้างรูปได้เลย")
-                return
-            if not open_snapgen_chrome():
-                return
-            capture_running[0] = True
-
-            def worker():
-                try:
-                    if not _ensure_websocket_client():
-                        return
-                    import websocket
-                    ws_url = _find_chatgpt_ws_url()
-                    if not ws_url:
-                        log_to(log_box, "❌ ต่อ SnapGen Browser ไม่ได้ — ปิดหน้าต่างนั้นแล้วกดเปิดใหม่")
-                        return
-                    ws = websocket.create_connection(
-                        ws_url,
-                        timeout=5,
-                        origin=f"http://127.0.0.1:{capture_port[0]}",
-                     )
-                    ws.settimeout(1)
-                    seq = [1]
-                    post_data_wait = {}
-                    requests_seen = {}
-                    extra_headers_wait = {}
-                    browser_cookie_header = [""]
-                    cookie_request_id = [None]
-                    captured = [False]
-
-                    def send(method, params=None, tag=None):
-                        seq[0] += 1
-                        msg_id = seq[0]
-                        if tag:
-                            post_data_wait[msg_id] = tag
-                        ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
-                        return msg_id
-
-                    def finish_capture(data, force=False):
-                        if captured[0] or not data or not data.get("postData"):
-                            return False
-                        # Chrome may omit Cookie from requestWillBeSent and
-                        # deliver requestWillBeSentExtraInfo before the base
-                        # event.  Network.getCookies is the final fallback.
-                        header_names = {str(k).lower() for k in (data.get("headers") or {})}
-                        if "cookie" not in header_names and browser_cookie_header[0]:
-                            data["headers"]["Cookie"] = browser_cookie_header[0]
-                            header_names.add("cookie")
-                        if "cookie" not in header_names and time.time() - data.get("firstSeen", 0) < 5.0:
-                            return False
-                        if not force and not data.get("extraInfo") and time.time() - data.get("firstSeen", 0) < 2.0:
-                            return False
-                        ok_payload, reason = _valid_chatgpt_message_payload(data.get("postData"))
-                        if not ok_payload:
-                            if not data.get("skipLogged"):
-                                data["skipLogged"] = True
-                                log_to(log_box, f"ข้าม request ที่ยังไม่ใช่ข้อความจริง: {reason}")
-                            return False
-                        captured[0] = True
-                        curl_text = _request_to_curl(data["url"], data["method"], data["headers"], data["postData"])
-                        root.after(
-                            0,
-                            lambda c=curl_text: (
-                                curl_box.delete("1.0", tk.END),
-                                curl_box.insert("1.0", c),
-                                log_to(log_box, "✅ จับ cURL อัตโนมัติแล้ว — กำลังเพิ่ม Account..."),
-                                add_account(),
-                             ),
-                         )
-                        return True
-
-                    send("Network.enable", {"maxPostDataSize": 10485760})
-                    cookie_request_id[0] = send(
-                        "Network.getCookies",
-                        {"urls": ["https://chatgpt.com/", "https://chat.openai.com/"]},
-                     )
-                    log_to(log_box, "พร้อมจับ Account แล้ว: ในหน้าต่าง ChatGPT ให้พิมพ์และส่งข้อความจริง 1 ครั้ง")
-                    log_to(log_box, "แนะนำให้ส่งข้อความสร้างรูปสั้น ๆ เช่น: สร้างรูปแก้วสีเขียวบนพื้นหลังขาว")
-                    deadline = time.time() + 600
-                    while time.time() < deadline:
-                        try:
-                            raw = ws.recv()
-                        except websocket.WebSocketTimeoutException:
-                            for data in list(requests_seen.values()):
-                                if finish_capture(data):
-                                    return
-                            continue
-                        event = json.loads(raw)
-                        method = event.get("method")
-                        params = event.get("params") or {}
-                        if method == "Network.requestWillBeSent":
-                            req = params.get("request") or {}
-                            url = str(req.get("url") or "")
-                            request_id = params.get("requestId")
-                            is_chatgpt_conversation = (
-                                request_id
-                                and str(req.get("method", "")).upper() == "POST"
-                                and (
-                                    "chatgpt.com/backend-api/f/conversation" in url
-                                    or "chatgpt.com/backend-api/conversation" in url
-                                 )
-                                and "/conversation/init" not in url
-                                and "stream_status" not in url
-                             )
-                            if is_chatgpt_conversation:
-                                early_headers = extra_headers_wait.pop(request_id, {})
-                                merged_headers = dict(req.get("headers") or {})
-                                merged_headers.update(early_headers)
-                                requests_seen[request_id] = {
-                                    "url": url,
-                                    "method": req.get("method") or "POST",
-                                    "headers": merged_headers,
-                                    "postData": req.get("postData") or "",
-                                    "extraInfo": bool(early_headers),
-                                    "firstSeen": time.time(),
-                                    "skipLogged": False,
-                                }
-                                send("Network.getRequestPostData", {"requestId": request_id}, tag=request_id)
-                        elif method == "Network.requestWillBeSentExtraInfo":
-                            request_id = params.get("requestId")
-                            extra_headers = dict(params.get("headers") or {})
-                            if request_id in requests_seen:
-                                requests_seen[request_id]["headers"].update(extra_headers)
-                                requests_seen[request_id]["extraInfo"] = True
-                                if finish_capture(requests_seen[request_id], force=True):
-                                    return
-                            elif request_id:
-                                # Chrome is allowed to emit ExtraInfo before
-                                # requestWillBeSent. Preserve it until the base
-                                # request arrives instead of losing Cookie.
-                                extra_headers_wait[request_id] = extra_headers
-                        elif "id" in event and event.get("id") == cookie_request_id[0]:
-                            cookies = (event.get("result") or {}).get("cookies") or []
-                            cookie_pairs = []
-                            for cookie in cookies:
-                                name = str(cookie.get("name") or "")
-                                if name:
-                                    cookie_pairs.append(name + "=" + str(cookie.get("value") or ""))
-                            browser_cookie_header[0] = "; ".join(cookie_pairs)
-                            if browser_cookie_header[0]:
-                                for data in list(requests_seen.values()):
-                                    names = {str(k).lower() for k in data.get("headers", {})}
-                                    if "cookie" not in names:
-                                        data["headers"]["Cookie"] = browser_cookie_header[0]
-                                    if finish_capture(data, force=True):
-                                        return
-                        elif "id" in event and event.get("id") in post_data_wait:
-                            request_id = post_data_wait.pop(event.get("id"))
-                            data = requests_seen.get(request_id)
-                            if data:
-                                data["postData"] = ((event.get("result") or {}).get("postData") or data.get("postData") or "")
-                                if finish_capture(data):
-                                    return
-                    log_to(log_box, "หมดเวลาจับ Account — กดปุ่มอีกครั้งแล้วลองสร้างรูปทดสอบใหม่")
-                except Exception as e:
-                    msg = str(e)
-                    log_to(log_box, "❌ จับ Account อัตโนมัติไม่สำเร็จ: " + msg)
-                    if "403" in msg or "remote-allow-origins" in msg:
-                        log_to(log_box, "แก้: ปิด SnapGen Browser หน้าต่างเก่าทั้งหมด แล้วกดปุ่มเปิดและจับ Account ใหม่")
-                finally:
-                    capture_running[0] = False
-                    try:
-                        ws.close()
-                    except Exception:
-                        pass
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        def _normalize_chatgpt_capture_text(raw):
-            """Accept bash/cmd/PowerShell cURL and plain Network request dumps."""
-            text = str(raw or "").strip()
-            if not text:
-                return ""
-            # Windows CMD "Copy as cURL (cmd)": ^" and ^\n
-            text = text.replace("^\r\n", " ").replace("^\n", " ").replace("^\r", " ")
-            text = re.sub(r'\^([\'"\\&|<>^])', r"\1", text)
-            # PowerShell backticks as line continuations
-            text = text.replace("`\r\n", " ").replace("`\n", " ").replace("`\r", " ")
-            text = text.replace("curl.exe", "curl")
-            # Common browser export wrappers
-            text = re.sub(r"(?im)^\s*Copy as cURL.*$", "", text)
-            text = text.replace("$'", "'")
-            # Collapse escaped line breaks that still remain
-            text = re.sub(r"\\\r?\n", " ", text)
-            # Some users paste only headers + payload without the curl keyword
-            if "curl" not in text[:120].lower() and "chatgpt.com" in text.lower() and "authorization:" in text.lower():
-                # Keep as plain capture; CapturedRequest.from_text supports summary form.
-                pass
-            return text.strip()
-
-        def _capture_url_hint(text):
-            m = re.search(r"https?://[^\s'\"\\]+", str(text or ""), re.I)
-            return m.group(0) if m else ""
-
-        def _capture_has_auth(text):
-            low = str(text or "")
-            return bool(re.search(r"(?i)authorization\s*[:=]\s*['\"]?Bearer\s+\S+", low) or "authorization: bearer" in low.lower())
-
-        def _capture_has_cookie(text):
-            low = str(text or "").lower()
-            return ("cookie:" in low) or (" -b " in low) or ("--cookie" in low) or ("set-cookie:" in low)
-
-        def _capture_has_message_payload(text):
-            # Match both normal JSON and escaped cURL bodies: \"action\" / "action"
-            return bool(re.search(r'\\?"action\\?"\s*:', text)) and bool(re.search(r'\\?"messages\\?"\s*:', text))
-
-        def _is_conversation_init(text):
-            low = str(text or "").lower()
-            return "/backend-api/conversation/init" in low or "/backend-api/f/conversation/init" in low
-
-        def _is_chatgpt_conversation_capture(text):
-            low = str(text or "").lower()
-            if "chatgpt.com" not in low and "chat.openai.com" not in low:
-                return False
-            if _is_conversation_init(low):
-                return False
-            # Accept the real send endpoints used by ChatGPT web.
-            markers = (
-                "/backend-api/f/conversation",
-                "/backend-api/conversation",
-                "/backend-api/f/conversation/",
-            )
-            if not any(m in low for m in markers):
-                # also accept prepare only when force path later; not here
-                return False
-            # Prefer real next/messages payload, but allow auth-bearing conversation
-            # captures from F12 even if body quoting differs.
-            if _capture_has_message_payload(text):
-                return True
-            if _capture_has_auth(text) and ("--data" in low or " -d " in low or "request payload" in low or '"messages"' in text or '\\"messages\\"' in text):
-                return True
-            return False
-
-        def paste_curl_from_clipboard(auto_add=True):
-            try:
-                text = root.clipboard_get().strip()
-            except Exception:
-                text = ""
-            if not text:
-                log_to(log_box, "❌ Clipboard ว่าง — เปิด F12 > Network > Copy as cURL ก่อน")
-                return
-            text = _normalize_chatgpt_capture_text(text)
-            curl_box.delete("1.0", tk.END)
-            curl_box.insert("1.0", text)
-            url_hint = _capture_url_hint(text)
-            if _is_chatgpt_conversation_capture(text):
-                log_to(log_box, "วาง cURL จาก Clipboard แล้ว (รองรับ F12 Copy as cURL)")
-                if url_hint:
-                    log_to(log_box, f"ตรวจเจอ URL: {url_hint[:140]}")
-                if auto_add:
-                    add_account()
-            elif "curl" in text[:120].lower() or "/backend-api/" in text.lower():
-                log_to(log_box, "⚠ วางแล้ว แต่ยังไม่ใช่ request ส่งข้อความ conversation")
-                if url_hint:
-                    log_to(log_box, f"URL ที่วางมา: {url_hint[:160]}")
-                log_to(log_box, "เลือก request หลังกดส่งข้อความ/สร้างรูป: /backend-api/f/conversation แล้ว Copy as cURL ใหม่")
-            else:
-                log_to(log_box, "⚠ วางจาก Clipboard แล้ว แต่ข้อความดูไม่เหมือน cURL ของ ChatGPT")
-
-        tk.Button(browser_row, text="🧩 เปิดและจับ Account อัตโนมัติ", command=start_auto_capture, bg="#0EA5E9", fg="white").pack(side="left")
-        tk.Button(browser_row, text="📋 วาง cURL จาก F12 แล้วเพิ่ม", command=lambda: paste_curl_from_clipboard(True), bg="#16A34A", fg="white").pack(side="left", padx=(6, 0))
-
-        def account_email(account):
-            try:
-                py = BRIDGE_DIR / ".venv" / "Scripts" / "python.exe"
-                if not py.exists():
-                    return "ยังไม่ได้ติดตั้ง"
-                r = subprocess.run([str(py), "-m", "chatgpt_api", "account-info", "--account", account, "--json"], cwd=str(BRIDGE_DIR), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=25)
-                if r.returncode:
-                    return "อ่าน mail ไม่ได้"
-                data = json.loads(r.stdout or "{}")
-                return data.get("email") or data.get("plan_type") or "ไม่พบ mail"
-            except Exception:
-                return "อ่าน mail ไม่ได้"
-
-        def delete_account(account):
-            from tkinter import messagebox
-            if not messagebox.askokcancel(
-                "ลบ account",
-                f"ลบ account '{account}' ออกจาก Bridge?\n\n"
-                "ไฟล์ Account (ถ้ามี) จะสำรองไว้ใน trash-agent แต่รายการใน Bridge จะถูกลบจริง",
-            ):
-                return
-
-            def worker():
-                try:
-                    src = BRIDGE_DIR / "secrets" / "accounts" / account
-                    trash = Path.home() / "trash-agent"
-                    trash.mkdir(parents=True, exist_ok=True)
-                    dest = trash / ("chatgpt-account-" + account + "-" + time.strftime("%Y%m%d-%H%M%S"))
-                    backed_up = False
-                    if src.exists():
-                        shutil.move(str(src), str(dest))
-                        backed_up = True
-
-                    # The old button only moved the directory. The admin DB and
-                    # the running router still retained the account, so it came
-                    # straight back in the list. Delete the persisted DB row too.
-                    try:
-                        result = remote_admin("accounts/delete", {
-                            "account": account,
-                            "delete_capture": True,
-                            "delete_settings": True,
-                        })
-                        if not isinstance(result, dict) or result.get("ok") is not True:
-                            raise RuntimeError(f"Bridge ไม่ยืนยันการลบ: {result}")
-                    except Exception as api_error:
-                        # Account deletion must still work while Bridge is
-                        # stopped/broken. Remove the same metadata row locally.
-                        db_path = BRIDGE_DIR / "outputs" / "chatgpt-admin.sqlite"
-                        if not db_path.is_file():
-                            raise RuntimeError(f"ติดต่อ Bridge ไม่ได้และไม่พบฐานข้อมูล Account: {api_error}") from api_error
-                        import sqlite3
-                        con = sqlite3.connect(str(db_path), timeout=10)
-                        try:
-                            con.execute("DELETE FROM account_captures WHERE account = ?", (account,))
-                            con.commit()
-                        finally:
-                            con.close()
-
-                    remaining = account_dirs()
-                    next_account = remaining[0] if remaining else None
-                    write_env(next_account)
-
-                    # Remove the deleted account from the in-memory router. The
-                    # current Bridge API deletes storage but cannot mutate the
-                    # already-created router tuple safely, so restart locally.
-                    kill_bridge_servers(None)
-                    try:
-                        out = subprocess.run(
-                            ["netstat", "-ano"], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", timeout=10,
-                         ).stdout
-                        for line in out.splitlines():
-                            if ":8000" in line and "LISTENING" in line:
-                                pid = line.split()[-1]
-                                if pid.isdigit():
-                                    subprocess.run(
-                                        ["taskkill", "/F", "/T", "/PID", pid],
-                                        capture_output=True, text=True, timeout=15,
-                                     )
-                    except Exception:
-                        pass
-                    time.sleep(0.8)
-                    # Keep the local Admin API alive even when the last account
-                    # was deleted; otherwise the user cannot capture/add the
-                    # replacement account without reinstalling Bridge.
-                    if not start_bridge(log_box, next_account):
-                        raise RuntimeError("ลบ Account แล้ว แต่เปิด Bridge กลับไม่สำเร็จ")
-
-                    def done():
-                        clear_cache = g.get("clear_bridge_account_cache")
-                        if callable(clear_cache):
-                            clear_cache()
-                        backup_text = f" | สำรอง: {dest}" if backed_up else ""
-                        log_to(log_box, f"✅ ลบ account ออกจาก Bridge แล้ว: {account}{backup_text}")
-                        refresh_accounts()
-                        refresh()
-                        refresh_status = g.get("refresh_image_bridge_status")
-                        if callable(refresh_status):
-                            refresh_status()
-                    root.after(0, done)
-                except Exception as e:
-                    root.after(0, lambda msg=str(e): messagebox.showerror("ลบ account ไม่สำเร็จ", msg))
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        def use_account(account):
-            def worker():
-                try:
-                    write_env(account)
-                    log_to(log_box, f"กำลังสลับไปใช้ account: {account}")
-                    ok = start_bridge(log_box, account)
-                    if ok:
-                        rebound = _sync_persisted_histories_to_account(account, move=True)
-                        if rebound:
-                            log_to(
-                                log_box,
-                                "ย้ายงานมาที่ account ที่เลือกแล้ว: "
-                                + ", ".join(dict.fromkeys(rebound)),
-                            )
-                        dead = _account_login_expired(account)
-                        if dead:
-                            # Use only picks the account; a revoked ChatGPT login cannot be revived
-                            # from the saved capture, and Bridge would quietly fall back to another account.
-                            log_to(log_box, f"⚠ {account} ใช้ไม่ได้: ChatGPT ยกเลิกการล็อกอินของบัญชีนี้แล้ว ({dead}) "
-                                            "— งานจะไปใช้บัญชีอื่นแทน ต้องล็อกอินบัญชีนี้ใหม่ใน Bridge")
-                            root.after(0, lambda: messagebox.showwarning(
-                                "บัญชีนี้หลุดล็อกอิน",
-                                f"กด Use {account} แล้ว แต่ ChatGPT ยกเลิกการล็อกอินของ {account} ไปแล้ว\n"
-                                "(ข้อมูลล็อกอินที่เก็บไว้ใช้ไม่ได้อีก — ChatGPT ออกจากระบบให้เอง เช่น ล็อกอินที่อื่น "
-                                "เปลี่ยนรหัส หรือหมดอายุ)\n\nงานจะถูกส่งไปบัญชีอื่นแทน ถ้าจะใช้บัญชีนี้ต้องล็อกอินใหม่ใน Bridge"))
-                        else:
-                            log_to(log_box, f"✅ ใช้ account แล้ว: {account}")
-                    def refresh_after_use():
-                        try:
-                            clear_cache = g.get("clear_bridge_account_cache")
-                            if clear_cache:
-                                clear_cache()
-                            refresh_status = g.get("refresh_image_bridge_status")
-                            if refresh_status:
-                                refresh_status()
-                        except Exception:
-                            pass
-                        refresh_accounts()
-                        refresh()
-                    root.after(0, refresh_after_use)
-                    root.after(1200, refresh_after_use)
-                except Exception as e:
-                    log_to(log_box, "❌ สลับ account ไม่สำเร็จ: " + str(e))
-            threading.Thread(target=worker, daemon=True).start()
-
-        def refresh_accounts():
-            for child in account_frame.winfo_children():
-                child.destroy()
-            remote_rows = remote_account_rows()
-            accounts = [str(item.get("account") or "").strip() for item in remote_rows if isinstance(item, dict) and item.get("account")]
-            if not accounts:
-                tk.Label(account_frame, text="ยังไม่มี account — วาง cURL แล้วกด 🔑 เพิ่ม Account", fg="#777").pack(anchor="w", padx=6, pady=4)
-                return
-            p, _state = find_bridge_port()
-            ok, data = health(p)
-            current_account = str(data.get("account") or "") if ok and data else ""
-            rows_by_name = {str(item.get("account")): item for item in remote_rows if isinstance(item, dict)}
-            primary = is_primary_bridge_machine()
-            for acct in accounts:
-                rowa = tk.Frame(account_frame)
-                rowa.pack(fill="x", padx=6, pady=2)
-                tk.Label(rowa, text=acct, width=12, anchor="w").pack(side="left")
-                info = rows_by_name.get(acct) or {}
-                stored = info.get("stored") if isinstance(info.get("stored"), dict) else {}
-                email = str(info.get("email") or stored.get("email_masked") or "พร้อมใช้งาน")
-                tk.Label(rowa, text=email, anchor="w", fg="#333").pack(side="left", fill="x", expand=True)
-                is_current = (acct == current_account)
-                if primary:
-                    tk.Button(rowa, text="Use", width=5, bg=("#0EA5E9" if is_current else "#9CA3AF"), fg="white", command=lambda a=acct: use_account(a)).pack(side="right", padx=(4,0))
-                    tk.Button(rowa, text="🗑", width=2, fg="#B71C1C", command=lambda a=acct: delete_account(a)).pack(side="right")
-
-        def refresh():
-            p, state = find_bridge_port(); bridge_port[0]=p
-            ok, data = health(p)
-            remote_rows = remote_account_rows() if ok else []
-            accounts = [str(item.get("account") or "") for item in remote_rows if isinstance(item, dict) and item.get("account")]
-            if ok:
-                status.set(f"✅ Bridge เครื่องนี้: http://{BRIDGE_SERVER}:{p}/v1 | account={data.get('account')} | ทั้งหมด={len(accounts)}")
-            else:
-                status.set(f"❌ Bridge ไม่รัน | port แนะนำ={p} ({state}) | accounts={accounts or 'ยังไม่มี'}")
-            log_to(log_box, f"สถานะ: {status.get()}")
-        def install():
-            def worker():
-                try:
-                    log_to(log_box, f"โฟลเดอร์: {BRIDGE_DIR}")
-                    if not BRIDGE_DIR.exists():
-                        # Try git clone first, fallback to download ZIP
-                        log_to(log_box, "กำลังดาวน์โหลด bridge...")
-                        try:
-                            r=subprocess.run(["git","clone","https://github.com/suphotP/chatgpt-api",str(BRIDGE_DIR)],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=300)
-                            if r.returncode: raise RuntimeError(r.stderr or r.stdout)
-                        except Exception as git_error:
-                            # Git is optional. Any clone failure (missing Git,
-                            # PATH, network/proxy, partial clone) falls back to
-                            # a clean ZIP install under the current user.
-                            log_to(log_box, f"Git ใช้ไม่ได้ ({str(git_error)[:180]}) — ดาวน์โหลด ZIP แทน...")
-                            import urllib.request, zipfile
-                            temp_root = Path(tempfile.mkdtemp(prefix="snapgen-bridge-install-"))
-                            try:
-                                archive = temp_root / "chatgpt-api.zip"
-                                request = urllib.request.Request(
-                                    "https://github.com/suphotP/chatgpt-api/archive/refs/heads/main.zip",
-                                    headers={"User-Agent": "SnapGen-Bridge-Installer/1.0"},
-                                 )
-                                with urllib.request.urlopen(request, timeout=120) as response, archive.open("wb") as output:
-                                    shutil.copyfileobj(response, output, length=1024 * 1024)
-                                extract_dir = temp_root / "extract"
-                                with zipfile.ZipFile(archive) as z:
-                                    z.extractall(extract_dir)
-                                roots = [p for p in extract_dir.iterdir() if p.is_dir()]
-                                if not roots or not (roots[0] / "pyproject.toml").is_file():
-                                    raise RuntimeError("ZIP ของ Bridge ไม่สมบูรณ์")
-                                if BRIDGE_DIR.exists():
-                                    shutil.rmtree(BRIDGE_DIR)
-                                shutil.copytree(roots[0], BRIDGE_DIR)
-                            finally:
-                                shutil.rmtree(temp_root, ignore_errors=True)
-                            log_to(log_box, f"โหลด ZIP เสร็จ: {BRIDGE_DIR}")
-                    else:
-                        log_to(log_box, "พบโฟลเดอร์เดิม — ใช้ของเดิม")
-                    py=BRIDGE_DIR/".venv"/"Scripts"/"python.exe"
-                    if not py.exists():
-                        log_to(log_box, "สร้าง venv...")
-                        # Try uv first, fallback to python -m venv
-                        try:
-                            r=subprocess.run(["uv","venv",str(BRIDGE_DIR/".venv"),"--python","3.12"],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=300)
-                            if r.returncode: raise RuntimeError(r.stderr or r.stdout)
-                        except FileNotFoundError:
-                            log_to(log_box, "ไม่พบ uv — ใช้ python -m venv...")
-                            r=subprocess.run([sys.executable,"-m","venv",str(BRIDGE_DIR/".venv")],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=300)
-                            if r.returncode: raise RuntimeError(r.stderr or r.stdout)
-                    log_to(log_box, "ตรวจ pip ใน venv...")
-                    r=subprocess.run([str(py),"-m","pip","--version"],cwd=str(BRIDGE_DIR),capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=60)
-                    if r.returncode:
-                        log_to(log_box, "ไม่พบ pip — กำลังติดตั้ง pip ให้อัตโนมัติ...")
-                        r=subprocess.run([str(py),"-m","ensurepip","--upgrade"],cwd=str(BRIDGE_DIR),capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=180)
-                        if r.returncode:
-                            raise RuntimeError("ติดตั้ง pip ไม่สำเร็จ: " + (r.stderr or r.stdout)[-1500:])
-                    r=subprocess.run([str(py),"-m","pip","install","--upgrade","pip","setuptools","wheel"],cwd=str(BRIDGE_DIR),capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=300)
-                    if r.returncode:
-                        log_to(log_box, "⚠ อัปเกรด pip ไม่สำเร็จ แต่จะลองติดตั้ง dependencies ต่อ: " + (r.stderr or r.stdout)[-500:])
-                    log_to(log_box, "ติดตั้ง dependencies...")
-                    r=subprocess.run([str(py),"-m","pip","install","-e","."],cwd=str(BRIDGE_DIR),capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=600)
-                    if r.returncode: raise RuntimeError((r.stderr or r.stdout)[-2000:])
-                    log_to(log_box, "Patch cookie relax...")
-                    _patch_bridge_cookie(BRIDGE_DIR, lambda msg: log_to(log_box, msg))
-                    acct=write_env()
-                    vbs=install_autostart(8000)
-                    log_to(log_box, "✅ ติดตั้ง dependencies เสร็จ")
-                    log_to(log_box, f"✅ Autostart พร้อม: {vbs}")
-                    log_to(log_box, "✅ ติดตั้งสมบูรณ์ — ขั้นต่อไป: วาง cURL แล้วกด 🔑 เพิ่ม Account")
-                    if acct:
-                        start_bridge(log_box, acct)
-                    root.after(0, refresh)
-                except Exception as e:
-                    log_to(log_box, "❌ ติดตั้งไม่สำเร็จ: " + str(e))
-                    log_to(log_box, "แก้: กด 🗑 ลบ bridge แล้วกด 📦 ติดตั้งใหม่")
-            threading.Thread(target=worker, daemon=True).start()
-        def start():
-            threading.Thread(target=lambda: (start_bridge(log_box), root.after(0, refresh)), daemon=True).start()
-        def stop():
-            try:
-                if bridge_proc[0]: bridge_proc[0].terminate()
-                log_to(log_box, "หยุด process ที่โปรแกรมเปิดไว้แล้ว")
-            except Exception as e: log_to(log_box, "หยุดไม่สำเร็จ: "+str(e))
-            refresh()
-        def add_account():
-            capture = _normalize_chatgpt_capture_text(curl_box.get("1.0", tk.END))
-            if not capture:
-                log_to(log_box, "❌ วาง cURL ก่อน — ใช้ F12 Copy as cURL หรือปุ่มจับอัตโนมัติก็ได้")
-                return
-            # Keep the box normalized so the user sees what will be saved.
-            try:
-                curl_box.delete("1.0", tk.END)
-                curl_box.insert("1.0", capture)
-            except Exception:
-                pass
-            low_capture = capture.lower()
-            url_hint = _capture_url_hint(capture)
-            if _is_conversation_init(low_capture):
-                log_to(log_box, "❌ cURL นี้เป็น conversation/init ไม่ใช่ request ส่งข้อความ")
-                if url_hint:
-                    log_to(log_box, f"URL: {url_hint[:160]}")
-                log_to(log_box, "แก้: ใน Network เลือก request หลังกดส่งข้อความจริง แล้ว Copy as cURL ใหม่")
-                return
-            if not _is_chatgpt_conversation_capture(capture):
-                log_to(log_box, "❌ cURL นี้ยังไม่ใช่ request conversation ของ ChatGPT")
-                if url_hint:
-                    log_to(log_box, f"URL ที่ตรวจเจอ: {url_hint[:160]}")
-                else:
-                    log_to(log_box, "ไม่พบ URL chatgpt.com ในข้อความที่วาง")
-                log_to(log_box, "วิธีที่ 1: F12 > Network > หา POST .../backend-api/f/conversation > Copy as cURL > วางจาก Clipboard")
-                log_to(log_box, "วิธีที่ 2: กดปุ่มเปิดและจับ Account แล้วพิมพ์ส่งข้อความ 1 ครั้ง")
-                return
-            if not _capture_has_message_payload(capture) and not _capture_has_auth(capture):
-                log_to(log_box, "❌ cURL นี้ไม่มีทั้ง messages และ Authorization — เลือก request หลังส่งข้อความอีกครั้ง")
-                return
-            if not _capture_has_auth(capture):
-                log_to(log_box, "⚠ cURL นี้ไม่เห็น Authorization Bearer — จะลองบันทึกต่อ ถ้า Bridge ปฏิเสธให้ Copy as cURL ใหม่จาก request เดียวกัน")
-            def worker():
-                try:
-                    ok, bridge_data = health(8000)
-                    if not ok:
-                        log_to(log_box, f"❌ ติดต่อ Bridge ของเครื่องนี้ {BRIDGE_SERVER}:8000 ไม่ได้ — กด 📦 ติดตั้ง แล้วกด ▶ เริ่ม")
-                        return
-                    names = {str(item.get("account") or "") for item in remote_account_rows() if isinstance(item, dict)}
-                    number = 1
-                    while f"account-{number}" in names:
-                        number += 1
-                    name = f"account-{number}"
-                    log_to(log_box, f"กำลังเพิ่ม account '{name}' เข้า Bridge ของเครื่องนี้...")
-                    # Prefer normal validation first. If only soft fields fail
-                    # (common with F12 copies missing Cookie but having Bearer),
-                    # retry once with force so machines can still onboard.
-                    result = remote_admin("captures/save", {
-                        "account": name,
-                        "capture_text": capture,
-                        "force": False,
-                    })
-                    if not result.get("saved"):
-                        err = result.get("error") if isinstance(result, dict) else None
-                        failed = []
-                        if isinstance(err, dict):
-                            failed = list(err.get("failed") or [])
-                        soft_only = failed and all(item in {"cookie", "x-conduit-token"} for item in failed)
-                        has_auth = _capture_has_auth(capture)
-                        if soft_only or (has_auth and failed):
-                            log_to(log_box, f"validation เข้มเกินสำหรับ cURL จาก F12 ({', '.join(failed) or 'unknown'}) — ลอง force บันทึก...")
-                            result = remote_admin("captures/save", {
-                                "account": name,
-                                "capture_text": capture,
-                                "force": True,
-                            })
-                    if not result.get("saved"):
-                        raise RuntimeError(json.dumps(result, ensure_ascii=False)[:1800])
-                    routed = result.get("routing_accounts") or []
-                    log_to(log_box, f"✅ เพิ่ม account ที่ Bridge ของเครื่องนี้แล้ว: {name}")
-                    if name in routed:
-                        log_to(log_box, f"✅ พร้อมเข้าคิวใช้งานทันที | accounts={', '.join(routed)}")
-                    else:
-                        log_to(log_box, "⚠ บันทึกแล้ว แต่ Bridge รุ่นเก่าต้อง Restart หนึ่งครั้งเพื่อโหลด account ใหม่")
-                    root.after(0, refresh_accounts)
-                    root.after(0, lambda: curl_box.delete("1.0", tk.END))
-                    root.after(0, refresh)
-                except Exception as e:
-                    log_to(log_box, "❌ เพิ่ม account ไม่สำเร็จ: "+str(e))
-            threading.Thread(target=worker, daemon=True).start()
-        row=tk.Frame(win); row.pack(fill="x", padx=8, pady=(0,8))
-        tk.Button(row,text="📦 ติดตั้ง",command=install).pack(side="left")
-        tk.Button(row,text="▶ เริ่ม",command=start).pack(side="left",padx=(6,0))
-        tk.Button(row,text="⏹ หยุด",command=stop).pack(side="left",padx=(6,0))
-        tk.Button(row,text="🔑 เพิ่ม Account",command=add_account,bg="#673AB7",fg="white").pack(side="left",padx=(12,0))
-        tk.Button(row,text="🔄 ตรวจสอบ",command=refresh).pack(side="left",padx=(6,0))
-        tk.Button(row,text="ปิด",command=win.destroy).pack(side="right")
-        refresh_accounts()
-        refresh()
 
     def manage_chrome_extension():
         """ChatGPT now runs in each PC's own Chrome: show the extension's link, its folder and ChatGPT login."""
@@ -15992,16 +14194,13 @@ def _install_better_bridge_manager():
         bottom = tk.Frame(win)
         bottom.pack(side="bottom", fill="x", padx=14, pady=12)
         tk.Button(bottom, text="ปิด", command=win.destroy).pack(side="right")
-        tk.Button(bottom, text="⚙ Bridge (ขั้นสูง)", fg="#667085", relief="flat",
-                  command=manage_bridge_new).pack(side="left")
         refresh_state()
 
     g["manage_bridge"] = manage_chrome_extension
-    g["manage_bridge_advanced"] = manage_bridge_new
     def rewire_bridge_buttons(w):
         try:
             if isinstance(w, tk.Button) and "Bridge" in str(w.cget("text")):
-                w.config(command=manage_chrome_extension)
+                w.config(command=manage_chrome_extension, text="ส่วนขยาย ChatGPT")
         except Exception: pass
         for ch in w.winfo_children(): rewire_bridge_buttons(ch)
     if root:
@@ -16447,46 +14646,21 @@ def _install_image_bridge_status():
     g["clear_bridge_account_cache"] = clear_bridge_account_cache
 
     def bridge_account_label(account):
-        if not account:
-            return "?"
-        if account in account_name_cache:
-            return account_name_cache[account]
-        label = account
-        try:
-            bridge_dir = Path(g.get("BRIDGE_DIR", str(BRIDGE_DIR)))
-            db = bridge_dir / "outputs" / "chatgpt-admin.sqlite"
-            if db.exists():
-                import sqlite3
-                con = sqlite3.connect(str(db))
-                row = con.execute("select email_masked from account_captures where account=?", (account,)).fetchone()
-                con.close()
-                if row and row[0]:
-                    label = str(row[0]).split("@", 1)[0] or account
-        except Exception:
-            label = account
-        account_name_cache[account] = label
-        return label
+        return account or "?"
 
     def bridge_health_once():
-        api_key = g.get("CHATGPT_API_KEY", "local-dev-key")
-        bridge_server = "127.0.0.1"
-        # SnapGen uses one configured Bridge port. Scanning 21 ports on every
-        # refresh created needless sockets/threads and could take over a minute
-        # when the host was unreachable.
-        p = int(globals().get("BRIDGE_PORT", 8000) or 8000)
+        """Footer check of the program's own ChatGPT API (Chrome extension) — no Bridge any more.
+
+        Returns no port, so the old Bridge quota request is skipped (the quota comes from Chrome), and
+        no account key, so saved story chats are never re-bound to another account from here.
+        """
         try:
-            import urllib.request
-            request = urllib.request.Request(
-                f"http://{bridge_server}:{p}/health",
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-            with urllib.request.urlopen(request, timeout=2) as response:
-                data = json.loads(response.read().decode("utf-8", "replace"))
-            if data.get("ok"):
-                return p, data
+            import snapgen_chrome_relay
+            state = snapgen_chrome_relay.RELAY.status()
         except Exception:
-            pass
-        return None, None
+            return None, None
+        return None, {"ok": True, "account": "", "account_email": str(state.get("email") or ""),
+                      "active_operations": 0}
 
     bridge_status_refreshing = [False]
     bridge_status_ready = [False]
@@ -18244,13 +16418,6 @@ def _install_ref_mode():
         if _page_runtime_key in _page_env:
             g[_page_runtime_key] = _page_env[_page_runtime_key]
 
-    # Ensure BRIDGE_DIR is accessible from pyc
-    if 'BRIDGE_DIR' in dir():
-        try:
-            g["BRIDGE_DIR"] = str(BRIDGE_DIR)
-            os.environ["SNAPGEN_BRIDGE_DIR"] = str(BRIDGE_DIR)
-        except Exception:
-            pass
 
     g.update({
         "ref_page": ref_page,
@@ -18546,8 +16713,6 @@ def _ensure_auto_match_btn(g, root):
     img_prompt_text = g.get('img_prompt_text')
     if not img_prompt_text:
         return
-    BRIDGE_HOST = '127.0.0.1'
-    BRIDGE_PORT = 8000
     BRIDGE_API_KEY = 'local-dev-key'
     import threading, urllib.request, json as _json, os, re as _re
     busy = [False]
@@ -18620,7 +16785,7 @@ def _ensure_auto_match_btn(g, root):
             'temperature': 0.1,
         }, ensure_ascii=False).encode('utf-8')
         request = urllib.request.Request(
-            f'http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1/chat/completions', data=payload,
+            _chatgpt_api_root() + '/v1/chat/completions', data=payload,
             headers={'Authorization': 'Bearer ' + BRIDGE_API_KEY, 'Content-Type': 'application/json'}, method='POST')
         try:
             with urllib.request.urlopen(request, timeout=90) as response:
@@ -19267,33 +17432,6 @@ if root:
         _check_github_update(root, g.get("snap_status_var"), interactive=False)
 
     root.after(2500, _startup_auto_update)
-
-    def _startup_codex():
-        """Prepare Codex only when explicitly selected; web remains the default."""
-        if os.environ.get("SNAPGEN_ENGINE", "web").strip().lower() != "codex":
-            return
-        def worker():
-            try:
-                import snapgen_codex_setup
-                snapgen_codex_setup.ensure_codex(lambda m: print(m, flush=True))
-                if snapgen_codex_setup.logged_in(BRIDGE_DIR):
-                    return
-                account = snapgen_codex_setup.active_account(BRIDGE_DIR)
-
-                def ask():
-                    if messagebox.askyesno(
-                            "ล็อกอิน ChatGPT",
-                            "ChatGPT เปลี่ยนระบบ — โปรแกรมเปลี่ยนไปใช้ช่องทางทางการ (Codex) แล้ว\n"
-                            "ต้องล็อกอิน ChatGPT ใหม่ 1 ครั้งต่อเครื่อง (ใช้บัญชีเดิม)\n\n"
-                            "กด Yes เพื่อเปิดหน้าล็อกอินในเบราว์เซอร์", parent=root):
-                        threading.Thread(target=lambda: snapgen_codex_setup.start_login(
-                            BRIDGE_DIR, account, lambda m: print(m, flush=True)), daemon=True).start()
-                root.after(0, ask)
-            except Exception as exc:
-                print(f"[Codex] เตรียม Codex ไม่สำเร็จ: {exc}", flush=True)
-        threading.Thread(target=worker, daemon=True).start()
-
-    root.after(4000, _startup_codex)
 
     def _startup_chrome():
         """Job queue for the "Tidmunz ChatGPT" Chrome extension (installed on each PC by hand)."""
