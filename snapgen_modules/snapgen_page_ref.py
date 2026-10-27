@@ -1036,7 +1036,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         source = Path(str(path or ""))
         if not source.is_file():
             return str(path)
-        safe = re.sub(r'[<>:"/\|?*\x00-\x1f]', "_", " ".join(str(stem or "").split()))[:80].strip(" .")
+        safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", " ".join(str(stem or "").split()))[:80].strip(" .")
         if not safe:
             return str(path)
         target = Path(export_ref_dir) / (safe + (source.suffix.lower() or ".png"))
@@ -1046,14 +1046,18 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             if target.exists():
                 old_dir = Path(export_ref_dir) / "_เก่า"
                 old_dir.mkdir(exist_ok=True)
-                shutil.move(str(target), str(old_dir / f"{safe}_{time.strftime('%Y%m%d-%H%M%S')}{target.suffix}"))
+                old = old_dir / f"{safe}_{time.strftime('%Y%m%d-%H%M%S')}{target.suffix}"
+                counter = 1
+                while old.exists():
+                    old = old_dir / f"{safe}_{time.strftime('%Y%m%d-%H%M%S')}_{counter}{target.suffix}"
+                    counter += 1
+                shutil.move(str(target), str(old))
             shutil.move(str(source), str(target))
             gone = {os.path.normcase(str(source)), os.path.normcase(str(target))}
             ref_gallery_paths[:] = [q for q in ref_gallery_paths if os.path.normcase(str(Path(q))) not in gone]
             return str(target)
         except OSError as exc:
-            _ref_log(f"[Ref] ตั้งชื่อไฟล์เป็นชื่อธรรมดาไม่สำเร็จ ใช้ชื่อเดิม: {exc}")
-            return str(path)
+            raise RuntimeError(f"ตั้งชื่อไฟล์ Ref ไม่สำเร็จ รูปที่สร้างเก็บไว้ที่ {source}: {exc}") from exc
 
     def _ref_plain_stem(stem):
         """A file stem back to the plain name (ref_x_<id>_แก้ไข -> x); other names stay as they are."""
@@ -1183,7 +1187,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         "images": [encoder(p)], "_use_ref_story_history": True,
                     }
                     out = _ref_image_request(options, prompt, f"{Path(p).stem}_แก้ไข", [p], payload, comment)
-                    out = _normalize_ref_output(out, str(g.get("_ref_selected_name") or Path(p).stem))
+                    out = _normalize_ref_output(out, _ref_plain_stem(Path(p).stem))
                     out = _ref_plain_file(out, _ref_plain_stem(Path(p).stem))
                     root.after(0, lambda out=out: (
                         _ref_gallery_add(str(out), True, is_ghost=is_ghost),
