@@ -939,13 +939,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             req = _urlreq.Request(base_url + "/health", headers={"Authorization": "Bearer local-dev-key"})
             with _urlreq.urlopen(req, timeout=3) as resp:
                 data = _json.loads(resp.read().decode("utf-8", errors="replace"))
-            if not data.get("ok"):
-                return False, "Bridge ยังไม่พร้อม"
-            if not data.get("account"):
-                return False, "Bridge ยังไม่มี Account — ไป Settings > Bridge แล้วกดเปิดและจับ Account อัตโนมัติ"
-            return True, f"Bridge พร้อม: {data.get('account_email') or data.get('account')}"
+            # The Chrome relay answers {"status": "ok", ...}; the old Bridge answered {"ok": true}.
+            if not (data.get("ok") or data.get("status") == "ok"):
+                return False, "ช่องทาง GPT (Chrome) ยังไม่พร้อม — เปิดโปรแกรมให้ทำงานแล้วลองใหม่"
+            return True, f"GPT (Chrome) พร้อม: {data.get('account_email') or data.get('account') or 'chrome'}"
         except Exception as exc:
-            return False, "Bridge ติดต่อไม่ได้ — ไป Settings > Bridge แล้วกดเริ่ม/ตรวจสอบ: " + str(exc)
+            return False, "ติดต่อช่องทาง GPT (Chrome) ไม่ได้ — เปิดโปรแกรมให้ทำงานแล้วลองใหม่: " + str(exc)
     g["_ref_bridge_ready"] = _ref_bridge_ready
     
     gallery = tk.LabelFrame(ref_page, text="แกลเลอรี", bg="#FAFAF7", fg="#1A1A1A", padx=8, pady=6)
