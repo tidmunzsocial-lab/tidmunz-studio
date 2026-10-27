@@ -1343,6 +1343,39 @@ def match_reference_files(text: str, folder) -> list:
     return found
 
 
+def reference_character_name(stem: str) -> str:
+    """The character a reference file belongs to: "ref_เจ้าหญิงเขมา_58bc871b8fc3_แก้ไข" -> "เจ้าหญิงเขมา".
+
+    The Prompt-Ref gallery saves character sheets as ref_<name>_<id> (and ..._แก้ไข for a corrected sheet), so the
+    plain character name is never the whole file name."""
+    name = re.sub(r"^(?:ref_)+", "", str(stem or "").strip())
+    name = re.sub(r"[_ ]*\(?แก้ไข\)?$", "", name)
+    name = re.sub(r"_[0-9a-fA-F]{8,16}(?=$|_)", "", name)
+    return name.strip(" _-")
+
+
+def character_ref_files(folder, names) -> list:
+    """[(character name, image path)] in the order of ``names``: the sheet of each character in the folder.
+
+    A corrected sheet (แก้ไข) wins over the original. Characters without a sheet are left out."""
+    if not folder or not os.path.isdir(str(folder)):
+        return []
+    wanted = {}
+    for n in names or []:
+        wanted.setdefault(str(n).strip().casefold(), str(n).strip())
+    best = {}
+    for fn in sorted(os.listdir(folder)):
+        stem, ext = os.path.splitext(fn)
+        if ext.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            continue
+        who = reference_character_name(stem).casefold()
+        if who in wanted:
+            edited = "แก้ไข" in stem
+            if who not in best or (edited and not best[who][0]):
+                best[who] = (edited, os.path.join(folder, fn))
+    return [(wanted[w], best[w][1]) for w in wanted if w in best]
+
+
 def plan_windows(segments: list, window: float = PLAN_WINDOW) -> list:
     """Group transcript segments into consecutive windows of about ``window`` s."""
     groups, current, start = [], [], None
@@ -3233,6 +3266,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         else:
             found = match_reference_files(text, attachment_folder())
         paths = [str(path) for _name, path in found]
+        # Character sheets are saved as ref_<name>_<id>.png: attach them by the character names of this shot, not
+        # by finding the whole file name in the prompt (GPT writes only "เจ้าหญิงเขมา").
+        sheets = character_ref_files(attachment_folder(), scene.get("characters") or [])
+        if sheets:
+            owned = {reference_character_name(Path(p).stem).casefold() for _n, p in sheets}
+            paths = [str(p) for _n, p in sheets] + [
+                p for p in paths if reference_character_name(Path(p).stem).casefold() not in owned]
         repaired_ref = (scene.get("identity_repair") or {}).get("reference")
         if repaired_ref and Path(repaired_ref).is_file():
             repaired_name = str(scene["identity_repair"].get("character") or "").casefold()
@@ -6739,8 +6779,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             fixed = int((state["project"] or {}).get("clip_choice") or 0)
             if fixed and not scene.get("dialogue") and str(fixed) in SEEDANCE_DURATIONS.get(selected_model, ()):
                 scene["clip_seconds"], scene["clip_slow"] = fixed, False
-            candidates = match_reference_files(" ".join([*(scene.get("characters") or []), str(scene.get("location") or "")]),
-                                               attachment_folder())
+            candidates = [*character_ref_files(attachment_folder(), scene.get("characters") or []),
+                          *match_reference_files(str(scene.get("location") or ""), attachment_folder())]
             seedance_refs = scene_references(scene, candidates)
             log(f"ช็อต {index + 1}: {SEEDANCE_MODELS[selected_model]} · รูปฉาก 1 + Ref {len(seedance_refs)} รูป")
         elif selected_model == VIDEO_MUSE_MODEL:

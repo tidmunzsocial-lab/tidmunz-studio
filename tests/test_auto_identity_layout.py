@@ -79,7 +79,7 @@ def test_explicit_repaired_reference_replaces_old_same_character_attachment(tmp_
     old, correct, other = [tmp_path / name for name in ("actor.png", "actor_4k.png", "friend.png")]
     for path in (old, correct, other): path.write_bytes(b"ref")
     scope = dict(vars(N), runtime={"img_match_refs_for_text": lambda text: [("actor", str(old)), ("friend", str(other))]},
-                 scene_prompt=lambda scene: "actor friend")
+                 scene_prompt=lambda scene: "actor friend", attachment_folder=lambda: None)
     attachments = load(scope, "attachments_for")
     scene = dict(characters=["actor", "friend"], identity_repair={"character": "actor", "reference": str(correct)})
     assert attachments(scene, limit=None) == [str(correct), str(other)]
