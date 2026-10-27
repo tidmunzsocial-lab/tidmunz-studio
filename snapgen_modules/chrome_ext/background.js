@@ -100,7 +100,17 @@ async function loop() {
       try {
         result = await runJob(job);
       } catch (e) {
-        result = {error: String(e && e.message || e)};
+        if (/No current window/i.test(String(e && e.message || e))) {
+          // The user closed the profile's last window: open one (in the background) and run the job again.
+          try {
+            await ensureWindow();
+            result = await runJob(job);
+          } catch (again) {
+            result = {error: String(again && again.message || again)};
+          }
+        } else {
+          result = {error: String(e && e.message || e)};
+        }
       }
       try { await relay("/result", {id: job.id, ...result}); } catch (e) {}
       // Leave the (possibly very long) chat so the tab does not keep it in memory between jobs.
@@ -114,6 +124,14 @@ async function loop() {
 }
 
 // ── the ChatGPT tab ──
+// A window for the work tab when the profile has none left (Chrome keeps running for the extension).
+async function ensureWindow() {
+  const wins = await chrome.windows.getAll();
+  if (wins.length) return;
+  await chrome.windows.create({url: "https://chatgpt.com/", type: "normal", focused: false});
+  try { await chrome.storage.session.remove("tabId"); } catch (e) {}
+}
+
 async function workerTab() {
   const saved = (await chrome.storage.session.get("tabId")).tabId;
   let id = null;
