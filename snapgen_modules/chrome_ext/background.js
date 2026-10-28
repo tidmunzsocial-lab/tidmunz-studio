@@ -207,7 +207,8 @@ async function openPage(tabId, url) {
         const body = document.body ? document.body.innerText.slice(0, 300) : "";
         const page = (document.title + " | " + body).replace(/\s+/g, " ").slice(0, 160);
         if (/just a moment|verify you are human|ยืนยันว่าคุณเป็นมนุษย์|checking your browser/i.test(page)) return {state: "challenge", page};
-        if (document.querySelector('form div.ProseMirror[role="textbox"]')) return {state: "ok", page};
+        if (document.querySelector('form div.ProseMirror[role="textbox"]') ||
+            document.querySelector('form #prompt-textarea[contenteditable="true"]')) return {state: "ok", page};
         return {state: "", page};
       });
     } catch (e) {}  // still navigating
@@ -317,8 +318,23 @@ async function pageSend(job) {
       for (const part of (node.message && node.message.content && node.message.content.parts) || [])
         if (part && typeof part === "object" && part.asset_pointer) oldPointers.push(part.asset_pointer);
   }
-  const editor = document.querySelector('form div.ProseMirror[role="textbox"]');
-  const form = editor.closest("form");
+  // ChatGPT can replace the composer between openPage's readiness check and this script.
+  // Re-query briefly instead of dereferencing a missing/stale editor and failing every resume.
+  let editor = null, form = null;
+  const composerUntil = Date.now() + 15000;
+  while (Date.now() < composerUntil) {
+    const candidate = document.querySelector('form div.ProseMirror[role="textbox"]') ||
+      document.querySelector('form #prompt-textarea[contenteditable="true"]');
+    const candidateForm = candidate && candidate.closest("form");
+    if (candidate && candidate.isConnected && candidateForm && candidateForm.isConnected) {
+      editor = candidate;
+      form = candidateForm;
+      break;
+    }
+    await sleep(250);
+  }
+  if (!editor || !form)
+    return {error: "ChatGPT prompt box is still loading or changed — wait for the composer in the program's Chrome window, then retry"};
   const images = job.images || [];
   if (images.length) {
     const input = [...document.querySelectorAll('input[type=file]')].find(i => i.multiple && /image/.test(i.accept))
