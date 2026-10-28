@@ -4332,6 +4332,80 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         log(f"{title}: เลือก {labels[answer['provider']]}")
         return answer["provider"]
 
+    def ask_image_limit_fallback(stage, error):
+        """Offer an explicitly confirmed API for a limited GPT image stage, or stop and wait."""
+        if not video_mode or not getattr(error, "image_generation", False) or stage not in ("storyboard", "images"):
+            return False
+        project = state["project"]
+        if stage == "storyboard":
+            if project.get("storyboard_provider", "gpt_web") != "gpt_web":
+                return False
+            api_provider = "maxplus_gpt_image_2_4k"
+            api_label = VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS[api_provider]
+            api_ready = bool(_maxplus_api_key())
+        else:
+            if image_provider_for("images") != "gpt_web":
+                return False
+            api_provider = "snapgen"
+            api_label = VIDEO_AUTO_SCENE_PROVIDER_LABELS[api_provider]
+            keyvar = runtime.get("api_key_var") or g.get("api_key_var")
+            try:
+                api_ready = bool(str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip())
+            except Exception:
+                api_ready = False
+
+        answer, event = {}, threading.Event()
+
+        def ask():
+            win = tk.Toplevel(page)
+            win.title("ChatGPT ติดลิมิตสร้างรูป")
+            win.transient(root)
+            win.resizable(False, False)
+            tk.Label(win, text="ChatGPT Web ติดลิมิตสร้างรูป",
+                     font=("TkDefaultFont", 12, "bold"), fg="#B91C1C").pack(padx=24, pady=(18, 8))
+            tk.Label(win, text=("งานที่ทำเสร็จแล้วจะเก็บไว้ ถ้าเลือก API จะทำต่อเฉพาะรูปที่ยังขาด\n"
+                                "ระบบจะแสดงคำยืนยันราคา/เครดิตก่อนส่งงานไป API\n\n"
+                                + str(error)[:500]), wraplength=600, justify="left").pack(padx=24, pady=8)
+
+            def choose(value):
+                answer["provider"] = value
+                win.destroy()
+
+            api_text = f"เปลี่ยนเป็น API: {api_label}" if api_ready else f"API ยังใช้ไม่ได้ — ตั้งค่าก่อน: {api_label}"
+            tk.Button(win, text=api_text, width=66, state="normal" if api_ready else "disabled",
+                      command=lambda: choose("api")).pack(padx=24, pady=5)
+            tk.Button(win, text="ใช้ ChatGPT Web ต่อ (หยุดรอจนลิมิตรีเซ็ต)", width=66,
+                      command=lambda: choose("web")).pack(padx=24, pady=5)
+            win.bind("<Destroy>", lambda e: event.set() if e.widget == win else None)
+            win.protocol("WM_DELETE_WINDOW", lambda: choose("web"))
+            win.grab_set()
+
+        root.after(0, ask)
+        event.wait()
+        if answer.get("provider") != "api":
+            return False
+
+        if stage == "storyboard":
+            previous = project.get("storyboard_provider", "gpt_web")
+            project["storyboard_provider"] = api_provider
+            save_project()
+            ui(lambda: (image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS[api_provider]),
+                        refresh_maxplus_model_info()))
+            if not confirm_credits():
+                project["storyboard_provider"] = previous
+                save_project()
+                ui(lambda: (image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(previous, GPT_WEB_LABEL)),
+                            refresh_maxplus_model_info()))
+                raise Stopped()
+        else:
+            if confirm_snapgen_credit_warning() != "snapgen":
+                raise Stopped()
+            project.setdefault("image_stage_providers", {})["images"] = api_provider
+            save_project()
+
+        log(f"ChatGPT ติดลิมิต — เปลี่ยนขั้น {stage} ไปใช้ {api_label}; ทำเฉพาะรูปที่ยังขาด")
+        return True
+
     def generate_via_snapgen(prompt, refs, out_dir, name, aspect, api_context=None):
         if video_mode and credit_consent_required(state["project"], state.get("snapgen_credit_acceptance")):
             raise ImageProviderError(credit_warning_text(state["project"]["snapgen_credit_warning"]))
@@ -4639,7 +4713,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     # ChatGPT quota is used up: retrying only wastes time.
                     friendly = runtime.get("_snapgen_friendly_bridge_error") or g.get("_snapgen_friendly_bridge_error")
                     message = friendly(str(exc)) if callable(friendly) else str(exc)
-                    raise RateLimited(message) from exc
+                    limited = RateLimited(message)
+                    limited.image_generation = label.startswith(("รูปตัวละคร ", "สตอรี่ชีต ", "ฉาก "))
+                    raise limited from exc
                 if "401" in str(exc) and ("ChatGPT" in str(exc) or "Provider status" in str(exc)):
                     # The account this story's history lives on has to log in again; retrying cannot help.
                     alias = ((state["project"] or {}).get("conversation") or {}).get("account_alias") or "บัญชีที่ใช้อยู่"
@@ -7393,10 +7469,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         confirmed = True
                     ui(refresh_stages, key)
                     log(f"▶ {dict((k, t) for k, t, _w in stages)[key]}")
-                    if key == "characters" and character_limit:
-                        stage_characters(limit=character_limit)
-                    else:
-                        STAGE_FUNCS[key]()
+                    try:
+                        if key == "characters" and character_limit:
+                            stage_characters(limit=character_limit)
+                        else:
+                            STAGE_FUNCS[key]()
+                    except RateLimited as exc:
+                        if not ask_image_limit_fallback(key, exc):
+                            raise
+                        if key == "characters" and character_limit:
+                            stage_characters(limit=character_limit)
+                        else:
+                            STAGE_FUNCS[key]()
+                    if not (key == "characters" and character_limit):
                         project["done"][key] = True
                     save_project()
                     ui(refresh_stages)
