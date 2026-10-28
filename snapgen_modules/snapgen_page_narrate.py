@@ -6632,6 +6632,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                             (state["project"].get("video_resolution") or "720p")
                             if clip_model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else None)
             runtime["_ai_slow2x_override"] = bool(scene.get("clip_slow"))
+            runtime["_auto_video_upscale_2x_override"] = True
             dialogue_var = cfg.get("dialogue")
             if hasattr(dialogue_var, "set") and not scene.get("dialogue"):
                 dialogue_var.set("")  # the Slot's own "มีบทพูด" switch off: narration shots are silent
@@ -6646,6 +6647,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def restore():
             runtime.get("_seedance_reference_overrides", {}).pop(slot_index, None)
             runtime["_ai_slow2x_override"] = None  # back to the Slow 2x checkbox
+            runtime["_auto_video_upscale_2x_override"] = False
             if "show_error_backup" in state:
                 runtime["show_error"] = state.pop("show_error_backup")
         try:

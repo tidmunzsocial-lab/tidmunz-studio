@@ -1885,6 +1885,8 @@ try:
         except Exception:
             output_video = None
         kwargs.setdefault("mute", _mute_download_enabled())
+        if g.get("_auto_video_upscale_2x_override"):
+            kwargs["upscale_2x"] = True
         _slow_result = _slow2x_mod.make_ai_slow2x(
             input_video,
             output_video=output_video,
@@ -1952,8 +1954,36 @@ try:
         return str(src)
 
     def _auto_upscale_video_1080p(path, log_fn=None, _ai_only=False):
-        """Upscale sub-1080 video to 1080p using FFmpeg scale+sharpen."""
+        """Apply Auto's 2x upscale override or the existing 1080p slot upscale."""
         src = Path(path)
+        if g.get("_auto_video_upscale_2x_override"):
+            if not _upscale_1080_enabled() or not src.is_file():
+                return str(src)
+            if "_topaz2x" in src.stem.lower():
+                if callable(log_fn):
+                    log_fn("Upscale 2x: ข้าม — Topaz ทำ Slow 2x และ upscale 2x ในรอบเดียวแล้ว")
+                return str(src)
+            out_stem = src.stem + "_2x"
+            out = EXPORT_VIDEO / f"{out_stem}.mp4"
+            if out.is_file() and out.stat().st_size > 0:
+                number = 2
+                while True:
+                    candidate = EXPORT_VIDEO / f"{out_stem}_{number}.mp4"
+                    if not candidate.exists():
+                        out = candidate
+                        break
+                    number += 1
+            try:
+                import ai_slow2x as _ai_slow_mod
+                result = _ai_slow_mod.upscale_video_2x(str(src), output_video=str(out), log=log_fn)
+                result_path = Path(result)
+                if result_path.is_file() and result_path.stat().st_size > 0:
+                    return str(result_path)
+                raise RuntimeError("upscale ไม่มี output")
+            except Exception as exc:
+                if callable(log_fn):
+                    log_fn(f"Upscale 2x ไม่สำเร็จ — ใช้วิดีโอต้นฉบับ: {exc}")
+                return str(src)
         if not _upscale_1080_enabled() or not src.is_file():
             return str(src)
         original_stem = src.stem
@@ -7241,9 +7271,11 @@ def _install_mute_video_checkbox():
 
         if mute_box is None:
             mute_box = add_checkbox("ปิดเสียงวิดีโอ", mute_downloaded_video_var, slow_box, 1)
-        upscale_box = next((w for w in found if str(w.cget("text")) == "Upscale 1080p"), None)
+        upscale_box = next((w for w in found if str(w.cget("text")).startswith("Upscale 1080p")), None)
         if upscale_box is None:
-            upscale_box = add_checkbox("Upscale 1080p", upscale_1080p_var, mute_box, 2)
+            upscale_box = add_checkbox("Upscale 1080p (Auto: 2×)", upscale_1080p_var, mute_box, 2)
+        else:
+            upscale_box.configure(text="Upscale 1080p (Auto: 2×)")
         _save_video_checkbox_options()
         return bool(mute_box and upscale_box)
     except Exception as e:

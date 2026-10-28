@@ -193,6 +193,88 @@ def _topaz_dirs():
     return (exe, mdir) if exe and mdir else None
 
 
+def _video_dimensions(ffmpeg, path):
+    result = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True,
+                            timeout=30, encoding="utf-8", errors="replace")
+    line = next((item for item in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()
+                 if "Video:" in item), "")
+    match = re.search(r"(?:,|\s)(\d{2,5})x(\d{2,5})(?:,|\s|\[)", line)
+    if not match:
+        raise RuntimeError("อ่านความละเอียดวิดีโอไม่ได้")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _video_2x_size(width, height):
+    """Double dimensions without changing orientation; never upscale beyond UHD 4K."""
+    if max(width, height) >= 3840:
+        return width, height
+    factor = min(2.0, 3840.0 / max(width, height))
+    return tuple(max(2, int(round(value * factor / 2)) * 2) for value in (width, height))
+
+
+def upscale_video_2x(input_video, output_video=None, log=None):
+    """Use Topaz for aspect-preserving 2x video upscale; fall back to FFmpeg."""
+    say = log if callable(log) else (lambda _msg: None)
+    src = Path(input_video)
+    if not _video_ok(src):
+        return str(input_video)
+    ffmpeg = ensure_ffmpeg_tool(log=say)
+    try:
+        width, height = _video_dimensions(ffmpeg, src)
+        target_width, target_height = _video_2x_size(width, height)
+        if (target_width, target_height) == (width, height):
+            say(f"[upscale] ข้าม — ต้นฉบับถึง 4K หรือสูงกว่าแล้ว {width}x{height}")
+            return str(src)
+        if output_video is None:
+            output_video = src.with_name(src.stem + "_2x.mp4")
+        out = Path(output_video)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        found = _topaz_dirs()
+        if found:
+            exe, mdir = found
+            env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
+            probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(src)], capture_output=True, text=True,
+                                   timeout=30, encoding="utf-8", errors="replace")
+            has_audio = any("Audio:" in item for item in ((probe.stderr or "") + "\n" + (probe.stdout or "")).splitlines())
+            vf = (f"tvai_up=model=prob-4:scale=0:w={target_width}:h={target_height}:blend=0:device=0:vram=1:instances=1,"
+                  f"scale={target_width}:{target_height}:flags=lanczos,format=yuv420p")
+            cmd = [str(exe), "-hide_banner", "-y", "-i", str(src), "-vf", vf,
+                   "-c:v", "hevc_nvenc", "-preset", "p5", "-b:v", "60M", "-pix_fmt", "yuv420p",
+                   "-tag:v", "hvc1", "-movflags", "+faststart"]
+            cmd += ["-c:a", "aac", "-b:a", "192k"] if has_audio else ["-an"]
+            cmd.append(str(out))
+            try:
+                with _enhance_lock:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3 * 3600,
+                                            encoding="utf-8", errors="replace", env=env)
+                if result.returncode == 0 and _video_ok(out):
+                    say(f"[upscale] Topaz Video AI ✓ {width}x{height} → {target_width}x{target_height}")
+                    return str(out)
+                say("[upscale] Topaz ทำไม่สำเร็จ — ใช้ FFmpeg 2x แทน")
+            except Exception as exc:
+                say(f"[upscale] Topaz error — ใช้ FFmpeg 2x แทน: {exc}")
+            out.unlink(missing_ok=True)
+
+        vf = (f"scale={target_width}:{target_height}:flags=lanczos,"
+              "unsharp=lx=5:ly=5:la=0.25:cx=5:cy=5:ca=0.0")
+        probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(src)], capture_output=True, text=True,
+                               timeout=30, encoding="utf-8", errors="replace")
+        has_audio = any("Audio:" in item for item in ((probe.stderr or "") + "\n" + (probe.stdout or "")).splitlines())
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src), "-vf", vf]
+        cmd += ["-c:a", "aac", "-b:a", "192k"] if has_audio else ["-an"]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", str(out)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
+                                encoding="utf-8", errors="replace")
+        if result.returncode or not _video_ok(out):
+            raise RuntimeError((result.stderr or "FFmpeg upscale failed")[-500:])
+        say(f"[upscale] FFmpeg 2x ✓ {width}x{height} → {target_width}x{target_height}")
+        return str(out)
+    except Exception as exc:
+        say(f"[upscale] ทำ 2x ไม่สำเร็จ — ใช้ต้นฉบับ: {exc}")
+        return str(src)
+
+
 _enhance_lock = threading.Lock()   # one Topaz job on the GPU at a time (pictures and videos share it)
 _enhance_pending = {}              # resolved path -> Event, set when its picture is done
 _enhance_pool = None
@@ -277,8 +359,9 @@ def enhance_image(path, log=None, model="rhea-1", scale=2):
     return str(path)
 
 
-def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4", fi_model="apo-8"):
-    """Slow-mo + upscale to 4K with the installed Topaz Video AI. Returns path or None (caller falls back)."""
+def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4", fi_model="apo-8",
+                upscale_2x=False):
+    """Slow-mo + upscale; Auto may request 2x while other callers retain 4K."""
     found = _topaz_dirs()
     if not found:
         return None
@@ -288,12 +371,14 @@ def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4",
     line = next((l for l in ((probe.stderr or "") + (probe.stdout or "")).splitlines() if "Video:" in l), "")
     m = re.search(r"(?:,|\s)(\d{2,5})x(\d{2,5})(?:,|\s|\[)", line)
     w, h = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
-    tw, th = (2160, 3840) if h > w else (3840, 2160)   # vertical clips -> vertical 4K
+    tw, th = (_video_2x_size(w, h) if upscale_2x
+              else ((2160, 3840) if h > w else (3840, 2160)))
     env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
-    # Interpolate first (cheaper at the source size), then upscale to 4K.
-    vf = (f"tvai_fi=model={fi_model}:slowmo={int(factor)}:fps={source_fps:g}:device=0:vram=1:instances=1,"
-          f"tvai_up=model={up_model}:scale=0:w={tw}:h={th}:blend=0:device=0:vram=1:instances=1,"
-          f"scale={tw}:{th}:flags=lanczos,format=yuv420p")   # Topaz rounds sizes; pin the exact 4K frame
+    # Interpolate first (cheaper at the source size), then upscale.
+    vf = f"tvai_fi=model={fi_model}:slowmo={int(factor)}:fps={source_fps:g}:device=0:vram=1:instances=1"
+    if (tw, th) != (w, h):
+        vf += (f",tvai_up=model={up_model}:scale=0:w={tw}:h={th}:blend=0:device=0:vram=1:instances=1")
+    vf += f",scale={tw}:{th}:flags=lanczos,format=yuv420p"   # Topaz rounds sizes; pin the exact output frame
     cmd =[str(exe), "-hide_banner", "-y", "-i", str(inp)]
     if has_audio:
         cmd += ["-af", ",".join(["atempo=0.5"] * (2 if int(factor) >= 4 else 1)), "-c:a", "aac", "-b:a", "192k"]
@@ -458,6 +543,7 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
                 pass
 
     mute_audio = bool(_kwargs.get("mute", False))
+    upscale_2x = bool(_kwargs.get("upscale_2x", False))
 
     inp = Path(input_video)
     if not _video_ok(inp):
@@ -481,13 +567,17 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
         if mute_audio:
             has_audio = False
         if int(factor) in (2, 4) and _topaz_dirs():
+            topaz_out = (out.with_name(out.stem + "_Topaz2x" + out.suffix)
+                         if upscale_2x else out)
             try:
-                done = _topaz_slow(inp, out, factor, source_fps, has_audio, say)
+                done = _topaz_slow(inp, topaz_out, factor, source_fps, has_audio, say,
+                                   upscale_2x=upscale_2x)
             except Exception as e:
                 say(f"[slow2x] Topaz error — ใช้ RIFE แทน: {e}")
                 done = None
             if done:
                 return done
+            topaz_out.unlink(missing_ok=True)
         rife = ensure_rife_tool(log=say)
         say(f"[slow2x] ใช้ RIFE AI | ต้นฉบับ {source_fps:g} FPS | Slow {factor}x")
         _started = time.time()
