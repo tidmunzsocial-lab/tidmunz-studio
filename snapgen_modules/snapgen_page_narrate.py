@@ -3189,9 +3189,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     review_var = tk.BooleanVar(value=False)
     film_var = tk.BooleanVar(value=True)  # เล่าภาพ เรื่องผี: old film look on the video
     economy_var = tk.BooleanVar(value=True)  # ออโต้: Slow 2x on every shot, longer shots, about half the credit
-    video_model_var = tk.StringVar(value=VIDEO_MODEL_LABELS["auto"])
+    video_model_var = tk.StringVar(value=VIDEO_MODEL_LABELS[VIDEO_GROK_LITE_MODEL])
     price_line_var = tk.StringVar(value="ราคาวันนี้: กำลังอ่านจากเว็บ SnapGen ...")
-    prices = {"data": None}
+    prices = {"data": None, "manual_model": False}
     clip_labels = {"map": dict(CLIP_CHOICE_LABELS)}  # seconds -> menu text; rebuilt from the website's price list
     clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
     video_res_var = tk.StringVar(value="720p")
@@ -3365,13 +3365,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                  if label == video_model_var.get()), None)
                 chosen = selected or next((key for key, label in SEEDANCE_MODELS.items()
                                            if label == video_model_var.get()), "auto")
-                if chosen != VIDEO_GROK_LITE_MODEL and project.get("video_model") == VIDEO_GROK_LITE_MODEL and not messagebox.askyesno(
-                        "โมเดลวิดีโอ",
-                        f"ค่าเริ่มต้นคือ {VIDEO_MODEL_LABELS[VIDEO_GROK_LITE_MODEL]} (ถูกที่สุดในรายการ: 720p · 10 วินาที ราว 7 เครดิตตามหน้าเว็บ) "
-                        f"โมเดลที่เลือก ({video_model_var.get()}) อาจใช้เครดิตมากกว่านี้ ใช้ต่อไหม?", parent=page):
-                    video_model_var.set(VIDEO_MODEL_LABELS[VIDEO_GROK_LITE_MODEL])
+                current_prices = prices.get("data") or {}
+                cheapest = (snapgen_prices.cheapest_grok_720p_10s(current_prices.get("rows") or [])
+                            if snapgen_prices is not None and not current_prices.get("stale") else None)
+                chosen_cost = (snapgen_prices.cost(current_prices.get("rows") or [], chosen, "720p", 10)
+                               if cheapest and chosen in VIDEO_PRICE_MODELS else None)
+                if (cheapest and chosen_cost is not None and chosen_cost > cheapest[1]
+                        and not messagebox.askyesno(
+                            "โมเดลวิดีโอ",
+                            f"ราคาล่าสุด 720p · 10 วินาที รุ่นที่ถูกกว่าระหว่าง Grok Lite/Grok Lower คือ "
+                            f"{VIDEO_MODEL_LABELS[cheapest[0]]} ({cheapest[1]:g} เครดิต) "
+                            f"รุ่นที่เลือกอาจแพงกว่า ใช้ต่อไหม?", parent=page)):
+                    previous = str(project.get("video_model") or "auto")
+                    video_model_var.set(VIDEO_MODEL_LABELS.get(previous, SEEDANCE_MODELS.get(
+                        previous, VIDEO_MODEL_LABELS["auto"])))
                     return
                 project["video_model"] = chosen
+                prices["manual_model"] = True
                 save_project()
             refresh_clip_info()
             try:
@@ -3499,13 +3509,29 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tk.Label(settings_parent, textvariable=price_line_var, bg=bg, fg="#475569", anchor="w", justify="left",
                  wraplength=1100).pack(fill="x", padx=10, pady=(0, 3))
 
+        def auto_select_cheapest_grok(project, data):
+            if snapgen_prices is None or not data or data.get("stale"):
+                return False
+            fresh = not project.get("scenes") and not (project.get("done") or {}).get("plan")
+            current = str(project.get("video_model") or "")
+            if current not in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) and not (
+                    fresh and current in ("", "auto")):
+                return False
+            cheapest = snapgen_prices.cheapest_grok_720p_10s(data.get("rows") or [])
+            if not cheapest or current == cheapest[0]:
+                return False
+            project["video_model"] = cheapest[0]
+            video_model_var.set(VIDEO_MODEL_LABELS[cheapest[0]])
+            return True
+
         def update_price_line():
             data = prices.get("data")
             if not data or snapgen_prices is None:
                 return
             project = state.get("project") or {}
             model = project.get("video_model")
-            model = model if model in VIDEO_PRICE_MODELS else VIDEO_AUTO_MODEL
+            model = model if model in VIDEO_PRICE_MODELS else (
+                VIDEO_GROK_LITE_MODEL if not project else VIDEO_AUTO_MODEL)
             seconds = int(project.get("clip_choice") or 0) or 10
             resolution = (project.get("video_resolution") or "720p") if model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else (
                 "720p" if model in SEEDANCE_MODELS else None)
@@ -3541,7 +3567,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     prices["data"] = snapgen_prices.fetch(cache)
                 except Exception:
                     prices["data"] = {"rows": [], "at": 0, "stale": True}
-                ui(update_price_line)
+
+                def apply_current_prices():
+                    project = state.get("project")
+                    if (project is not None and not prices.get("manual_model")
+                            and auto_select_cheapest_grok(project, prices["data"])):
+                        save_project()
+                        refresh_clip_info()
+                    update_price_line()
+
+                ui(apply_current_prices)
             threading.Thread(target=work, daemon=True).start()
 
         refresh_prices()
@@ -3803,6 +3838,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def show_project(folder, project):
         state.pop("snapgen_credit_acceptance", None)
+        prices["manual_model"] = False
         for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(transient, None)
         state["folder"] = str(folder)
@@ -3853,6 +3889,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 video_model, VIDEO_MODEL_LABELS["auto"])))
             clip_choice_var.set(clip_labels["map"].get(int(project.get("clip_choice") or 0), CLIP_CHOICE_LABELS[0]))
             video_res_var.set(project.get("video_resolution") or "720p")
+            auto_select_cheapest_grok(project, prices.get("data"))
+            update_price_line()
         else:
             image_provider_var.set(IMAGE_PROVIDER_LABELS.get(
                 project.get("image_provider"), GPT_WEB_LABEL))

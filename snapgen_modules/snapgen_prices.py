@@ -65,6 +65,16 @@ def cost(rows: list, model: str, resolution: str | None, seconds: int) -> float 
     return best
 
 
+def cheapest_grok_720p_10s(rows: list) -> tuple[str, float] | None:
+    """Cheapest of Grok Lite and Grok Lower for the standard 720p, 10 s clip."""
+    candidates = []
+    for model in ("grok-1.5-lite", "grok-lower"):
+        price = cost(rows, model, "720p", 10)
+        if price is not None:
+            candidates.append((model, price))
+    return min(candidates, key=lambda item: (item[1], item[0] != "grok-1.5-lite")) if candidates else None
+
+
 def options(rows: list, model: str) -> tuple:
     """(resolutions, durations) the price list offers for a program model id, in order; () when it lists none."""
     _label, name, _res, fallback = MODELS.get(model, (None, model, (), ()))
