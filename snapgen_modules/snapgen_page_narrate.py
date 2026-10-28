@@ -3365,6 +3365,20 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                  if label == video_model_var.get()), None)
                 chosen = selected or next((key for key, label in SEEDANCE_MODELS.items()
                                            if label == video_model_var.get()), "auto")
+                best = state.get("_video_best_grok_price")
+                chosen_price = (state.get("_video_model_prices_720p_10s") or {}).get(chosen)
+                ask = getattr(messagebox, "askyesno", None)
+                if best and chosen_price is not None and chosen_price > best[1] and callable(ask):
+                    if not ask(
+                            "โมเดลวิดีโอ",
+                            f"ราคาล่าสุด 720p · 10 วินาที รุ่นที่ถูกกว่าระหว่าง Grok Lite/Grok Lower คือ "
+                            f"{VIDEO_MODEL_LABELS[best[0]]} ({best[1]:g} เครดิต) แต่รุ่นที่เลือก "
+                            f"{video_model_var.get()} ใช้ {chosen_price:g} เครดิต ต้องการใช้รุ่นที่แพงกว่าหรือไม่?",
+                            parent=page):
+                        previous = str(project.get("video_model") or "auto")
+                        video_model_var.set(VIDEO_MODEL_LABELS.get(previous, SEEDANCE_MODELS.get(
+                            previous, VIDEO_MODEL_LABELS["auto"])))
+                        return
                 project["video_model"] = chosen
                 state["_video_model_manual"] = True
                 save_project()
@@ -3509,6 +3523,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             video_model_var.set(VIDEO_MODEL_LABELS[cheapest[0]])
             return True
 
+        def remember_video_prices(data):
+            if snapgen_prices is None or not data or data.get("stale"):
+                state.pop("_video_best_grok_price", None)
+                state.pop("_video_model_prices_720p_10s", None)
+                return
+            rows = data.get("rows") or []
+            state["_video_best_grok_price"] = snapgen_prices.cheapest_grok_720p_10s(rows)
+            state["_video_model_prices_720p_10s"] = {
+                model: price for model in VIDEO_PRICE_MODELS
+                if (price := snapgen_prices.cost(rows, model, "720p", 10)) is not None
+            }
+
         def update_price_line():
             data = prices.get("data")
             if not data or snapgen_prices is None:
@@ -3554,6 +3580,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     prices["data"] = {"rows": [], "at": 0, "stale": True}
 
                 def apply_current_prices():
+                    remember_video_prices(prices["data"])
                     project = state.get("project")
                     if (project is not None and not state.get("_video_model_manual")
                             and auto_select_cheapest_grok(project, prices["data"])):
@@ -3565,6 +3592,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             threading.Thread(target=work, daemon=True).start()
 
         def apply_price_default_on_open(project):
+            remember_video_prices(prices.get("data"))
             auto_select_cheapest_grok(project, prices.get("data"))
             update_price_line()
 
