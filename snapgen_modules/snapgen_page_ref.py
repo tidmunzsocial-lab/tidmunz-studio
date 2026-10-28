@@ -1076,8 +1076,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         source = Path(str(path or ""))
         if not source.is_file():
             return str(path)
+        temp = None
         try:
             from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
+            import uuid
 
             with Image.open(source) as opened:
                 if opened.info.get("snapgen_ref_layout") == "v2":
@@ -1114,7 +1116,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             y = content_h + max(4, (strip_h - (bbox[3] - bbox[1])) // 2)
             draw.text((x, y), label, fill="#374151", font=font)
 
-            temp = source.with_suffix(source.suffix + ".refnorm.tmp")
+            temp = source.with_name(f".{source.stem}.{uuid.uuid4().hex}.refnorm{source.suffix or '.png'}")
             if source.suffix.lower() == ".png":
                 metadata = PngImagePlugin.PngInfo()
                 metadata.add_text("snapgen_ref_layout", "v2")
@@ -1126,6 +1128,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         except Exception as exc:
             _ref_log(f"[Ref layout] จัดสัดส่วน/ป้ายชื่อไม่สำเร็จ ใช้รูปเดิม: {exc}")
             return str(path)
+        finally:
+            if temp is not None:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _ref_gallery_add(path, prepend=True, is_ghost=False, persist=True):
         path = str(Path(path))
