@@ -657,7 +657,7 @@ def _snapgen_friendly_bridge_error(msg):
         return limit_text
     if "model not found" in lowered or "chatgpt_unsupported_model" in lowered:
         return (
-            "ChatGPT ปฏิเสธโมเดลในคำขอของ Bridge — ข้อผิดพลาดนี้ไม่ได้ยืนยันว่าประวัติเรื่องหาย\n"
+            "ChatGPT ปฏิเสธโมเดลในคำขอจากส่วนขยาย — ข้อผิดพลาดนี้ไม่ได้ยืนยันว่าประวัติเรื่องหาย\n"
             "ตรวจโมเดลและจับคำขอที่ส่งสำเร็จจาก Chrome ของบัญชีเดิมก่อน ยังไม่ต้องกดเริ่มเรื่องใหม่\n\n"
             "รายละเอียดเดิม:\n" + raw
         )
@@ -668,10 +668,9 @@ def _snapgen_friendly_bridge_error(msg):
         return (
             "Cloudflare ปฏิเสธ Chrome session ก่อนคำขอถึง ChatGPT — SnapGen หยุดงานนี้และไม่ยิงซ้ำ\n\n"
             "วิธีแก้:\n"
-            "1. กด ⚙ Settings > Bridge > เปิด SnapGen Browser\n"
-            "2. Sign in ChatGPT ในหน้าต่างนั้น แล้วจับ request สร้างรูปที่ทำงานสำเร็จใหม่\n"
-            "3. Restart Bridge แล้วลองอีกครั้ง\n"
-            "ถ้ายังเกิดซ้ำ แปลว่า capture แบบ replay ใช้กับ session นี้ไม่ได้และ Bridge ต้องใช้ browser-backed Chrome connector\n\n"
+            "1. เปิดหน้าต่าง Chrome ของโปรแกรมและล็อกอิน ChatGPT ให้เรียบร้อย\n"
+            "2. ตรวจว่าส่วนขยาย Tidmunz ChatGPT เชื่อมต่อกับโปรแกรม\n"
+            "3. ลองส่งงานอีกครั้งจากหน้าเดิม\n\n"
             "รายละเอียดเดิม:\n" + raw
         )
     if (
@@ -679,7 +678,7 @@ def _snapgen_friendly_bridge_error(msg):
         and ("provider status: 500" in lowered or "conversation failed: 500" in lowered)
     ):
         return (
-            "ChatGPT Web ขัดข้องชั่วคราว (500) — Bridge และบัญชียังเชื่อมต่อปกติ\n"
+            "ChatGPT Web ขัดข้องชั่วคราว (500) — ส่วนขยายและบัญชียังเชื่อมต่อปกติ\n"
             "SnapGen หยุดงานนี้แล้วและไม่ยิงซ้ำ เพื่อไม่ให้เสียโควต้าเพิ่ม\n"
             "รอสักครู่แล้วกดงานเดิมใหม่หนึ่งครั้ง; ถ้ายังเกิดซ้ำค่อย refresh account capture"
         )
@@ -689,27 +688,25 @@ def _snapgen_friendly_bridge_error(msg):
         or ("provider status: 404" in lowered and "chatgpt web request failed" in lowered)
     ):
         return (
-            "ไม่พบประวัติ ChatGPT เดิมของเรื่องนี้ในบัญชีที่ Bridge กำลังใช้ — งานนี้จึงหยุดและไม่สร้างแชตใหม่อัตโนมัติ\n\n"
+            "ไม่พบประวัติ ChatGPT เดิมในบัญชีที่ล็อกอินบน Chrome ของโปรแกรม — งานนี้หยุดและไม่สร้างแชตใหม่อัตโนมัติ\n\n"
             "ตรวจสอบ:\n"
-            "1. Bridge Manager ต้องใช้บัญชีเดิมกับตอนเริ่มเรื่อง\n"
-            "2. ถ้าแชตเดิมยังอยู่ ให้ refresh account capture ของบัญชีเดิม แล้ว Restart Bridge\n"
+            "1. ใช้บัญชี ChatGPT เดิมใน Chrome ของโปรแกรม\n"
+            "2. ถ้าแชตเดิมยังอยู่ ให้ตรวจว่าหน้าต่าง Chrome เปิดอยู่และส่วนขยายเชื่อมต่อแล้ว\n"
             "3. ถ้าแชตถูกลบหรือมาจากคนละบัญชี ให้กด เริ่มเรื่องใหม่ ใน Prompt-Ref เอง แล้วส่งบทอีกครั้ง\n\n"
             "ระบบยังคงกฎประวัติเดียว: หน้า Texture จะไม่เปิดประวัติใหม่เอง\n\n"
             "รายละเอียดเดิม:\n" + raw
         )
     if _snapgen_bridge_needs_login(raw):
         return (
-            "ต้องล็อกอิน ChatGPT ใหม่ — token ของบัญชีที่ Bridge ใช้อยู่ถูกยกเลิกหรือหมดอายุ\n\n"
+            "ต้องล็อกอิน ChatGPT ใหม่ — session ใน Chrome ของโปรแกรมหมดอายุ\n\n"
             "วิธีแก้:\n"
-            "1. เปิด ⚙ Settings > Bridge Manager\n"
-            "2. กด เปิดและจับ Account อัตโนมัติ\n"
-            "3. ล็อกอิน ChatGPT ในหน้าต่าง SnapGen Browser แล้วสร้างคำขอสำเร็จ 1 ครั้ง\n"
-            "4. Restart Bridge และเริ่มเรื่องใหม่อีกครั้ง"
+            "1. เปิดหน้าต่าง Chrome ของโปรแกรม\n"
+            "2. ล็อกอิน ChatGPT ในหน้าต่างนั้น แล้วลองสร้างคำขอจากโปรแกรมอีกครั้ง"
         )
     if "429" in raw or "Too many requests" in raw or "chatgpt_rate_limited" in raw:
         return (
             "ChatGPT Web ตอบ 429 ชั่วคราว — ไม่ได้แปลว่าโควต้ารูปหมดเสมอไป และ SnapGen ไม่ส่งงานซ้ำแล้ว\n"
-            "Bridge จะหน่วงการเช็กผลให้อัตโนมัติ; ถ้ายังเกิดซ้ำให้ refresh account capture จาก request สร้างรูปที่ทำงานบนเว็บ\n\n"
+            "ส่วนขยายจะหน่วงการเช็กผลให้อัตโนมัติ; ถ้ายังเกิดซ้ำให้รอสักครู่แล้วลองใหม่จาก Chrome ของโปรแกรม\n\n"
             "รายละเอียดเดิม:\n" + raw
         )
     if ("blocked by safety policy" in lowered or "content policy violation" in lowered or
@@ -725,10 +722,10 @@ def _snapgen_friendly_bridge_error(msg):
             "no image bytes/path/url" in raw or "timed out" in raw.lower() or
             "timeout" in raw.lower()):
         return (
-            "ChatGPT Web รับงานแต่ไม่คืนไฟล์รูปให้ Bridge ภายในเวลาที่กำหนด — ไม่ใช่โควต้าหมด\n"
-            "ให้กด ⚙ Settings > Bridge แล้ว refresh account capture จาก request /backend-api/f/conversation "
-            "ของการสร้างรูปที่ทำงานสำเร็จบน Chrome จากนั้น Restart Bridge หนึ่งครั้ง\n"
-            "SnapGen หยุดงานค้างและไม่ยิงซ้ำเพื่อไม่ให้เสียโควต้าเพิ่มแล้ว\n\n"
+            "ส่วนขยาย ChatGPT รับงานแล้ว แต่ส่งไฟล์รูปกลับโปรแกรมไม่สำเร็จภายในเวลาที่กำหนด — ไม่ใช่โควต้าหมด\n"
+            "ตรวจว่าหน้าต่าง Chrome ของโปรแกรมและส่วนขยาย Tidmunz ChatGPT ยังเปิดและเชื่อมต่ออยู่ "
+            "จากนั้นลองงานใหม่ได้หนึ่งครั้ง\n"
+            "งานที่ค้างหยุดแล้วและโปรแกรมไม่ได้ส่งซ้ำ เพื่อไม่ให้เสียโควต้าเพิ่ม\n\n"
             "รายละเอียดเดิม:\n" + raw
         )
     return raw
