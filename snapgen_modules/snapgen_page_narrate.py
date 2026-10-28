@@ -3191,7 +3191,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     economy_var = tk.BooleanVar(value=True)  # ออโต้: Slow 2x on every shot, longer shots, about half the credit
     video_model_var = tk.StringVar(value=VIDEO_MODEL_LABELS[VIDEO_GROK_LITE_MODEL])
     price_line_var = tk.StringVar(value="ราคาวันนี้: กำลังอ่านจากเว็บ SnapGen ...")
-    prices = {"data": None, "manual_model": False}
+    prices = {"data": None}
     clip_labels = {"map": dict(CLIP_CHOICE_LABELS)}  # seconds -> menu text; rebuilt from the website's price list
     clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
     video_res_var = tk.StringVar(value="720p")
@@ -3365,23 +3365,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                  if label == video_model_var.get()), None)
                 chosen = selected or next((key for key, label in SEEDANCE_MODELS.items()
                                            if label == video_model_var.get()), "auto")
-                current_prices = prices.get("data") or {}
-                cheapest = (snapgen_prices.cheapest_grok_720p_10s(current_prices.get("rows") or [])
-                            if snapgen_prices is not None and not current_prices.get("stale") else None)
-                chosen_cost = (snapgen_prices.cost(current_prices.get("rows") or [], chosen, "720p", 10)
-                               if cheapest and chosen in VIDEO_PRICE_MODELS else None)
-                if (cheapest and chosen_cost is not None and chosen_cost > cheapest[1]
-                        and not messagebox.askyesno(
-                            "โมเดลวิดีโอ",
-                            f"ราคาล่าสุด 720p · 10 วินาที รุ่นที่ถูกกว่าระหว่าง Grok Lite/Grok Lower คือ "
-                            f"{VIDEO_MODEL_LABELS[cheapest[0]]} ({cheapest[1]:g} เครดิต) "
-                            f"รุ่นที่เลือกอาจแพงกว่า ใช้ต่อไหม?", parent=page)):
-                    previous = str(project.get("video_model") or "auto")
-                    video_model_var.set(VIDEO_MODEL_LABELS.get(previous, SEEDANCE_MODELS.get(
-                        previous, VIDEO_MODEL_LABELS["auto"])))
-                    return
                 project["video_model"] = chosen
-                prices["manual_model"] = True
+                state["_video_model_manual"] = True
                 save_project()
             refresh_clip_info()
             try:
@@ -3570,7 +3555,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
                 def apply_current_prices():
                     project = state.get("project")
-                    if (project is not None and not prices.get("manual_model")
+                    if (project is not None and not state.get("_video_model_manual")
                             and auto_select_cheapest_grok(project, prices["data"])):
                         save_project()
                         refresh_clip_info()
@@ -3579,6 +3564,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(apply_current_prices)
             threading.Thread(target=work, daemon=True).start()
 
+        def apply_price_default_on_open(project):
+            auto_select_cheapest_grok(project, prices.get("data"))
+            update_price_line()
+
+        state["_video_price_default_on_open"] = apply_price_default_on_open
         refresh_prices()
     else:
         tk.Label(options, text="ภาพ", bg=bg).pack(side="left")
@@ -3838,7 +3828,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def show_project(folder, project):
         state.pop("snapgen_credit_acceptance", None)
-        prices["manual_model"] = False
+        state.pop("_video_model_manual", None)
         for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(transient, None)
         state["folder"] = str(folder)
@@ -3889,8 +3879,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 video_model, VIDEO_MODEL_LABELS["auto"])))
             clip_choice_var.set(clip_labels["map"].get(int(project.get("clip_choice") or 0), CLIP_CHOICE_LABELS[0]))
             video_res_var.set(project.get("video_resolution") or "720p")
-            auto_select_cheapest_grok(project, prices.get("data"))
-            update_price_line()
+            apply_price_default = state.get("_video_price_default_on_open")
+            if callable(apply_price_default):
+                apply_price_default(project)
         else:
             image_provider_var.set(IMAGE_PROVIDER_LABELS.get(
                 project.get("image_provider"), GPT_WEB_LABEL))
