@@ -80,6 +80,12 @@ async function loop() {
   if (running) return;
   running = true;
   try {
+    // Clean up worker tabs left by older extension builds before waiting for the next job.
+    try {
+      const saved = (await chrome.storage.local.get("workerTabId")).workerTabId;
+      const tabs = await chrome.tabs.query({});
+      if (saved || tabs.some(isWorkerTab)) await workerTab();
+    } catch (e) {}
     for (;;) {
       let job = null;
       try {
@@ -114,7 +120,7 @@ async function loop() {
       }
       try { await relay("/result", {id: job.id, ...result}); } catch (e) {}
       // Leave the (possibly very long) chat so the tab does not keep it in memory between jobs.
-      try { const saved = (await chrome.storage.session.get("tabId")).tabId; if (saved) await chrome.tabs.update(saved, {url: "https://chatgpt.com/"}); } catch (e) {}
+      try { const saved = (await chrome.storage.local.get("workerTabId")).workerTabId; if (saved) await chrome.tabs.update(saved, {url: "https://chatgpt.com/"}); } catch (e) {}
       if (job.type === "image") account.checked = 0;  // read the quota again after a picture
       badge("ON", "#10A37F");
     }
@@ -128,18 +134,45 @@ async function loop() {
 async function ensureWindow() {
   const wins = await chrome.windows.getAll();
   if (wins.length) return;
-  await chrome.windows.create({url: "https://chatgpt.com/", type: "normal", focused: false, populate: true});
-  try { await chrome.storage.session.remove("tabId"); } catch (e) {}
+  const win = await chrome.windows.create({url: "https://chatgpt.com/", type: "normal", focused: false, populate: true});
+  const tab = win && win.tabs && win.tabs.find(t => Number.isInteger(t.id));
+  if (tab) {
+    try { await chrome.tabs.update(tab.id, {pinned: true, autoDiscardable: false}); } catch (e) {}
+    try { await chrome.storage.local.set({workerTabId: tab.id}); } catch (e) {}
+  } else {
+    try { await chrome.storage.local.remove("workerTabId"); } catch (e) {}
+  }
+}
+
+function isWorkerTab(tab) {
+  return /^https:\/\/chatgpt\.com\//.test(tab.url || tab.pendingUrl || "") &&
+    tab.pinned === true && tab.autoDiscardable === false;
+}
+
+async function pruneWorkerTabs(keepId) {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({}); } catch (e) { return; }
+  await Promise.all(tabs.filter(tab => tab.id !== keepId && isWorkerTab(tab))
+    .map(tab => chrome.tabs.remove(tab.id).catch(() => {})));
 }
 
 async function workerTab() {
-  const saved = (await chrome.storage.session.get("tabId")).tabId;
+  const saved = (await chrome.storage.local.get("workerTabId")).workerTabId;
   let id = null;
   if (saved) {
     try {
       const tab = await chrome.tabs.get(saved);
       if (tab && /^https:\/\/chatgpt\.com\//.test(tab.url || tab.pendingUrl || "")) id = tab.id;
     } catch (e) {}
+  }
+  if (id === null) {
+    // A previous extension build may have been reloaded: session storage is cleared but its
+    // pinned, non-discardable worker tab survives. Adopt one and close only matching worker tabs.
+    let tabs = [];
+    try { tabs = await chrome.tabs.query({}); } catch (e) {}
+    const oldWorkers = tabs.filter(isWorkerTab).sort((a, b) =>
+      Number(b.active) - Number(a.active) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
+    if (oldWorkers.length) id = oldWorkers[0].id;
   }
   if (id === null) {
     let tab;
@@ -161,11 +194,12 @@ async function workerTab() {
         throw new Error("Cannot open ChatGPT work tab — open the program's Chrome window, then try again");
       await chrome.tabs.update(tab.id, {pinned: true});
     }
-    await chrome.storage.session.set({tabId: tab.id});
     id = tab.id;
   }
   // Chrome's memory saver must not unload (and reload) the work tab in the middle of a job.
   try { await chrome.tabs.update(id, {autoDiscardable: false}); } catch (e) {}
+  await chrome.storage.local.set({workerTabId: id});
+  await pruneWorkerTabs(id);
   return id;
 }
 
@@ -183,13 +217,13 @@ async function waitLoaded(tabId, limitMs) {
 // discarded page). Then drop that tab and open a fresh one, so one bad tab never fails every job.
 async function freshTab(tabId, url) {
   try { await chrome.tabs.remove(tabId); } catch (e) {}
-  try { await chrome.storage.session.remove("tabId"); } catch (e) {}
+  try { await chrome.storage.local.remove("workerTabId"); } catch (e) {}
   const id = await workerTab();
   await chrome.tabs.update(id, {url});
   return id;
 }
 
-async function openPage(tabId, url) {
+async function openPage(tabId, url, retryWithFreshTab = true) {
   try {
     await chrome.tabs.update(tabId, {url});
   } catch (e) {
@@ -206,6 +240,7 @@ async function openPage(tabId, url) {
       ready = await inPage(tabId, () => {
         const body = document.body ? document.body.innerText.slice(0, 300) : "";
         const page = (document.title + " | " + body).replace(/\s+/g, " ").slice(0, 160);
+        if (/^\/auth\/(?:login|logout)(?:\/|$)/i.test(location.pathname)) return {state: "logged_out", page};
         if (/just a moment|verify you are human|ยืนยันว่าคุณเป็นมนุษย์|checking your browser/i.test(page)) return {state: "challenge", page};
         if (document.querySelector('form div.ProseMirror[role="textbox"]') ||
             document.querySelector('form #prompt-textarea[contenteditable="true"]')) return {state: "ok", page};
@@ -216,10 +251,16 @@ async function openPage(tabId, url) {
     if (ready && ready.page) seen = ready.page;
     if (ready && ready.state === "challenge")
       throw new Error("ChatGPT asks to confirm you are human — open the program's Chrome window and confirm, then try again");
+    if (ready && ready.state === "logged_out")
+      throw new Error("ChatGPT is logged out in the program's Chrome window — log in, then try again");
     if (!reloaded && Date.now() - start > 45000) {  // stuck once: reload the tab and wait again
       reloaded = true;
       try { await chrome.tabs.reload(tabId); } catch (e) {}
     }
+  }
+  if (retryWithFreshTab) {
+    const replacement = await freshTab(tabId, url);
+    return openPage(replacement, url, false);
   }
   throw new Error("ChatGPT page not ready after 2 minutes — the window shows: " + (seen || "nothing"));
 }
