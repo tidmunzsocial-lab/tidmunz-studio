@@ -7,7 +7,7 @@ import pytest
 
 
 @pytest.mark.parametrize("provider,ref_count,expected", [
-    ("maxplus", 13, 9), ("maxplus", 2, 4), ("gpt_web", 13, 6),
+    ("snapgen", 19, 16), ("snapgen", 2, 4), ("gpt_web", 13, 6),
 ])
 def test_storyboard_continues_with_provider_limit(tmp_path, provider, ref_count, expected):
     source = Path(__file__).resolve().parents[1] / "snapgen_modules/snapgen_page_narrate.py"
@@ -31,8 +31,7 @@ def test_storyboard_continues_with_provider_limit(tmp_path, provider, ref_count,
         "previous_board_sheet": lambda *args: "previous.png",
         "attachments_for": lambda scene: refs,
         "image_provider_for": lambda stage: provider,
-        "is_video_auto_maxplus_provider": lambda value: value == "maxplus",
-        "VIDEO_AUTO_MAXPLUS_MODELS": {"maxplus": {"max_references": 9, "label": "MaxPlus"}},
+        "SNAPGEN_LABEL": "SnapGen API · GPT Image 2.5 · 1K",
         "with_retries": lambda label, action: action(),
         "make_image": make_image, "board_request": lambda *args, **kwargs: "nine shots",
         "style_text": lambda: "realistic", "crop_board": noop,

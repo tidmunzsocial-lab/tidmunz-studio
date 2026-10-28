@@ -9,8 +9,6 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from email import policy
-from email.parser import BytesParser
 
 import pytest
 from PIL import Image
@@ -27,6 +25,16 @@ def load(scope, name, parent=None):
     node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
     exec(compile(ast.Module(body=[node], type_ignores=[]), N.__file__, "exec"), scope)
     return scope[name]
+
+
+def test_storyboard_provider_menu_offers_snapgen_api():
+    assert N.VIDEO_AUTO_IMAGE_PROVIDER_LABELS == {
+        "gpt_web": N.GPT_WEB_LABEL,
+        "snapgen": "SnapGen API · GPT Image 2.5 · 1K",
+    }
+    assert N.VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS == N.VIDEO_AUTO_IMAGE_PROVIDER_LABELS
+    assert N.normalize_video_auto_storyboard_provider("gpt_web") == "gpt_web"
+    assert N.normalize_video_auto_storyboard_provider("retired-provider") == "snapgen"
 
 
 class Widget:
@@ -58,7 +66,7 @@ def chooser_scope(tmp_path, answers):
                 self.buttons[N.VIDEO_AUTO_SCENE_PROVIDER_LABELS[answer]]()
     class Button(Widget):
         def __init__(self, win, text, command, **kwargs): win.buttons[text] = command
-    state = {"project": {"done": {}, "storyboard_provider": "maxplus_gpt_image_2_4k",
+    state = {"project": {"done": {}, "storyboard_provider": "snapgen",
                          "scenes": [{"image": "keep-existing.png"}]}, "busy": True}
     scope = dict(vars(N), state=state, video_mode=True, page=None,
                  refresh_snapgen_credit_warning=lambda: None,
@@ -86,7 +94,7 @@ def test_stop_resume_and_restart_ask_once_per_run_and_keep_storyboard(tmp_path):
     scope["state"]["snapgen_credit_acceptance"] = {"ceiling": 999}
     for key in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
         scope["state"][key] = True
-    assert scope["image_provider_for"]("storyboard") == "maxplus_gpt_image_2_4k"
+    assert scope["image_provider_for"]("storyboard") == "snapgen"
     worker()
     assert "snapgen_credit_acceptance" not in scope["state"]
     assert not any(key in scope["state"] for key in (
@@ -98,7 +106,7 @@ def test_stop_resume_and_restart_ask_once_per_run_and_keep_storyboard(tmp_path):
     worker()
     assert seen == ["snapgen"] * 8 + ["gpt_web"] * 8 and len(dialogs) == 2
     assert restored["scenes"][0]["image"] == "keep-existing.png"
-    assert scope["image_provider_for"]("storyboard") == "maxplus_gpt_image_2_4k"
+    assert scope["image_provider_for"]("storyboard") == "snapgen"
     assert not any(message.startswith("❌") for message in logs)
 
 
@@ -206,7 +214,7 @@ def test_api_reference_overflow_fails_before_any_submission(tmp_path):
         scope["stage_images"]()
 
 
-def test_video_auto_sends_real_snapgen_multipart_with_panel_first(tmp_path, monkeypatch):
+def test_video_auto_sends_snapgen_1k_request_with_panel_first(tmp_path, monkeypatch):
     scope, paths = batch_scope(tmp_path, 1)
     scope["IMAGES_PER_CHAT"] = 12
     load(scope, "generate_via_snapgen")
@@ -219,24 +227,23 @@ def test_video_auto_sends_real_snapgen_multipart_with_panel_first(tmp_path, monk
     requests = []
     def reply(request, **kwargs):
         requests.append(request)
-        return io.BytesIO(json.dumps({"used_credit": 1, "image": "data:image/png;base64," +
-                         base64.b64encode(generated).decode("ascii")}).encode())
+        payload = ({"id": "job-1", "status": "queued"} if request.get_method() == "POST" else
+                   {"id": "job-1", "status": "succeeded", "charged_microusd": "8500",
+                    "result": {"urls": ["data:image/png;base64," +
+                                           base64.b64encode(generated).decode("ascii")]}})
+        return io.BytesIO(json.dumps(payload).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     scope["stage_images"]()
-    assert len(requests) == 1
+    assert [request.get_method() for request in requests] == ["POST", "GET"]
     request = requests[0]
-    assert request.full_url.endswith("/imagen/gpt-image-2.5-lower")
-    assert request.get_header("X-api-key") == "test-key"
-    message = BytesParser(policy=policy.default).parsebytes(
-        b"Content-Type: " + request.get_header("Content-type").encode() + b"\r\n\r\n" + request.data)
-    parts = list(message.iter_parts())
-    fields = {p.get_param("name", header="content-disposition"): p.get_content().strip()
-              for p in parts if not p.get_filename()}
-    assert fields["aspect_ratio"] == "9:16" and "shot-0" in fields["prompt"]
+    assert request.full_url == N.SNAPGEN_IMAGE_URL
+    assert request.get_header("Authorization") == "Bearer test-key"
+    assert request.get_header("Prefer") == "respond-async"
+    fields = json.loads(request.data)
+    assert fields["model"] == "gpt-image-2.5-ext" and fields["resolution"] == "1K"
+    assert fields["size"] == "9:16" and "shot-0" in fields["prompt"]
     assert "STORYBOARD PANEL" in fields["prompt"]
-    files = [p for p in parts if p.get_filename()]
-    assert [p.get_filename() for p in files] == ["panel.png", "actor.png", "location.png"]
-    assert all(p.get_payload(decode=True) == generated for p in files)
+    assert [base64.b64decode(ref.split(",", 1)[1]) for ref in fields["image_urls"]] == [generated] * 3
     assert Path(scope["state"]["project"]["scenes"][0]["image"]).read_bytes() == generated
 
 

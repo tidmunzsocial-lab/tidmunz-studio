@@ -21,7 +21,7 @@ def test_524_survives_restart_and_never_silently_resubmits(tmp_path, monkeypatch
     monkeypatch.setattr(N.urllib.request, "urlopen", timeout)
     def run(**kwargs):
         return N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "test-key", **kwargs)
-    with pytest.raises(RuntimeError, match="524.*History"):
+    with pytest.raises(RuntimeError, match="HTTP 524"):
         run()
     receipt = next(tmp_path.glob(".*.json"))
     assert json.loads(receipt.read_text()) == {"task_id": None}
@@ -32,7 +32,9 @@ def test_524_survives_restart_and_never_silently_resubmits(tmp_path, monkeypatch
         run(confirm_resubmit=lambda name: False)
     assert calls == ["POST"]
     monkeypatch.setattr(N.urllib.request, "urlopen", lambda request, **kwargs:
-        (calls.append(request.get_method()) or io.BytesIO(json.dumps({"image": IMAGE}).encode())))
+        (calls.append(request.get_method()) or io.BytesIO(json.dumps({
+            "id": "recovered-job", "status": "succeeded", "charged_microusd": "8500",
+            "result": {"urls": [IMAGE]}}).encode())))
     assert Path(run(confirm_resubmit=lambda name: name == "scene_001")).read_bytes() == b"generated-image"
     assert calls == ["POST", "POST"] and not receipt.exists()
 
@@ -43,7 +45,7 @@ def test_known_task_survives_poll_failure_and_resume_uses_only_get(tmp_path, mon
     def reply(request, **kwargs):
         calls.append(request.get_method())
         if request.get_method() == "POST":
-            return io.BytesIO(b'{"uuid":"existing-job"}')
+            return io.BytesIO(b'{"id":"existing-job","status":"queued"}')
         raise HTTPError(request.full_url, 524, "timeout", {}, io.BytesIO(b"timeout"))
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     def run():
@@ -53,25 +55,22 @@ def test_known_task_survives_poll_failure_and_resume_uses_only_get(tmp_path, mon
     assert calls == ["POST", "GET", "GET", "GET"]
     assert json.loads(next(tmp_path.glob(".*.json")).read_text())["task_id"] == "existing-job"
     monkeypatch.setattr(N.urllib.request, "urlopen", lambda request, **kwargs:
-        (calls.append(request.get_method()) or io.BytesIO(json.dumps(
-            {"uuid": "existing-job", "used_credit": 15, "image": IMAGE}).encode())))
+        (calls.append(request.get_method()) or io.BytesIO(json.dumps({
+            "id": "existing-job", "status": "succeeded", "charged_microusd": "150000",
+            "result": {"urls": [IMAGE]}}).encode())))
     assert Path(run()).read_bytes() == b"generated-image"
     assert calls[-1] == "GET" and calls.count("POST") == 1
     assert records == [{"task_id": "existing-job", "used_credit": 15}]
 
 
-@pytest.mark.parametrize("error", [TimeoutError("stream timeout"), N.http.client.IncompleteRead(b"partial")])
-def test_stream_disconnect_recovers_known_task_without_another_post(tmp_path, monkeypatch, error):
+def test_known_async_task_recovers_without_another_post(tmp_path, monkeypatch):
     calls = []
-    class Stream:
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def __iter__(self):
-            yield b'data: {"uuid":"stream-job"}\n'
-            raise error
     def reply(request, **kwargs):
         calls.append(request.get_method())
-        return Stream() if request.get_method() == "POST" else io.BytesIO(json.dumps({"image": IMAGE}).encode())
+        payload = ({"id": "stream-job", "status": "queued"} if request.get_method() == "POST" else
+                   {"id": "stream-job", "status": "succeeded", "charged_microusd": "8500",
+                    "result": {"urls": [IMAGE]}})
+        return io.BytesIO(json.dumps(payload).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     result = N.snapgen_image("scene", [], str(tmp_path), "scene", "9:16", "key")
     assert Path(result).read_bytes() == b"generated-image" and calls == ["POST", "GET"]

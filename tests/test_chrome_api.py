@@ -87,6 +87,7 @@ def test_errors_map_to_codes_pages_already_understand():
 def test_relay_serves_the_api_under_its_token_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     import snapgen_chrome_relay as relay
+    monkeypatch.setattr(relay, "PORTS", (0,))  # Avoid colliding with a running Tidmunz Studio relay.
     root = relay.api_root()
     assert root.startswith("http://127.0.0.1:") and root.rsplit("/", 1)[1] == relay.RELAY.token
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import math
 import os
 import re
 import shutil
@@ -80,64 +81,26 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Heavy work (FFmpeg, Whisper) runs below normal priority so the PC stays usable.
 LOW_PRIORITY = NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
 _ENCODER_CACHE: dict = {}
-SNAPGEN_IMAGE_URL = "https://api.snapgen.ai/uapi/v1/imagen/gpt-image-2.5-lower"
+SNAPGEN_IMAGE_URL = "https://api.snapgen.org/v1/images/generations"
 SNAPGEN_USER_AGENT = "TidmunzStudio/1.0"
-MAXPLUS_IMAGE_BASE = "https://api.maxplus-ai.cc"
-MAXPLUS_IMAGE_URL = MAXPLUS_IMAGE_BASE + "/v1/images/generations"
-MAXPLUS_IMAGE_EDIT_URL = MAXPLUS_IMAGE_BASE + "/v1/images/edits"
-MAXPLUS_ME_URL = MAXPLUS_IMAGE_BASE + "/v1/me"
-MAXPLUS_IMAGE_MODEL = "gpt-image-2.5-flare-4k"
-MAXPLUS_IMAGE_LABEL = "MaxPlus GPT Image 2.5 Flare · 4K"
-MAXPLUS_GPT_IMAGE_2_4K_MODEL = "gpt-image-2-4k"
-MAXPLUS_GPT_IMAGE_2_4K_LABEL = "MaxPlus GPT Image 2 · 4K"
-MAXPLUS_SEEDREAM_5_PRO_2K_MODEL = "doubao-seedream-5-0-pro"
-MAXPLUS_SEEDREAM_5_PRO_2K_LABEL = "MaxPlus Seedream 5.0 Pro · 2K"
-MAXPLUS_API_CONFIG_KEY = "maxplus_image_api_key"
 COMFYUI_URL = os.environ.get("SNAPGEN_COMFYUI_URL", "")
 GPT_WEB_LABEL = "GPT Web (Chrome เดิม)"
-SNAPGEN_LABEL = "SnapGen GPT API · Image 2.5 Lower"
+SNAPGEN_LABEL = "SnapGen API · GPT Image 2.5 · 1K"
 QWEN_LABEL = "Qwen 2.1 (ComfyUI ในเครื่อง)"
 PER_STAGE_LABEL = "เลือกแยกตามขั้น (ถามครั้งละหัวข้อ)"
 IMAGE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL, "snapgen": SNAPGEN_LABEL,
                          "qwen": QWEN_LABEL, "per_stage": PER_STAGE_LABEL}
 VIDEO_AUTO_SCENE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL,
                                   "snapgen": SNAPGEN_LABEL + " · พร้อมกันสูงสุด 5 งาน"}
-VIDEO_AUTO_MAXPLUS_MODELS = {
-    "maxplus": {"model": MAXPLUS_IMAGE_MODEL, "label": MAXPLUS_IMAGE_LABEL,
-                "quality": "high", "max_references": 16,
-                "estimated_price": "$5.00 ≈ ฿1.67", "estimated_usd": 5.00,
-                "estimated_thb": 1.67, "resolution": "4K"},
-    "maxplus_gpt_image_2_4k": {"model": MAXPLUS_GPT_IMAGE_2_4K_MODEL,
-                                "label": MAXPLUS_GPT_IMAGE_2_4K_LABEL,
-                                "quality": "high", "max_references": 9,
-                                "estimated_price": "$2.00 ≈ ฿0.67", "estimated_usd": 2.00,
-                                "estimated_thb": 0.67, "resolution": "4K"},
-    "maxplus_seedream_5_pro_2k": {
-        "model": MAXPLUS_SEEDREAM_5_PRO_2K_MODEL,
-        "label": MAXPLUS_SEEDREAM_5_PRO_2K_LABEL,
-        "quality": None, "max_references": 10,
-        "estimated_price": "$2.48 ≈ ฿0.83", "estimated_usd": 2.48,
-        "estimated_thb": 0.83, "resolution": "2K",
-        "size_by_aspect": {
-            "1:1": "2048x2048", "4:3": "2368x1776", "3:4": "1776x2368",
-            "16:9": "2816x1584", "9:16": "1584x2816", "3:2": "2496x1664",
-            "2:3": "1664x2496", "21:9": "3136x1344",
-        },
-    },
-}
 VIDEO_AUTO_IMAGE_PROVIDER_LABELS = {
     "gpt_web": GPT_WEB_LABEL,
-    **{key: model["label"] for key, model in VIDEO_AUTO_MAXPLUS_MODELS.items()},
+    "snapgen": SNAPGEN_LABEL,
 }
-VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS = {
-    "gpt_web": GPT_WEB_LABEL,
-    **{key: f"{model['label']} · {model['estimated_price']}/รูป"
-       for key, model in VIDEO_AUTO_MAXPLUS_MODELS.items()},
-}
+VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS = dict(VIDEO_AUTO_IMAGE_PROVIDER_LABELS)
 
 
-def is_video_auto_maxplus_provider(provider: str) -> bool:
-    return provider in VIDEO_AUTO_MAXPLUS_MODELS
+def normalize_video_auto_storyboard_provider(provider):
+    return provider if isinstance(provider, str) and provider in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else "snapgen"
 
 
 UPSCALE_LABELS = {
@@ -222,7 +185,7 @@ def _image_result(value):
             found = _image_result(item)
             if found:
                 return found
-        for key in ("data", "images", "result", "output", "generated_image", "generated_images"):
+        for key in ("data", "images", "result", "urls", "output", "generated_image", "generated_images"):
             found = _image_result(value.get(key))
             if found:
                 return found
@@ -259,12 +222,81 @@ def _save_image_result(result, target: Path, api_key: str = "") -> str:
 
 def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
                   aspect: str, api_key: str, on_credit=None, confirm_resubmit=None) -> str:
+    """Create a GPT Image 2.5 Ext 1K image through the shared SnapGen account."""
     if not api_key:
         raise RuntimeError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
-    files = [("files", p, Path(p).read_bytes()) for p in refs if Path(p).is_file()]
     import hashlib
-    fingerprint = hashlib.sha256(json.dumps([prompt, aspect, api_key,
-        [hashlib.sha256(data).hexdigest() for _, _, data in files]], ensure_ascii=False).encode()).hexdigest()
+    import mimetypes
+
+    references = []
+    for raw_path in refs:
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            mime = "image/png"
+        elif data.startswith(b"\xff\xd8\xff"):
+            mime = "image/jpeg"
+        elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            mime = "image/webp"
+        else:
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if not mime.startswith("image/"):
+            raise RuntimeError(f"ไฟล์อ้างอิงไม่ใช่รูปภาพ: {path.name}")
+        if mime not in {"image/png", "image/jpeg", "image/webp"}:
+            import io
+            from PIL import Image, ImageOps
+            with Image.open(io.BytesIO(data)) as source:
+                image = ImageOps.exif_transpose(source)
+                alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
+                image = image.convert("RGBA" if alpha else "RGB")
+                mime = "image/webp" if alpha else "image/jpeg"
+                buffer = io.BytesIO()
+                image.save(buffer, "WEBP" if alpha else "JPEG", quality=90)
+                data = buffer.getvalue()
+        references.append((path, mime, data))
+    if len(references) > 16:
+        raise RuntimeError(f"GPT Image 2.5 Ext รับรูปอ้างอิงได้สูงสุด 16 รูป (ได้รับ {len(references)})")
+
+    # The JSON endpoint caps the complete request at 10 MiB; leave room for base64 expansion and prompt text.
+    max_request_bytes = 7 * 1024 * 1024
+    if sum(len(data) for _, _, data in references) > max_request_bytes:
+        import io
+        from PIL import Image, ImageOps
+        per_image = max(256 * 1024, max_request_bytes // max(1, len(references)))
+        prepared = []
+        for path, mime, data in references:
+            if len(data) > per_image:
+                with Image.open(io.BytesIO(data)) as source:
+                    image = ImageOps.exif_transpose(source)
+                    alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
+                    image = image.convert("RGBA" if alpha else "RGB")
+                    mime = "image/webp" if alpha else "image/jpeg"
+                    for _ in range(12):
+                        for quality in (92, 85, 78):
+                            buffer = io.BytesIO()
+                            image.save(buffer, "WEBP" if alpha else "JPEG", quality=quality,
+                                       **({} if alpha else {"subsampling": 0}))
+                            data = buffer.getvalue()
+                            if len(data) <= per_image:
+                                break
+                        if len(data) <= per_image:
+                            break
+                        scale = min(0.85, (per_image / len(data)) ** 0.5 * 0.95)
+                        image = image.resize((max(1, int(image.width * scale)),
+                                              max(1, int(image.height * scale))), Image.Resampling.LANCZOS)
+                if len(data) > per_image:
+                    raise RuntimeError(f"บีบอัดรูปอ้างอิง {path.name} สำหรับ SnapGen ไม่สำเร็จ")
+            prepared.append((path, mime, data))
+        references = prepared
+
+    data_urls = [f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+                 for _path, mime, data in references]
+    ref_hashes = [hashlib.sha256(data).hexdigest() for _path, _mime, data in references]
+
+    fingerprint = hashlib.sha256(json.dumps(
+        [prompt, aspect, api_key, ref_hashes], ensure_ascii=False).encode("utf-8")).hexdigest()
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     receipt = Path(output_dir) / f".{name}_snapgen_{fingerprint[:16]}.json"
     previous = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
@@ -272,312 +304,106 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
     if previous and not task_id:
         if not callable(confirm_resubmit) or not confirm_resubmit(name):
             raise RuntimeError(f"{name}: งาน SnapGen ก่อนหน้าหมดเวลารอโดยไม่ได้เลขงาน — อาจหักเครดิตแล้ว "
-                               "ตรวจ SnapGen History แล้วใช้รูปที่ได้ หรือเลือก GPT Chrome; ยังไม่ส่ง API ซ้ำ")
+                               "ตรวจ SnapGen History ก่อนทำใหม่; ยังไม่ส่ง API ซ้ำ")
 
     def remember(task=None):
-        # No prompt, reference bytes or account key is written to this receipt.
+        # Persist only the gateway task ID; never write prompts, reference bytes, or API keys.
         temporary = receipt.with_suffix(".tmp")
         temporary.write_text(json.dumps({"task_id": task}), encoding="utf-8")
         temporary.replace(receipt)
 
-    # Lower has fixed output settings and does not accept resolution/mode/background.
-    body, boundary = _multipart({"prompt": prompt, "aspect_ratio": aspect}, files)
-    request = urllib.request.Request(
-        SNAPGEN_IMAGE_URL, data=body, method="POST",
-        headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
-                 "Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}"})
-    payload = {"uuid": task_id} if task_id else None
-    image = None
-    billing = {"task_id": task_id, "used_credit": None}
+    def read_json(response):
+        return json.loads(response.read().decode("utf-8", "replace"))
 
-    def report_credit(value, final=False):
-        nonlocal billing
-        found = image_billing(value, billing["task_id"])
-        if found["task_id"]:
-            remember(found["task_id"])
-        if found["used_credit"] == 0 and not final and not _image_result(value):
-            found["used_credit"] = None  # Queued jobs may report zero before billing.
-        if found["used_credit"] is not None:
-            if on_credit and found != billing:
-                on_credit(found)
-            billing = found
-        elif found["task_id"]:
-            billing["task_id"] = found["task_id"]
-    if not task_id:
-        remember()  # Persist before POST: a crash/timeout must never silently resubmit a paid job.
+    last_reported = [None]
+    def report_credit(payload):
+        if not isinstance(payload, dict):
+            return
+        found_id = payload.get("id") or task_id
+        raw = payload.get("charged_microusd")
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
-                for candidate in image_response_items(response):
-                    payload = candidate
-                    report_credit(payload)
-                    image = _image_result(candidate)
-                    if image:
-                        break
+            used = float(raw) / 10000 if raw is not None else None
+        except (TypeError, ValueError):
+            used = None
+        if used is not None and (not math.isfinite(used) or used < 0):
+            used = None
+        record = {"task_id": str(found_id) if found_id else None, "used_credit": used}
+        if on_credit and (used is not None or payload.get("status") == "succeeded") and record != last_reported[0]:
+            last_reported[0] = record
+            on_credit(record)
+
+    task = None
+    if not task_id:
+        body = {"model": "gpt-image-2.5-ext", "prompt": prompt, "resolution": "1K",
+                "size": aspect, "n": 1}
+        if data_urls:
+            body["image_urls"] = data_urls
+        encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        idempotency_key = f"tidmunz-{fingerprint}"
+        request = urllib.request.Request(
+            SNAPGEN_IMAGE_URL, data=encoded, method="POST",
+            headers={"Authorization": f"Bearer {api_key}", "User-Agent": SNAPGEN_USER_AGENT,
+                     "Accept": "application/json", "Content-Type": "application/json",
+                     "Prefer": "respond-async", "Idempotency-Key": idempotency_key})
+        remember()  # If POST times out, require confirmation before any retry.
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                task = read_json(response)
+                task_id = (task.get("id") if isinstance(task, dict) else None) or response.headers.get("x-gateway-task-id")
+                if task_id:
+                    remember(task_id)
+        except urllib.error.HTTPError as exc:
+            code = getattr(exc, "code", None)
+            detail = exc.read().decode("utf-8", "replace")[:500]
+            if code and 400 <= code < 500 and code != 408:
+                receipt.unlink(missing_ok=True)
+            raise RuntimeError(f"SnapGen GPT Image 2.5 Ext HTTP {code or 'ขัดข้อง'}: {detail}") from exc
         except (OSError, ValueError, http.client.HTTPException) as exc:
-            if not billing["task_id"]:
-                code = getattr(exc, "code", None)
-                if code and 400 <= code < 500 and code != 408:
-                    receipt.unlink(missing_ok=True)  # Explicit rejection, not an ambiguous timeout.
-                detail = (exc.read().decode("utf-8", "replace")[:500]
-                          if hasattr(exc, "read") and code != 524 else str(exc)[:200])
-                if code == 524 or isinstance(exc, (TimeoutError, ConnectionError)):
-                    detail = ("หมดเวลารอผล — งานอาจยังสร้างและหักเครดิตอยู่ "
-                              "ตรวจ SnapGen History หรือเลือก GPT Chrome; โปรแกรมยังไม่ส่งซ้ำ")
-                raise RuntimeError(f"SnapGen GPT Image HTTP {code or 'ขัดข้อง'}: {detail}") from exc
-            payload = {"uuid": billing["task_id"]}  # A known job can be recovered with GET only.
-    if not image and isinstance(payload, dict):
-        task_id = billing["task_id"]
-        if task_id:
-            poll_errors = 0
-            for _ in range(180):
-                poll = urllib.request.Request(
-                    "https://api.snapgen.ai/uapi/v1/history/" + urllib.parse.quote(str(task_id), safe=""),
-                    headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
-                             "Accept": "application/json"})
-                try:
-                    with urllib.request.urlopen(poll, timeout=60) as response:
-                        payload = json.load(response)
-                    poll_errors = 0
-                except (OSError, ValueError, http.client.HTTPException) as exc:
-                    poll_errors += 1
-                    if poll_errors >= 3:
-                        raise RuntimeError(f"ดึงผล SnapGen History {task_id} ไม่สำเร็จ — กดทำต่อเพื่อดึงงานเดิม; ไม่ยิงใหม่") from exc
-                    time.sleep(3)
-                    continue
-                report_credit(payload)
-                image = _image_result(payload)
-                if image:
-                    break
-                status = str(payload.get("status") or "").lower() if isinstance(payload, dict) else ""
-                if status in {"3", "failed", "error", "cancelled", "canceled"}:
-                    receipt.unlink(missing_ok=True)
-                    code = str(payload.get("error_code") or payload.get("status_desc") or "failed")
-                    detail = str(payload.get("error_message") or "ผู้ให้บริการไม่ได้ระบุสาเหตุ")[:600]
-                    credit = payload.get("used_credit")
-                    billed = f" · ใช้เครดิต {credit}" if credit is not None else ""
-                    raise RuntimeError(f"SnapGen GPT Image สร้างไม่สำเร็จ [{code}]: {detail}"
-                                       f" · History {task_id}{billed}")
-                time.sleep(3)
-    if not image:
-        raise RuntimeError(f"SnapGen ยังไม่ได้ส่งภาพกลับมา · History {billing['task_id'] or 'ยังไม่ได้เลขงาน'} "
-                           "— เก็บสถานะไว้แล้ว ตรวจ History ก่อนทำต่อ")
-    if on_credit and billing["used_credit"] is None:
-        if billing["task_id"]:
+            raise RuntimeError("SnapGen GPT Image 2.5 Ext: ส่งคำขอแล้วแต่ยังไม่ได้ task ID — ตรวจงานใน SnapGen "
+                               "ก่อนยืนยันส่งใหม่; ระบบจะไม่ยิงซ้ำอัตโนมัติ") from exc
+        if not task_id and isinstance(task, dict) and task.get("status") not in ("succeeded", "failed"):
+            raise RuntimeError("SnapGen ไม่ได้ส่ง task ID กลับมา — ตรวจ SnapGen ก่อนทำใหม่")
+
+    if not isinstance(task, dict) or task.get("status") not in ("succeeded", "failed", "expired", "reconciliation_required"):
+        poll_errors = 0
+        for _ in range(180):
+            request = urllib.request.Request(
+                "https://api.snapgen.org/v1/tasks/" + urllib.parse.quote(str(task_id), safe=""),
+                headers={"Authorization": f"Bearer {api_key}", "User-Agent": SNAPGEN_USER_AGENT,
+                         "Accept": "application/json"})
             try:
-                poll = urllib.request.Request(
-                    "https://api.snapgen.ai/uapi/v1/history/" + urllib.parse.quote(billing["task_id"], safe=""),
-                    headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT, "Accept": "application/json"})
-                with urllib.request.urlopen(poll, timeout=15) as response:
-                    report_credit(json.load(response), final=True)
-            except (OSError, ValueError, http.client.HTTPException):
-                pass  # Keep the paid image; unknown billing requires explicit consent.
-        if billing["used_credit"] is None:
-            on_credit(billing)
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    task = read_json(response)
+                poll_errors = 0
+            except (OSError, ValueError, http.client.HTTPException) as exc:
+                poll_errors += 1
+                if poll_errors >= 3:
+                    raise RuntimeError(f"ดึง SnapGen task {task_id} ไม่สำเร็จ — กดทำต่อเพื่ออ่านงานเดิม; ไม่ยิงใหม่") from exc
+                time.sleep(10)
+                continue
+            report_credit(task)
+            status = str(task.get("status") or "").lower() if isinstance(task, dict) else ""
+            if status in {"succeeded", "failed", "expired", "reconciliation_required"}:
+                break
+            time.sleep(10)
+
+    status = str((task or {}).get("status") or "").lower()
+    if status != "succeeded":
+        error = (task or {}).get("error") or {}
+        detail = error.get("message") or error.get("code") if isinstance(error, dict) else error
+        if status in {"failed", "expired"}:
+            receipt.unlink(missing_ok=True)
+        raise RuntimeError(f"SnapGen GPT Image 2.5 Ext {status or 'ยังทำไม่เสร็จ'}: "
+                           f"{str(detail or 'ตรวจ SnapGen task ก่อนลองใหม่')[:500]} · {task_id or 'ไม่มี task ID'}")
+
+    report_credit(task)
+    image = _image_result(task.get("result")) or _image_result(task.get("data"))
+    if not image:
+        raise RuntimeError(f"SnapGen task {task_id} สำเร็จแต่ไม่มีลิงก์รูป — เก็บ task ไว้แล้ว")
     target = Path(output_dir) / f"{name}_snapgen.png"
     result = _save_image_result(image, target, api_key)
     receipt.unlink(missing_ok=True)
     return result
-
-
-def _prepare_maxplus_references(refs, *, max_image_bytes=10 * 1024 * 1024,
-                                max_total_bytes=25 * 1024 * 1024, log=None):
-    """Prepare upload bytes only; leave reference files and generated outputs intact."""
-    import io
-    from PIL import Image, ImageOps
-
-    entries = []
-    for raw_path in refs:
-        path = Path(raw_path)
-        if not path.is_file():
-            continue
-        data = path.read_bytes()
-        if data.startswith(b"\x89PNG\r\n\x1a\n"):
-            media_type = "image/png"
-        elif data.startswith(b"\xff\xd8\xff"):
-            media_type = "image/jpeg"
-        elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-            media_type = "image/webp"
-        else:
-            raise RuntimeError(f"ชนิดไฟล์อ้างอิงไม่รองรับ: {path.name} (รองรับ PNG/JPEG/WebP)")
-        entries.append((path, media_type, data))
-
-    # Small references keep their original bytes; share the remaining allowance
-    # between large references so the entire multipart upload fits the limits.
-    budget = max_image_bytes
-    remaining = max_total_bytes
-    for index, (_, _, data) in enumerate(sorted(entries, key=lambda item: len(item[2]))):
-        share = remaining // (len(entries) - index)
-        if len(data) > share:
-            budget = min(budget, share)
-            break
-        remaining -= len(data)
-
-    prepared = []
-    for path, media_type, data in entries:
-        if len(data) > budget:
-            original_bytes = len(data)
-            with Image.open(io.BytesIO(data)) as source:
-                image = ImageOps.exif_transpose(source)
-                alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
-                image = image.convert("RGBA" if alpha else "RGB")
-                media_type = "image/webp" if alpha else "image/jpeg"
-                for _ in range(10):
-                    for quality in (95, 90, 85):
-                        buffer = io.BytesIO()
-                        options = {} if alpha else {"subsampling": 0}
-                        image.save(buffer, "WEBP" if alpha else "JPEG", quality=quality, **options)
-                        data = buffer.getvalue()
-                        if len(data) <= budget:
-                            break
-                    if len(data) <= budget:
-                        break
-                    scale = min(0.85, (budget / len(data)) ** 0.5 * 0.95)
-                    image = image.resize((max(1, int(image.width * scale)),
-                                          max(1, int(image.height * scale))), Image.Resampling.LANCZOS)
-            if len(data) > budget:
-                raise RuntimeError(f"เตรียมรูปอ้างอิง {path.name} ให้ไม่เกินขนาดที่ MaxPlus รับไม่ได้")
-            if log:
-                log(f"ไฟล์แนบ {path.name}: {original_bytes / 1048576:.2f} → {len(data) / 1048576:.2f} MB "
-                    "(บีบอัดเฉพาะไฟล์ส่ง API; เก็บรูปต้นฉบับไว้)")
-        prepared.append((media_type, data))
-    return prepared
-
-
-def maxplus_image(prompt: str, refs: list[str], output_dir: str, name: str,
-                  aspect: str, api_key: str, model: str = MAXPLUS_IMAGE_MODEL,
-                  quality: str | None = "high", max_references: int = 16,
-                  size: str | None = None, reference_log=None) -> str:
-    """Generate one image through MaxPlus, preserving every supplied reference."""
-    if not api_key:
-        raise RuntimeError("ตั้ง MaxPlus API key (pool Gen Image) ก่อน")
-    if len(refs) > max_references:
-        raise RuntimeError(f"MaxPlus {model} รับรูปอ้างอิงได้ไม่เกิน {max_references} รูปต่อคำขอ (ได้รับ {len(refs)})")
-
-    uploaded_references = _prepare_maxplus_references(refs, log=reference_log)
-
-    body = {
-        "async": True,
-        "channel_slug": "image-gen",
-        "model": model,
-        "prompt": prompt,
-        "n": 1,
-        # Keep orientation; Seedream requires explicit pixel dimensions for its 2K tier.
-        "size": size or aspect,
-        "response_format": "url",
-    }
-    if quality:
-        body["quality"] = quality
-
-    headers = {"Authorization": f"Bearer {api_key}",
-               "Content-Type": "application/json", "Accept": "application/json",
-               "User-Agent": SNAPGEN_USER_AGENT}
-
-    def request_json(url, payload=None, timeout=600, content_type=None):
-        data = (payload if isinstance(payload, bytes) else
-                json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None)
-        request_headers = dict(headers)
-        if content_type:
-            request_headers["Content-Type"] = content_type
-        request = urllib.request.Request(url, data=data, headers=request_headers, method="POST" if data is not None else "GET")
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:800]
-            raise RuntimeError(f"MaxPlus API ตอบ HTTP {exc.code}: {detail}") from exc
-        try:
-            return json.loads(raw)
-        except ValueError as exc:
-            raise RuntimeError("MaxPlus API ส่งผลลัพธ์ที่อ่านไม่ได้") from exc
-
-    request_url = MAXPLUS_IMAGE_URL
-    request_body = body
-    request_content_type = None
-    if uploaded_references:
-        # The MaxPlus guide requires local image files to use multipart /edits.
-        extensions = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
-        files = [("images", f"reference-{index:02d}.{extensions[media_type]}", data)
-                 for index, (media_type, data) in enumerate(uploaded_references, 1)]
-        multipart_fields = dict(body, **{"async": "true"})
-        request_body, boundary = _multipart(multipart_fields, files)
-        request_url = MAXPLUS_IMAGE_EDIT_URL
-        request_content_type = f"multipart/form-data; boundary={boundary}"
-
-    payload = request_json(request_url, request_body, content_type=request_content_type)
-    status = str(payload.get("status") or "").lower() if isinstance(payload, dict) else ""
-    task_id = payload.get("id") if isinstance(payload, dict) else None
-    if status in {"failed", "error", "cancelled", "canceled"}:
-        error = payload.get("error") or {}
-        if isinstance(error, dict):
-            detail = error.get("message") or error.get("code") or "ผู้ให้บริการไม่ได้ระบุสาเหตุ"
-        else:
-            detail = error
-        raise RuntimeError(f"MaxPlus สร้างภาพไม่สำเร็จ: {str(detail)[:600]}")
-    image = _image_result(payload)
-    if image is None and task_id and status in {"queued", "processing"}:
-        # MaxPlus requires at least 10 seconds between status reads. Never resubmit a paid job.
-        for _ in range(42):
-            time.sleep(10)
-            status_url = MAXPLUS_IMAGE_BASE + "/v1/images/" + urllib.parse.quote(str(task_id), safe="")
-            payload = request_json(status_url, timeout=60)
-            status = str(payload.get("status") or "").lower() if isinstance(payload, dict) else ""
-            if status in {"failed", "error", "cancelled", "canceled"}:
-                error = payload.get("error") or {}
-                detail = error.get("message") or error.get("code") if isinstance(error, dict) else error
-                raise RuntimeError(f"MaxPlus สร้างภาพไม่สำเร็จ: {str(detail or 'ไม่ทราบสาเหตุ')[:600]}")
-            image = _image_result(payload)
-            if image:
-                break
-        if not image:
-            raise RuntimeError(f"MaxPlus ยังไม่ส่งภาพกลับมา — งาน {task_id} อาจกำลังทำอยู่ ให้ตรวจ History ก่อนลองใหม่")
-    if not image:
-        raise RuntimeError("MaxPlus API ไม่ได้ส่งไฟล์ภาพกลับมา")
-
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    target = Path(output_dir) / f"{name}_maxplus.png"
-    if image.startswith("data:image/"):
-        _, encoded = image.split(",", 1)
-        target.write_bytes(base64.b64decode(encoded))
-    elif image.startswith("https://"):
-        parsed = urllib.parse.urlparse(image)
-        download_headers = {"User-Agent": SNAPGEN_USER_AGENT}
-        if parsed.hostname == "api.maxplus-ai.cc" or (parsed.hostname or "").endswith(".maxplus-ai.cc"):
-            download_headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(image, headers=download_headers)
-        with urllib.request.urlopen(request, timeout=180) as response:
-            target.write_bytes(response.read())
-    elif image.startswith("http://"):
-        raise RuntimeError("MaxPlus ส่งลิงก์ภาพที่ไม่ปลอดภัย (ต้องเป็น HTTPS)")
-    else:
-        target.write_bytes(base64.b64decode(image))
-    return str(target)
-
-
-def maxplus_account_credit(api_key: str) -> float:
-    """Read the current API-key balance without exposing the key or account profile."""
-    if not api_key:
-        raise RuntimeError("ยังไม่ได้ตั้ง MaxPlus API Key")
-    request = urllib.request.Request(
-        MAXPLUS_ME_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json",
-                 "User-Agent": SNAPGEN_USER_AGENT},
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"MaxPlus API ตอบ HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        raise RuntimeError("อ่านยอด MaxPlus ไม่สำเร็จ") from exc
-    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-        payload = payload["data"]
-    try:
-        return float(payload["credit_usd"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError("MaxPlus API ไม่ได้ส่งยอดเครดิตกลับมา") from exc
-
 
 def _comfy_json(path: str, payload=None, base: str | None = None):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -3130,56 +2956,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     bg = box.cget("bg")
 
     state = {"project": None, "folder": None, "busy": False, "stop": False, "lock": threading.RLock()}
-    maxplus_key_cache = [""]
-    maxplus_key_button = None
-
-    def _config_api():
-        loader = runtime.get("load_config") or g.get("load_config")
-        saver = runtime.get("save_config") or g.get("save_config")
-        return loader if callable(loader) else None, saver if callable(saver) else None
-
-    def _maxplus_api_key():
-        configured = str(os.environ.get("MAXPLUS_API_KEY") or maxplus_key_cache[0] or "").strip()
-        if configured:
-            return configured
-        loader, _saver = _config_api()
-        if loader:
-            try:
-                config = loader() or {}
-                if isinstance(config, dict):
-                    configured = str(config.get(MAXPLUS_API_CONFIG_KEY) or "").strip()
-                    maxplus_key_cache[0] = configured
-            except Exception:
-                pass
-        return configured
-
-    def set_maxplus_api_key():
-        value = simpledialog.askstring(
-            "ตั้ง MaxPlus API Key",
-            "วาง API key ที่ผูกกับ pool Gen Image ใน MaxPlus Dashboard\n"
-            "คีย์จะถูกบันทึกในตั้งค่าโปรแกรม และช่องนี้จะไม่แสดงคีย์เดิม",
-            parent=page, show="*",
-        )
-        if value is None or not value.strip():
-            return
-        loader, saver = _config_api()
-        if not saver:
-            messagebox.showerror("MaxPlus", "บันทึก API key ผ่านการตั้งค่าโปรแกรมไม่ได้", parent=page)
-            return
-        try:
-            config = loader() if loader else {}
-            if not isinstance(config, dict):
-                config = {}
-            config[MAXPLUS_API_CONFIG_KEY] = value.strip()
-            saver(config)
-            maxplus_key_cache[0] = value.strip()
-            if maxplus_key_button is not None:
-                maxplus_key_button.config(text="MaxPlus Key ✓")
-            refresh_maxplus_credit()
-            messagebox.showinfo("MaxPlus", "บันทึก MaxPlus API Key แล้ว", parent=page)
-        except Exception:
-            messagebox.showerror("MaxPlus", "บันทึก API key ไม่สำเร็จ ตรวจสิทธิ์เขียนไฟล์ตั้งค่า", parent=page)
-
     script_var = tk.StringVar(value="ลากไฟล์มาวาง หรือกดเลือก (.docx / .txt)")
     audio_var = tk.StringVar(value="ลากไฟล์มาวาง หรือกดเลือก (.wav / .mp3 / .m4a)")
     aspect_var = tk.StringVar(value="16:9")
@@ -3196,8 +2972,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
     video_res_var = tk.StringVar(value="720p")
     image_provider_var = tk.StringVar(value=GPT_WEB_LABEL)
-    maxplus_credit_var = tk.StringVar(value="MaxPlus คงเหลือ: —")
-    maxplus_model_info_var = tk.StringVar(value="")
     qwen_2k_var = tk.BooleanVar(value=False)
     upscale_provider_var = tk.StringVar(value=UPSCALE_LABELS["qwen"])
     stage_var = tk.StringVar(value="พร้อม")
@@ -3388,56 +3162,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             except NameError:  # the controls are built after this handler
                 pass
 
-        def refresh_maxplus_model_info():
-            provider = next((key for key, label in VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.items()
-                             if label == image_provider_var.get()), None)
-            model = VIDEO_AUTO_MAXPLUS_MODELS.get(provider)
-            if model:
-                maxplus_model_info_var.set(
-                    f"ราคาโดยประมาณ {model['estimated_price']}/รูป · {model['resolution']} · "
-                    "ราคาอ้างอิงจากหน้า MaxPlus ล่าสุด อาจเปลี่ยนได้")
-            else:
-                maxplus_model_info_var.set("เลือกรุ่น MaxPlus ในเมนูเพื่อดูราคาโดยประมาณต่อรูป")
-
-        credit_refresh_lock = threading.Lock()
-        credit_refresh_state = {"pending": False, "again": False}
-
-        def refresh_maxplus_credit():
-            key = _maxplus_api_key()
-            if not key:
-                ui(maxplus_credit_var.set, "MaxPlus คงเหลือ: ตั้ง API Key")
-                return
-            with credit_refresh_lock:
-                if credit_refresh_state["pending"]:
-                    credit_refresh_state["again"] = True
-                    return
-                credit_refresh_state["pending"] = True
-                credit_refresh_state["again"] = False
-            ui(maxplus_credit_var.set, "MaxPlus คงเหลือ: กำลังอ่าน…")
-
-            def worker():
-                try:
-                    credit = maxplus_account_credit(key)
-                    label = f"MaxPlus คงเหลือ: ${credit:,.2f}"
-                except Exception:
-                    label = "MaxPlus คงเหลือ: เช็กไม่ได้"
-                with credit_refresh_lock:
-                    again = credit_refresh_state["again"]
-                    credit_refresh_state["again"] = False
-                    credit_refresh_state["pending"] = False
-
-                def update_label():
-                    if key != _maxplus_api_key():
-                        maxplus_credit_var.set("MaxPlus คงเหลือ: คีย์เปลี่ยนแล้ว")
-                        refresh_maxplus_credit()
-                        return
-                    maxplus_credit_var.set(label)
-                    if again:
-                        root.after(300, refresh_maxplus_credit)
-                ui(update_label)
-
-            threading.Thread(target=worker, daemon=True).start()
-
         image_provider_row = tk.Frame(settings_parent, bg=bg)
         image_provider_row.pack(fill="x", padx=8, pady=(1, 3))
         tk.Label(image_provider_row, text="สตอรี่บอร์ดผ่าน", bg=bg).pack(side="left")
@@ -3447,32 +3171,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         provider_menu.pack(side="left", padx=6)
 
         def video_image_provider_changed(_event=None):
-            refresh_maxplus_model_info()
             project = state.get("project")
             if project is None:
                 return
             if state["busy"]:
                 image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(
                     project.get("storyboard_provider"), GPT_WEB_LABEL))
-                refresh_maxplus_model_info()
                 return
             project["storyboard_provider"] = {v: k for k, v in VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.items()}.get(
                 image_provider_var.get(), "gpt_web")
             save_project()
 
         provider_menu.bind("<<ComboboxSelected>>", video_image_provider_changed)
-        maxplus_key_button = tk.Button(
-            image_provider_row,
-            text="MaxPlus Key ✓" if _maxplus_api_key() else "ตั้ง MaxPlus Key",
-            command=set_maxplus_api_key, relief="flat", bg="#E2E8F0", fg="#0F172A", cursor="hand2")
-        maxplus_key_button.pack(side="left", padx=4)
-        tk.Label(image_provider_row, textvariable=maxplus_credit_var, bg=bg, fg="#475569").pack(side="left", padx=6)
-        tk.Button(image_provider_row, text="รีเฟรช", command=refresh_maxplus_credit,
-                  relief="flat", bg="#E2E8F0", fg="#0F172A", cursor="hand2").pack(side="left", padx=(0, 4))
-        tk.Label(settings_parent, textvariable=maxplus_model_info_var, bg=bg, fg="#475569", anchor="w").pack(
-            fill="x", padx=10, pady=(0, 3))
-        refresh_maxplus_model_info()
-
         model_row = tk.Frame(settings_parent, bg=bg)
         model_row.pack(fill="x", padx=8, pady=2)
         tk.Label(model_row, text="โมเดลวิดีโอ", bg=bg).pack(side="left")
@@ -3785,9 +3495,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def ui(fn, *args):
         root.after(0, lambda: fn(*args))
 
-    if video_mode:
-        root.after(0, refresh_maxplus_credit)
-
     def export_root() -> Path:
         value = runtime.get("EXPORT_ROOT") or g.get("EXPORT_ROOT")
         return Path(str(value)) if value else Path.cwd() / "export"
@@ -3874,12 +3581,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             project.setdefault("upscale_provider", "qwen")
         else:
             project.setdefault("image_provider", "gpt_web")
-            legacy_stage = (project.get("image_stage_providers") or {}).get("storyboard")
-            legacy_provider = project.get("image_provider")
-            if project.get("storyboard_provider") not in VIDEO_AUTO_IMAGE_PROVIDER_LABELS:
-                project["storyboard_provider"] = (
-                    legacy_stage if legacy_stage in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else
-                    legacy_provider if legacy_provider in VIDEO_AUTO_IMAGE_PROVIDER_LABELS else "gpt_web")
+            project["storyboard_provider"] = normalize_video_auto_storyboard_provider(
+                project.get("storyboard_provider"))
         try:
             last_project_file().write_text(str(folder), encoding="utf-8")
         except OSError:
@@ -3894,7 +3597,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             economy_var.set(bool(project.get("economy", True)))
             image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(
                 project.get("storyboard_provider"), GPT_WEB_LABEL))
-            refresh_maxplus_model_info()
             if "clip_choice" not in project:
                 # A new story starts on the cheap default (Grok Lite 720p, 10 s clips); a plan that already
                 # exists keeps the automatic length it was made with.
@@ -4340,19 +4042,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if stage == "storyboard":
             if project.get("storyboard_provider", "gpt_web") != "gpt_web":
                 return False
-            api_provider = "maxplus_gpt_image_2_4k"
-            api_label = VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS[api_provider]
-            api_ready = bool(_maxplus_api_key())
         else:
             if image_provider_for("images") != "gpt_web":
                 return False
-            api_provider = "snapgen"
-            api_label = VIDEO_AUTO_SCENE_PROVIDER_LABELS[api_provider]
-            keyvar = runtime.get("api_key_var") or g.get("api_key_var")
-            try:
-                api_ready = bool(str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip())
-            except Exception:
-                api_ready = False
+        api_provider = "snapgen"
+        api_label = SNAPGEN_LABEL
+        keyvar = runtime.get("api_key_var") or g.get("api_key_var")
+        try:
+            api_ready = bool(str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip())
+        except Exception:
+            api_ready = False
 
         answer, event = {}, threading.Event()
 
@@ -4389,13 +4088,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             previous = project.get("storyboard_provider", "gpt_web")
             project["storyboard_provider"] = api_provider
             save_project()
-            ui(lambda: (image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS[api_provider]),
-                        refresh_maxplus_model_info()))
-            if not confirm_credits():
+            ui(lambda: image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS[api_provider]))
+            if confirm_snapgen_credit_warning() != "snapgen":
                 project["storyboard_provider"] = previous
                 save_project()
-                ui(lambda: (image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(previous, GPT_WEB_LABEL)),
-                            refresh_maxplus_model_info()))
+                ui(lambda: image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(previous, GPT_WEB_LABEL)))
                 raise Stopped()
         else:
             if confirm_snapgen_credit_warning() != "snapgen":
@@ -4421,7 +4118,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 return None
 
         before = balance()
-        log(f"{name}: SnapGen GPT API · Image 2.5 Lower · แนบไฟล์ {len(refs)} รูป"
+        log(f"{name}: SnapGen API · GPT Image 2.5 Ext · 1K · แนบไฟล์ {len(refs)} รูป"
             + (f" · เครดิตก่อน {before:g}" if before is not None else ""))
         def on_credit(record):
             with state["lock"]:
@@ -4479,55 +4176,26 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             log(f"{name}: ได้รูปแล้ว แต่ยังยืนยันเครดิตที่หักไม่ได้ — ดูยอดใน SnapGen History")
         return image
 
-    def generate_via_maxplus(prompt, refs, out_dir, name, aspect, provider="maxplus"):
-        key = _maxplus_api_key()
-        if not key:
-            raise ImageProviderError("ยังไม่ได้ตั้ง MaxPlus API Key (pool Gen Image) — กดตั้ง MaxPlus Key ก่อนเริ่ม")
-        model = VIDEO_AUTO_MAXPLUS_MODELS.get(provider, VIDEO_AUTO_MAXPLUS_MODELS["maxplus"])
-        log(f"{name}: {model['label']} · แนบไฟล์ {len(refs)} รูป")
-        sizes = model.get("size_by_aspect") or {}
-        size = sizes.get(aspect) if sizes else aspect
-        if not size:
-            raise ImageProviderError(f"MaxPlus {model['label']} ยังไม่รองรับสัดส่วน {aspect}")
-        try:
-            return maxplus_image(prompt, refs, str(out_dir), name, aspect, key,
-                                 model=model["model"], quality=model["quality"],
-                                 max_references=model["max_references"], size=size, reference_log=log)
-        except Exception as exc:
-            # A timeout can mean the paid request is still running; never submit it again automatically.
-            raise ImageProviderError(f"{model['label']}: {exc} — ตรวจ MaxPlus History ก่อนลองใหม่") from exc
-        finally:
-            refresh_maxplus_credit()
-
     def make_image(prompt, refs, out_dir, name, aspect, board=None, identity=False, api_context=None,
                    grid_template=False, identity_repair=None, fresh_chat=False):
         imgmod = runtime.get("_imgmod") or g.get("_imgmod")
         project = state["project"]
         provider = "snapgen" if api_context is not None else image_provider_for(state.get("active_image_stage", "images"))
-        if imgmod is None and provider not in ("snapgen", "qwen") and not is_video_auto_maxplus_provider(provider):
+        if imgmod is None and provider not in ("snapgen", "qwen"):
             raise RuntimeError("ระบบสร้างรูปยังไม่พร้อม")
         identity_refs = list(refs)
         if board:
             # Image 1 = this shot's storyboard panel (layout to follow), then identity references.
-            refs = [board, *refs] if provider in ("snapgen", "qwen") or is_video_auto_maxplus_provider(provider) else [board, *refs][:6]
+            refs = [board, *refs] if provider in ("snapgen", "qwen") else [board, *refs][:6]
         face_reference = (identity_repair or {}).get("face_reference")
-        face_ref_limit = (10 if provider == "snapgen" else 16 if provider == "qwen"
-                          else VIDEO_AUTO_MAXPLUS_MODELS[provider]["max_references"]
-                          if is_video_auto_maxplus_provider(provider) else 6)
+        face_ref_limit = 16 if provider in ("snapgen", "qwen") else 6
         if face_reference and Path(face_reference).is_file() and len(refs) < face_ref_limit:
             # Keep the complete master for body/outfit, and add its face-focused crop as a separate cue.
             refs.append(face_reference)
-        if provider == "snapgen" and len(refs) > 10:
-            raise ImageProviderError("ฉากนี้มีไฟล์เรฟเกิน 10 รูปที่ API รองรับ — หยุดก่อนส่งเพื่อไม่ให้เรฟตัวละครตกหล่น")
+        if provider == "snapgen" and len(refs) > 16:
+            raise ImageProviderError("ฉากนี้มีไฟล์เรฟเกิน 16 รูปที่ API รองรับ — หยุดก่อนส่งเพื่อไม่ให้เรฟตัวละครตกหล่น")
         if provider == "qwen" and len(refs) > 16:
             raise ImageProviderError("Qwen รับเรฟได้สูงสุด 16 รูป — หยุดเพื่อไม่ให้เรฟตกหล่น")
-        if is_video_auto_maxplus_provider(provider):
-            max_refs = VIDEO_AUTO_MAXPLUS_MODELS[provider]["max_references"]
-            if len(refs) > max_refs:
-                raise ImageProviderError(
-                    f"{VIDEO_AUTO_MAXPLUS_MODELS[provider]['label']} รับรูปอ้างอิงได้สูงสุด {max_refs} รูปต่อคำขอ "
-                    "(รวมสตอรี่บอร์ด) — เอารูปแนบบางส่วนออก หรือเลือก GPT Web"
-                )
         encoded = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in refs if Path(p).is_file()]
         if board:
             prompt += (
@@ -4623,18 +4291,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     project.setdefault("image_bases", {})[name] = {"signature": signature, "file": image}
                     save_project()
                 return image
-            if is_video_auto_maxplus_provider(provider):
-                signature = hashlib.sha256((provider + "\n" + prompt + "\n" + aspect).encode("utf-8") + b"".join(
-                    hashlib.sha256(Path(p).read_bytes()).digest() for p in refs if Path(p).is_file())).hexdigest()
-                cached = (project.get("image_bases") or {}).get(name) or {}
-                if cached.get("signature") == signature and Path(cached.get("file") or "").is_file():
-                    log(f"{name}: ใช้ภาพฐาน MaxPlus ที่เก็บไว้ — ไม่ส่งคำขอสร้างรูปซ้ำ")
-                    return cached["file"]
-                image = generate_via_maxplus(prompt, refs, out_dir, name, aspect, provider)
-                with state["lock"]:
-                    project.setdefault("image_bases", {})[name] = {"signature": signature, "file": image}
-                    save_project()
-                return image
             image = imgmod.generate_image(
                 prompt, output_dir=str(out_dir), name_hint=name, is_edit=bool(encoded),
                 ref_images=encoded or None, aspect_ratio=aspect, save_sidecar=False,
@@ -4667,7 +4323,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         out = maybe_qwen(generate_base())
         if hashlib.md5(Path(out).read_bytes()).hexdigest() in old:
-            if provider in ("snapgen", "qwen") or is_video_auto_maxplus_provider(provider):
+            if provider in ("snapgen", "qwen"):
                 labels = VIDEO_AUTO_IMAGE_PROVIDER_LABELS if video_mode else IMAGE_PROVIDER_LABELS
                 raise ImageProviderError(f"{labels.get(provider, provider)} ส่งภาพซ้ำ — เก็บภาพไว้แล้ว ตรวจผลก่อนสั่งสร้างใหม่")
             # An old picture came back (GPT drew nothing new): ask once more in another fresh chat.
@@ -4685,7 +4341,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 old.unlink(missing_ok=True)
         if Path(out).resolve() != target.resolve():
             shutil.move(str(out), str(target))
-        if provider == "snapgen" or is_video_auto_maxplus_provider(provider):
+        if provider == "snapgen":
             with state["lock"]:
                 project.get("image_bases", {}).pop(name, None)
                 save_project()
@@ -5609,14 +5265,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if previous_sheet:
                 sheet_refs.append(previous_sheet)
             sheet_refs.extend(refs)
-            if is_video_auto_maxplus_provider(provider):
-                max_refs = VIDEO_AUTO_MAXPLUS_MODELS[provider]["max_references"]
-            else:
-                max_refs = 16
-            if is_video_auto_maxplus_provider(provider) and len(sheet_refs) > max_refs:
+            max_refs = 16
+            if provider == "snapgen" and len(sheet_refs) > max_refs:
                 omitted = len(sheet_refs) - max_refs
                 log(
-                    f"สตอรี่ชีต {first}–{last}: {VIDEO_AUTO_MAXPLUS_MODELS[provider]['label']} "
+                    f"สตอรี่ชีต {first}–{last}: {SNAPGEN_LABEL} "
                     f"รับแม่แบบและเรฟได้ {max_refs} รูป — ไม่แนบเรฟเพิ่มอีก {omitted} รูป "
                     "(เก็บแม่แบบตารางและชีตก่อนหน้าไว้ก่อน)"
                 )
@@ -5631,7 +5284,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                   live_action=video_mode, grid_template=bool(grid_template),
                                   prior_sheet=bool(previous_sheet))
                     + "\n" + style_text(),
-                    refs if provider in ("snapgen", "qwen") or is_video_auto_maxplus_provider(provider) else refs[:6],
+                    refs if provider in ("snapgen", "qwen") else refs[:6],
                     board_dir, name, project["aspect"], grid_template=bool(grid_template)))
             try:
                 sheet = draw()
@@ -5866,7 +5519,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     **redraw_options))
                 scene["image"] = generated_image
                 if ref_paths and looks_like_reference_sheet(scene["image"]):
-                    if (redraw_context or image_provider_for("images") in ("qwen", "maxplus")
+                    if (redraw_context or image_provider_for("images") in ("qwen", "snapgen")
                             or scene.get("identity_repair")):
                         save_project()
                         raise ImageProviderError(f"ฉาก {i + 1} คล้ายรูปเรฟ — เก็บภาพไว้ ตรวจผลก่อนสร้างใหม่ เพื่อไม่ส่ง API ซ้ำอัตโนมัติ")
@@ -7217,16 +6870,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             sheets = sum(1 for grp in board_groups(scenes, project.get("direction"), pack_in_order=video_mode)
                          if any(not (scenes[i].get("image") and os.path.isfile(scenes[i]["image"])) for i in grp)
                          and not all(scenes[i].get("board") and os.path.isfile(scenes[i]["board"]) for i in grp))
-            selected_model = VIDEO_AUTO_MAXPLUS_MODELS.get(project.get("storyboard_provider"))
             scene_provider = VIDEO_AUTO_SCENE_PROVIDER_LABELS.get(
                 (project.get("image_stage_providers") or {}).get("images"),
                 "เลือก GPT Chrome / SnapGen API ก่อนเริ่มสร้างรูปฉาก")
-            price_note = ""
-            if sheets and selected_model:
-                usd_total = selected_model["estimated_usd"] * sheets
-                thb_total = selected_model["estimated_thb"] * sheets
-                price_note = (f"\nราคาอ้างอิง {selected_model['estimated_price']}/รูป × {sheets} ชีต "
-                              f"รวมประมาณ ${usd_total:.2f} ≈ ฿{thb_total:.2f} (ราคาอาจเปลี่ยนได้)\n")
             return ask_on_ui(
                 "ออโต้ — ยืนยันใช้เครดิต",
                 f"วางแผนเสร็จแล้ว\n\nไฟล์แนบที่จะใช้ ({len(matched)}): {', '.join(matched[:15]) or '-'}\n"
@@ -7234,7 +6880,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 + f"รูปฉาก {missing} รูป + คลิปวิดีโอ {len(todo)} คลิป\n"
                 + (f"\nรูปฉาก: {scene_provider}; สตอรี่บอร์ดเลือก {VIDEO_AUTO_IMAGE_PROVIDER_LABELS.get(project.get('storyboard_provider'), GPT_WEB_LABEL)} "
                    "แนบแม่แบบตาราง 3x3 และใช้ชีตก่อนหน้าเป็นเรฟความต่อเนื่องตั้งแต่ชีตที่ 2\n" if missing + sheets else "")
-                + price_note
                 + f"   {clip_summary(todo)}\n   (สโลว์×2 = ทำ AI Slow 2x หลังได้คลิป)\n\nเริ่มเลยไหม?")
         ensure_same_person()  # text only: a ghost of a known person is drawn from that person's face
         remake = set(forms_to_remake(existing))
@@ -7260,7 +6905,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         quota = ("\n⚠ เกิน 120 รูป จะใช้มากกว่า 1 วัน (หยุดรอเมื่อโควตาหมด แล้วกดทำต่อได้)" if total > 120
                  else "\nChatGPT สร้างรูปได้ประมาณ 120 รูปต่อวัน ถ้าโควตาหมดระหว่างทาง โปรแกรมจะหยุดรอ แล้วกดทำต่อได้")
         if project.get("image_provider") == "snapgen":
-            quota = (f"\nสร้างรูปผ่าน SnapGen GPT API · Image 2.5 Lower (720p ตายตัว)"
+            quota = (f"\nสร้างรูปผ่าน SnapGen API · GPT Image 2.5 Ext · 1K"
                      f"\nราคาตามเอกสาร 2 เครดิต/รูป รวมประมาณ {total * 2} เครดิตก่อนส่วนลด"
                      "\nโปรแกรมบันทึกยอดเครดิตก่อน–หลังแต่ละรูป")
         elif project.get("image_provider") == "qwen":
@@ -7766,9 +7411,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     "gpt_web": "กำลังรอ GPT Web ผ่าน Chrome ส่งรูปกลับ — ดูสถานะ Chrome ด้านล่างได้",
                     "snapgen": "กำลังรอ SnapGen API สร้างและส่งรูปกลับ",
                     "qwen": "กำลังรอ Qwen ในเครื่องสร้างรูปเสร็จ",
-                    "maxplus": "กำลังรอ MaxPlus API สร้างและส่งรูปกลับ",
-                    "maxplus_gpt_image_2_4k": "กำลังรอ MaxPlus API สร้างและส่งรูปกลับ",
-                    "maxplus_seedream_5_pro_2k": "กำลังรอ MaxPlus API สร้างและส่งรูปกลับ",
                 }.get(provider, "กำลังรอผู้สร้างรูปส่งผลกลับ")
                 ui(lambda: (stage_var.set(f"แก้เรฟช็อต {index + 1} · {provider_label}"),
                             detail_var.set(provider_wait),
@@ -8063,7 +7705,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 board = scene.get("board") if scene.get("board") and os.path.isfile(scene["board"]) else None
                 refs = [p for p in (attachments_for(scene) if video_mode else
                                     [character_refs().get(c) for c in scene.get("characters") or []]) if p]
-                if provider not in ("qwen", "maxplus"):
+                if provider not in ("qwen", "snapgen"):
                     refs = refs[:3]
                 prompt = (f"แก้ไขรูปที่ 1 (รูปเดิมของช็อตนี้) เฉพาะจุดนี้: {wish}\n"
                           "คงองค์ประกอบ ตัวละคร มุมกล้อง แสง และสไตล์เดิมทั้งหมด เปลี่ยนเฉพาะสิ่งที่สั่ง ภาพเดียวเต็มเฟรม ไม่มีตัวหนังสือ.\n"
@@ -8075,10 +7717,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                           + ("\n" + "\n".join(f"รูปที่ {k}: หน้าตา/รูปร่าง/ชุดของ {Path(p).stem} เท่านั้น"
                                                for k, p in enumerate(refs, 3 if board else 2)) if refs else ""))
                 edit_refs = [current, *([board] if board else []), *refs]
-                if provider == "maxplus" and len(edit_refs) > 5:
-                    raise ImageProviderError(
-                        f"แก้ฉาก {index + 1}: MaxPlus รับรูปอ้างอิงได้สูงสุด 5 รูป (รวมรูปเดิมและสตอรี่บอร์ด)"
-                    )
                 if provider == "qwen":
                     log(f"แก้ฉาก {index + 1}: Qwen 2.1 ในเครื่อง · แนบไฟล์ {len(edit_refs)} รูป")
                     out = qwen_generate_image(prompt, edit_refs, str(Path(current).parent),
@@ -8095,9 +7733,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         else:
                             out = qwen_image_to_image_2k(out, refs, prompt, project["aspect"],
                                                         str(Path(current).parent), f"scene_{index + 1:03d}_edit")
-                elif provider == "maxplus":
-                    out = generate_via_maxplus(prompt, edit_refs, Path(current).parent,
-                                               f"scene_{index + 1:03d}_edit", project["aspect"])
                 else:
                     out = with_retries(f"แก้ฉาก {index + 1}", lambda: imgmod.generate_image(
                         prompt, output_dir=str(Path(current).parent), name_hint=f"scene_{index + 1:03d}_edit", is_edit=True,
