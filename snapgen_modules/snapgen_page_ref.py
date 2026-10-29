@@ -26,6 +26,7 @@ from snapgen_page_builder import (
     set_selection_locks as _builder_set_selection_locks,
     remove_selection_lock as _builder_remove_selection_lock,
 )
+from snapgen_image_api_config import current_image_api_key as _current_image_api_key
 from snapgen_button_styles import STYLE
 from snapgen_story_types import STORY_TYPE_OPTIONS, normalize_story_type, story_type_profile
 
@@ -148,7 +149,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         story_type_labels[0],
     )
     ref_story_type_var = tk.StringVar(value=saved_story_type_label)
-    ref_provider_labels = {"gpt_web": "ChatGPT Web (Chrome เดิม)", "snapgen": "SnapGen API · Image 2.5 Lower"}
+    ref_provider_labels = {"gpt_web": "ChatGPT Web (Chrome เดิม)", "snapgen": "SnapGen API · GPT Image 2.5 Ext · 1K"}
     ref_provider_var = tk.StringVar(value=ref_provider_labels.get(
         _saved_ref_settings.get("image_provider"), ref_provider_labels["gpt_web"]))
     g["_ref_selected_context"] = ""
@@ -848,10 +849,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
 
     def _ref_request_options():
         provider = next((k for k, v in ref_provider_labels.items() if v == ref_provider_var.get()), "gpt_web")
-        keyvar = g.get("api_key_var")
-        key = str(keyvar.get() if keyvar is not None else "").strip() if provider == "snapgen" else ""
+        key = _current_image_api_key(g, g.get("_runtime_g") or g) if provider == "snapgen" else ""
         if provider == "snapgen" and not key:
-            _ref_log("ใส่ SnapGen API Key ในตั้งค่าก่อน — ยังไม่ส่งงาน")
+            _ref_log("ใส่ SnapGen.org Image API Key ใน ตั้งค่า > SnapGen API ก่อน — ยังไม่ส่งงาน")
             return None
         return {"provider": provider, "api_key": key, "acceptance": {}}
 
@@ -928,7 +928,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 f"{name}: งานก่อนอาจหักเครดิตแล้วแต่ไม่ได้เลขงานกลับมา\n"
                 "ตรวจ SnapGen History ก่อน ถ้าได้รูปแล้วให้หยุดและนำรูปนั้นมาใช้\n\n"
                 "ตรวจแล้วและยอมรับให้ส่งใหม่ซึ่งอาจหักเครดิตซ้ำใช่ไหม?")
-        _ref_log(f"[SnapGen Ref] {name}: Image 2.5 Lower · คำขอแยก · แนบ {len(refs)} รูป")
+        _ref_log(f"[SnapGen Ref] {name}: GPT Image 2.5 Ext · 1K · คำขอแยก · แนบ {len(refs)} รูป")
         result = snapgen_image(prompt, refs, str(scratch), "ref", "1:1", options["api_key"],
                                on_credit=on_credit, confirm_resubmit=confirm_resubmit)
         safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name))[:60].strip(" .") or "ref"

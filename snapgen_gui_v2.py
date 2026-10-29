@@ -990,6 +990,16 @@ except Exception as _e:
     import traceback; traceback.print_exc()
 
 root = g.get("root") or tk._default_root
+from snapgen_image_api_config import load_image_api_key, save_image_api_key
+
+SNAPGEN_IMAGE_API_KEY_PATH = BASE / "snapgen_image_api_key.json"
+try:
+    snapgen_image_api_key_var = tk.StringVar(
+        master=root, value=load_image_api_key(SNAPGEN_IMAGE_API_KEY_PATH))
+    g["snapgen_image_api_key_var"] = snapgen_image_api_key_var
+except Exception:
+    snapgen_image_api_key_var = None
+
 APP_TITLE = "ติดมันส์ สตูดิโอ"
 APP_LOGO_ICO = BASE_ROOT / "assets" / "tidmun_studio_icon_final.ico"
 _app_logo_photo = None
@@ -5216,6 +5226,7 @@ def _wrap_open_settings():
                         _remove_openrouter_settings(w)
                         _add_settings_maintenance_buttons(w)
                         _rewire_snapgen_api_test_button(w)
+                        _inject_snapgen_image_api_key(w)
                         _inject_ltx_cloud_settings(w)
                         w.after(30, _rewire_open_settings_windows)
                         w.after(150, _rewire_open_settings_windows)
@@ -5307,6 +5318,82 @@ def _rewire_snapgen_api_test_button(settings_win):
     except Exception:
         pass
 
+
+def _inject_snapgen_image_api_key(settings_win):
+    """Expose the SnapGen.org image key separately from the legacy video key."""
+    global snapgen_image_api_key_var
+    try:
+        if snapgen_image_api_key_var is None:
+            snapgen_image_api_key_var = tk.StringVar(
+                master=root, value=load_image_api_key(SNAPGEN_IMAGE_API_KEY_PATH))
+            g["snapgen_image_api_key_var"] = snapgen_image_api_key_var
+
+        target = None
+
+        def find_group(widget):
+            nonlocal target
+            try:
+                kind = str(widget.winfo_class()).lower()
+                title = str(widget.cget("text")) if kind in {"labelframe", "tlabelframe"} else ""
+                if "SnapGen API" in title:
+                    target = widget
+                    return
+                for child in widget.winfo_children():
+                    find_group(child)
+                    if target is not None:
+                        return
+            except Exception:
+                return
+
+        find_group(settings_win)
+        if target is None:
+            return
+        existing = getattr(target, "_snapgen_image_api_row", None)
+        if existing is not None and existing.winfo_exists():
+            return
+
+        children = [child for child in target.winfo_children() if child.winfo_manager()]
+        managers = {child.winfo_manager() for child in children}
+        row = ttk.Frame(target)
+        if "grid" in managers and "pack" not in managers:
+            rows, columns = [], 1
+            for child in children:
+                info = child.grid_info()
+                rows.append(int(info.get("row", 0)))
+                columns = max(columns, int(info.get("column", 0)) + int(info.get("columnspan", 1)))
+            row.grid(row=max(rows, default=-1) + 1, column=0, columnspan=columns,
+                     sticky="ew", padx=6, pady=4)
+        elif managers <= {"pack"}:
+            row.pack(fill="x", padx=6, pady=4)
+        else:
+            row.destroy()
+            return
+
+        status_var = tk.StringVar(master=settings_win, value="")
+
+        def save_key():
+            value = str(snapgen_image_api_key_var.get() or "").strip()
+            try:
+                save_image_api_key(SNAPGEN_IMAGE_API_KEY_PATH, value)
+                snapgen_image_api_key_var.set(value)
+                status_var.set("บันทึกแล้ว — key วิดีโอเดิมไม่เปลี่ยน")
+            except Exception:
+                status_var.set("บันทึก key ภาพไม่สำเร็จ")
+
+        ttk.Label(row, text="API key สร้างภาพ (SnapGen.org):").grid(
+            row=0, column=0, sticky="w", padx=(2, 6), pady=2)
+        ttk.Entry(row, textvariable=snapgen_image_api_key_var, show="*", width=28).grid(
+            row=0, column=1, sticky="ew", padx=4, pady=2)
+        ttk.Button(row, text="บันทึก key ภาพ", command=save_key).grid(
+            row=0, column=2, sticky="e", padx=(4, 2), pady=2)
+        ttk.Label(row, textvariable=status_var).grid(
+            row=1, column=0, columnspan=3, sticky="w", padx=2)
+        row.columnconfigure(1, weight=1)
+        target._snapgen_image_api_row = row
+    except Exception:
+        pass
+
+
 def _rewire_open_settings_windows():
     try:
         for w in root.winfo_children():
@@ -5315,6 +5402,7 @@ def _rewire_open_settings_windows():
                 if "Settings" in title or "ตั้งค่า" in title:
                     _remove_openrouter_settings(w)
                     _rewire_snapgen_api_test_button(w)
+                    _inject_snapgen_image_api_key(w)
                     _inject_ltx_cloud_settings(w)
     except Exception:
         pass

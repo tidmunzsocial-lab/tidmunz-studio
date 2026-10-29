@@ -129,7 +129,7 @@ def batch_scope(tmp_path, count=12):
     state = {"project": project, "folder": str(tmp_path), "lock": threading.RLock()}
     noop = lambda *args, **kwargs: None
     scope = dict(vars(N), state=state, video_mode=True, runtime={},
-                 g={"api_key_var": SimpleNamespace(get=lambda: "test-key")},
+                 g={"snapgen_image_api_key_var": SimpleNamespace(get=lambda: "test-key")},
                  attachments_for=lambda scene, limit=None: paths[:2],
                  scene_prompt=lambda scene: scene["prompt"], check_stop=noop,
                  save_project=lambda: (tmp_path / "project.json").write_text(json.dumps(project)),
@@ -216,9 +216,9 @@ def test_api_reference_overflow_fails_before_any_submission(tmp_path):
 
 def test_video_auto_sends_snapgen_1k_request_with_panel_first(tmp_path, monkeypatch):
     scope, paths = batch_scope(tmp_path, 1)
-    # Auto's page environment is the same live key source used by Ref. The recovered
-    # core may retain an older api_key_var after settings are refreshed.
-    scope["runtime"]["api_key_var"] = SimpleNamespace(get=lambda: "stale-invalid-key")
+    # Image requests use their own live key; the legacy video credential must not win.
+    scope["runtime"]["snapgen_image_api_key_var"] = SimpleNamespace(get=lambda: "stale-invalid-key")
+    scope["runtime"]["api_key_var"] = SimpleNamespace(get=lambda: "legacy-video-key")
     scope["IMAGES_PER_CHAT"] = 12
     load(scope, "generate_via_snapgen")
     load(scope, "make_image")
@@ -248,6 +248,15 @@ def test_video_auto_sends_snapgen_1k_request_with_panel_first(tmp_path, monkeypa
     assert "STORYBOARD PANEL" in fields["prompt"]
     assert [base64.b64decode(ref.split(",", 1)[1]) for ref in fields["image_urls"]] == [generated] * 3
     assert Path(scope["state"]["project"]["scenes"][0]["image"]).read_bytes() == generated
+
+
+def test_video_auto_requires_image_gateway_key_before_request(tmp_path):
+    scope, _paths = batch_scope(tmp_path, 1)
+    scope["g"]["snapgen_image_api_key_var"] = SimpleNamespace(get=lambda: "")
+    scope["runtime"]["api_key_var"] = SimpleNamespace(get=lambda: "valid-legacy-video-key")
+    scope["snapgen_image"] = lambda *args, **kwargs: pytest.fail("must stop before API request")
+    with pytest.raises(N.ImageProviderError, match="SnapGen.org Image API key"):
+        scope["stage_images"]()
 
 
 def test_stop_drains_five_submitted_jobs_and_saves_all_results():

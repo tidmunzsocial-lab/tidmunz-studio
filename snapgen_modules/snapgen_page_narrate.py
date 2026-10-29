@@ -44,6 +44,10 @@ try:
 except ImportError:
     from snapgen_credit_guard import image_billing, image_response_items, record_image_billing, credit_consent_required, credit_warning_text
 try:
+    from .snapgen_image_api_config import current_image_api_key
+except ImportError:
+    from snapgen_image_api_config import current_image_api_key
+try:
     from .snapgen_seedance_video import (MODELS as SEEDANCE_MODELS, DURATIONS as SEEDANCE_DURATIONS,
                                          auto_clip_settings, scene_references)
 except ImportError:
@@ -68,16 +72,8 @@ SIZES_2K = {"16:9": (2560, 1440), "9:16": (1440, 2560)}
 
 
 def _snapgen_api_key_value(page_env, runtime_env) -> str:
-    """Read the same live API-key variable as sibling pages, with the core env as fallback."""
-    for env in (page_env, runtime_env):
-        try:
-            keyvar = env.get("api_key_var")
-            value = str(keyvar.get() if keyvar is not None and hasattr(keyvar, "get") else "").strip()
-        except Exception:
-            value = ""
-        if value:
-            return value
-    return ""
+    """Read the SnapGen.org image key, never the legacy api.snapgen.ai video key."""
+    return current_image_api_key(page_env, runtime_env)
 
 
 def narrate_video_size(project):
@@ -237,7 +233,7 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
                   aspect: str, api_key: str, on_credit=None, confirm_resubmit=None) -> str:
     """Create a GPT Image 2.5 Ext 1K image through the shared SnapGen account."""
     if not api_key:
-        raise RuntimeError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
+        raise RuntimeError("ใส่ SnapGen.org Image API key ใน ตั้งค่า > SnapGen API ก่อน")
     import hashlib
     import mimetypes
 
@@ -5366,7 +5362,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project = state["project"]
         api_context = {"api_key": _snapgen_api_key_value(g, runtime)}
         if not api_context["api_key"]:
-            raise ImageProviderError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
+            raise ImageProviderError("ใส่ SnapGen.org Image API key ใน ตั้งค่า > SnapGen API ก่อน")
         required = (set() if video_mode else
                     {c["name"] for c, _ in characters_needing_refs(project.get("context") or {}, scenes)})
         jobs = []
