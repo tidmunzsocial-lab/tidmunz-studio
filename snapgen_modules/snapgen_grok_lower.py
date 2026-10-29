@@ -34,13 +34,14 @@ def build_command(api_key, prompt, image, resolution, duration, aspect, mode, mo
     return [
         "curl", "-sS", "-N", "--max-time", "45", "-X", "POST", api_url,
         "-H", "x-api-key: " + key,
-        "--form", "prompt=" + str(prompt or "").strip(),
-        "--form", "model=" + model,
-        "--form", "resolution=" + resolution,
-        "--form", "duration=" + str(duration or "6").strip(),
-        "--form", "aspect_ratio=" + str(aspect or "landscape").strip(),
-        "--form", "mode=" + str(mode or "custom").strip(),
-        "--form", "skip_audio=false",
+        # --form parses semicolons and leading @/< as upload syntax, truncating prompts.
+        "--form-string", "prompt=" + str(prompt or "").strip(),
+        "--form-string", "model=" + model,
+        "--form-string", "resolution=" + resolution,
+        "--form-string", "duration=" + str(duration or "6").strip(),
+        "--form-string", "aspect_ratio=" + str(aspect or "landscape").strip(),
+        "--form-string", "mode=" + str(mode or "custom").strip(),
+        "--form-string", "skip_audio=false",
         "--form", "files=@" + str(source),
     ]
 

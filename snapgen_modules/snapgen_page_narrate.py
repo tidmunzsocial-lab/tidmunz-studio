@@ -6658,8 +6658,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             runtime["_ai_slow2x_override"] = bool(scene.get("clip_slow"))
             runtime["_auto_video_upscale_2x_override"] = True
             dialogue_var = cfg.get("dialogue")
-            if hasattr(dialogue_var, "set") and not scene.get("dialogue"):
-                dialogue_var.set("")  # the Slot's own "มีบทพูด" switch off: narration shots are silent
+            if hasattr(dialogue_var, "set"):
+                # The Slot appends dialogue direction after the reviewed prompt.
+                dialogue_var.set("มีบทพูด" if scene.get("dialogue") else "ไม่มีบทพูด")
             runtime["slot_images"][slot_index].set(scene["image"])
             runtime.setdefault("_seedance_reference_overrides", {})[slot_index] = seedance_refs
             box = runtime["slot_prompts"][slot_index]
