@@ -15323,6 +15323,10 @@ def _modernize_snapgen_ui(root):
             style.theme_use("clam")
         except Exception:
             pass
+        # Treeview otherwise inherits the Windows theme's font, which can differ
+        # between PCs and render Thai scene text unlike the rest of the app.
+        style.configure("Treeview", font=(SNAPGEN_UI_FONT, 9), rowheight=26)
+        style.configure("Treeview.Heading", font=(SNAPGEN_UI_FONT, 9, "bold"))
         style.configure("TFrame", background=P["bg"])
         style.configure("TLabelframe", background=P["panel"], bordercolor=P["border"], relief="flat", borderwidth=1)
         style.configure("TLabelframe.Label", background=P["panel"], foreground=P["accent"], font=(SNAPGEN_UI_FONT, 10, "bold"))

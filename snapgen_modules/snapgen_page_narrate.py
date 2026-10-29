@@ -301,15 +301,19 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
     receipt = Path(output_dir) / f".{name}_snapgen_{fingerprint[:16]}.json"
     previous = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
     task_id = previous.get("task_id")
-    if previous and not task_id:
+    retryable_status = previous.get("retryable_status")
+    if previous and not task_id and retryable_status not in (502, 503):
         if not callable(confirm_resubmit) or not confirm_resubmit(name):
             raise RuntimeError(f"{name}: งาน SnapGen ก่อนหน้าหมดเวลารอโดยไม่ได้เลขงาน — อาจหักเครดิตแล้ว "
                                "ตรวจ SnapGen History ก่อนทำใหม่; ยังไม่ส่ง API ซ้ำ")
 
-    def remember(task=None):
+    def remember(task=None, retryable_status=None):
         # Persist only the gateway task ID; never write prompts, reference bytes, or API keys.
+        record = {"task_id": task}
+        if retryable_status in (502, 503):
+            record["retryable_status"] = retryable_status
         temporary = receipt.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"task_id": task}), encoding="utf-8")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
         temporary.replace(receipt)
 
     def read_json(response):
@@ -340,27 +344,38 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
             body["image_urls"] = data_urls
         encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
         idempotency_key = f"tidmunz-{fingerprint}"
-        request = urllib.request.Request(
-            SNAPGEN_IMAGE_URL, data=encoded, method="POST",
-            headers={"Authorization": f"Bearer {api_key}", "User-Agent": SNAPGEN_USER_AGENT,
-                     "Accept": "application/json", "Content-Type": "application/json",
-                     "Prefer": "respond-async", "Idempotency-Key": idempotency_key})
+        headers = {"Authorization": f"Bearer {api_key}", "User-Agent": SNAPGEN_USER_AGENT,
+                   "Accept": "application/json", "Content-Type": "application/json",
+                   "Prefer": "respond-async", "Idempotency-Key": idempotency_key}
         remember()  # If POST times out, require confirmation before any retry.
-        try:
-            with urllib.request.urlopen(request, timeout=180) as response:
-                task = read_json(response)
-                task_id = (task.get("id") if isinstance(task, dict) else None) or response.headers.get("x-gateway-task-id")
-                if task_id:
-                    remember(task_id)
-        except urllib.error.HTTPError as exc:
-            code = getattr(exc, "code", None)
-            detail = exc.read().decode("utf-8", "replace")[:500]
-            if code and 400 <= code < 500 and code != 408:
-                receipt.unlink(missing_ok=True)
-            raise RuntimeError(f"SnapGen GPT Image 2.5 Ext HTTP {code or 'ขัดข้อง'}: {detail}") from exc
-        except (OSError, ValueError, http.client.HTTPException) as exc:
-            raise RuntimeError("SnapGen GPT Image 2.5 Ext: ส่งคำขอแล้วแต่ยังไม่ได้ task ID — ตรวจงานใน SnapGen "
-                               "ก่อนยืนยันส่งใหม่; ระบบจะไม่ยิงซ้ำอัตโนมัติ") from exc
+        for attempt in range(3):
+            request = urllib.request.Request(SNAPGEN_IMAGE_URL, data=encoded, method="POST", headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    task = read_json(response)
+                    task_id = (task.get("id") if isinstance(task, dict) else None) or response.headers.get("x-gateway-task-id")
+                    if task_id:
+                        remember(task_id)
+                break
+            except urllib.error.HTTPError as exc:
+                code = getattr(exc, "code", None)
+                if code in (502, 503) and attempt < 2:
+                    # SnapGen documents these as transient upstream failures. Reuse the
+                    # exact body and Idempotency-Key so a lost response cannot double-bill.
+                    exc.close()
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                detail = exc.read().decode("utf-8", "replace").strip()[:500]
+                if code in (502, 503):
+                    remember(retryable_status=code)
+                    if "<html" in detail.lower() or "cloudflare" in detail.lower():
+                        detail = f"Cloudflare/SnapGen gateway HTTP {code}; ลองใหม่ได้ภายหลัง"
+                elif code and 400 <= code < 500 and code != 408:
+                    receipt.unlink(missing_ok=True)
+                raise RuntimeError(f"SnapGen GPT Image 2.5 Ext HTTP {code or 'ขัดข้อง'}: {detail}") from exc
+            except (OSError, ValueError, http.client.HTTPException) as exc:
+                raise RuntimeError("SnapGen GPT Image 2.5 Ext: ส่งคำขอแล้วแต่ยังไม่ได้ task ID — ตรวจงานใน SnapGen "
+                                   "ก่อนยืนยันส่งใหม่; ระบบจะไม่ยิงซ้ำอัตโนมัติ") from exc
         if not task_id and isinstance(task, dict) and task.get("status") not in ("succeeded", "failed"):
             raise RuntimeError("SnapGen ไม่ได้ส่ง task ID กลับมา — ตรวจ SnapGen ก่อนทำใหม่")
 
@@ -3470,7 +3485,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     preview = tk.Label(preview_box, bg="#F1F5F9", text="เลือกฉากเพื่อดูรูป")
     preview.pack(fill="both", expand=True)
     columns = ("no", "time", "chars", "prompt", "status")
-    table = ttk.Treeview(table_frame, columns=columns, show="headings", height=12, selectmode="extended")
+    table = ttk.Treeview(table_frame, columns=columns, show="headings", height=12,
+                         selectmode="extended")
     table.tag_configure("bad", foreground="#DC2626")
     for key, title, width in (("no", "#", 44), ("time", "เวลา", 64),
                               ("chars", "ตัวละคร / สถานที่" if video_mode else "ตัวละคร", 160 if video_mode else 170),
@@ -4162,7 +4178,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             raise
         except Exception as exc:
             # A timed-out request may already be processing; do not auto-submit another paid job.
-            raise ImageProviderError(f"SnapGen API: {exc} — ตรวจ History ก่อนลองใหม่") from exc
+            detail = str(exc)
+            retry_hint = (" — กดทำต่อเพื่อลองซ้ำด้วย Idempotency-Key เดิม"
+                          if "HTTP 502" in detail or "HTTP 503" in detail else " — ตรวจ History ก่อนลองใหม่")
+            raise ImageProviderError(f"SnapGen API: {detail}{retry_hint}") from exc
         if api_context is not None:
             return image  # Overlapping balance deltas cannot measure one image's charge.
         after = balance()

@@ -76,6 +76,59 @@ def test_known_async_task_recovers_without_another_post(tmp_path, monkeypatch):
     assert Path(result).read_bytes() == b"generated-image" and calls == ["POST", "GET"]
 
 
+def test_502_retries_same_image_request_with_same_idempotency_key(tmp_path, monkeypatch):
+    requests, delays = [], []
+    monkeypatch.setattr(N.time, "sleep", delays.append)
+    def reply(request, **kwargs):
+        requests.append(request)
+        if len(requests) == 1:
+            raise HTTPError(request.full_url, 502, "Bad Gateway", {}, io.BytesIO(b"<html>Cloudflare</html>"))
+        return io.BytesIO(json.dumps({
+            "id": "retry-job", "status": "succeeded", "charged_microusd": "8500",
+            "result": {"urls": [IMAGE]},
+        }).encode())
+    monkeypatch.setattr(N.urllib.request, "urlopen", reply)
+
+    result = N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
+
+    assert Path(result).read_bytes() == b"generated-image"
+    assert [request.get_method() for request in requests] == ["POST", "POST"]
+    assert requests[0].get_header("Idempotency-key") == requests[1].get_header("Idempotency-key")
+    assert requests[0].data == requests[1].data
+    assert delays == [2]
+    assert not list(tmp_path.glob(".*_snapgen_*.json"))
+
+
+def test_exhausted_502_can_resume_with_same_key_without_confirmation(tmp_path, monkeypatch):
+    post_requests, delays = [], []
+    monkeypatch.setattr(N.time, "sleep", delays.append)
+    def unavailable(request, **kwargs):
+        post_requests.append(request)
+        raise HTTPError(request.full_url, 503, "Service Unavailable", {}, io.BytesIO(b"<html>Cloudflare</html>"))
+    monkeypatch.setattr(N.urllib.request, "urlopen", unavailable)
+
+    with pytest.raises(RuntimeError, match="Cloudflare/SnapGen gateway HTTP 503"):
+        N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
+    receipt = next(tmp_path.glob(".*_snapgen_*.json"))
+    assert json.loads(receipt.read_text()) == {"task_id": None, "retryable_status": 503}
+    assert len(post_requests) == 3 and delays == [2, 4]
+    idem_key = post_requests[0].get_header("Idempotency-key")
+    assert all(request.get_header("Idempotency-key") == idem_key for request in post_requests)
+
+    def recovered(request, **kwargs):
+        post_requests.append(request)
+        return io.BytesIO(json.dumps({
+            "id": "resumed-job", "status": "succeeded", "charged_microusd": "8500",
+            "result": {"urls": [IMAGE]},
+        }).encode())
+    monkeypatch.setattr(N.urllib.request, "urlopen", recovered)
+    result = N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
+
+    assert Path(result).read_bytes() == b"generated-image"
+    assert post_requests[-1].get_header("Idempotency-key") == idem_key
+    assert not receipt.exists()
+
+
 def test_old_version_524_requires_history_confirmation_before_post(tmp_path):
     scope, _ = batch_scope(tmp_path, 1)
     scope["state"]["project"]["scenes"][0]["error"] = "SnapGen API: HTTP 524 timeout"
