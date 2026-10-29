@@ -216,6 +216,9 @@ def test_api_reference_overflow_fails_before_any_submission(tmp_path):
 
 def test_video_auto_sends_snapgen_1k_request_with_panel_first(tmp_path, monkeypatch):
     scope, paths = batch_scope(tmp_path, 1)
+    # Auto's page environment is the same live key source used by Ref. The recovered
+    # core may retain an older api_key_var after settings are refreshed.
+    scope["runtime"]["api_key_var"] = SimpleNamespace(get=lambda: "stale-invalid-key")
     scope["IMAGES_PER_CHAT"] = 12
     load(scope, "generate_via_snapgen")
     load(scope, "make_image")

@@ -67,6 +67,19 @@ SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
 SIZES_2K = {"16:9": (2560, 1440), "9:16": (1440, 2560)}
 
 
+def _snapgen_api_key_value(page_env, runtime_env) -> str:
+    """Read the same live API-key variable as sibling pages, with the core env as fallback."""
+    for env in (page_env, runtime_env):
+        try:
+            keyvar = env.get("api_key_var")
+            value = str(keyvar.get() if keyvar is not None and hasattr(keyvar, "get") else "").strip()
+        except Exception:
+            value = ""
+        if value:
+            return value
+    return ""
+
+
 def narrate_video_size(project):
     """Keep Narrate exports at 1080p regardless of source-image resolution."""
     aspect = project.get("aspect", "16:9")
@@ -4063,11 +4076,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 return False
         api_provider = "snapgen"
         api_label = SNAPGEN_LABEL
-        keyvar = runtime.get("api_key_var") or g.get("api_key_var")
-        try:
-            api_ready = bool(str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip())
-        except Exception:
-            api_ready = False
+        api_ready = bool(_snapgen_api_key_value(g, runtime))
 
         answer, event = {}, threading.Event()
 
@@ -4122,9 +4131,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def generate_via_snapgen(prompt, refs, out_dir, name, aspect, api_context=None):
         if video_mode and credit_consent_required(state["project"], state.get("snapgen_credit_acceptance")):
             raise ImageProviderError(credit_warning_text(state["project"]["snapgen_credit_warning"]))
-        keyvar = runtime.get("api_key_var") or g.get("api_key_var")
-        api_key = (api_context["api_key"] if api_context is not None else
-                   str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip())
+        api_key = (str(api_context.get("api_key") or "").strip() if api_context is not None else
+                   _snapgen_api_key_value(g, runtime))
         fetch = None if api_context is not None else (runtime.get("fetch_available_credit") or g.get("fetch_available_credit"))
 
         def balance():
@@ -5356,8 +5364,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def run_snapgen_scenes(todo, scenes, refs, images_dir, selected_redraw=False):
         project = state["project"]
-        keyvar = runtime.get("api_key_var") or g.get("api_key_var")
-        api_context = {"api_key": str(keyvar.get() if keyvar and hasattr(keyvar, "get") else "").strip()}
+        api_context = {"api_key": _snapgen_api_key_value(g, runtime)}
         if not api_context["api_key"]:
             raise ImageProviderError("ใส่ SnapGen API key ในหน้าตั้งค่าก่อน")
         required = (set() if video_mode else
