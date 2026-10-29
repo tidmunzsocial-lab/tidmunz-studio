@@ -5807,8 +5807,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                   log=log, progress=lambda f, msg: set_progress("video", f, msg), check_stop=check_stop)
             save_project()
             return
-        if not state["project"].get("images_verified"):
-            verify_images()
+        # Merging consumes the completed clips; image review can regenerate paid assets.
         project, folder = state["project"], Path(state["folder"])
         ffmpeg = ffmpeg_path()
         width, height = (SIZES.get(project["aspect"], SIZES["16:9"]) if video_mode
@@ -6830,19 +6829,21 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not project or not project.get("scenes"):
             messagebox.showinfo("เล่าภาพ", "เปิดโปรเจกต์ที่มีรูปฉากก่อน", parent=page)
             return
-        if force:
+        if not video_mode and force:
             if not messagebox.askyesno("เรนเดอร์ใหม่ทั้งหมด",
                     "ทำวิดีโอทุกฉากและทุกรอยต่อใหม่จากรูปที่มีอยู่ โดยไม่ใช้แคช\n"
                     "ไม่สร้างรูป AI ใหม่ และเก็บวิดีโอไฟล์เดิมไว้\n\nเริ่มเลยไหม?", parent=page):
                 return
-        elif not (Path(state["folder"]) / "_render_cache" / "manifest.json").is_file():
+        elif not video_mode and not (Path(state["folder"]) / "_render_cache" / "manifest.json").is_file():
             if not messagebox.askyesno("สร้างแคชครั้งแรก",
                     "โปรเจกต์นี้ยังไม่มีแคชจากระบบใหม่ ต้องเรนเดอร์ครั้งแรกหนึ่งรอบ\n"
                     "ครั้งถัดไปจะทำเฉพาะฉากและรอยต่อที่เปลี่ยน ไม่สร้างรูป AI ใหม่\n\nเริ่มเลยไหม?", parent=page):
                 return
-        relink_scene_images(project, state["folder"])
-        project.update({"film": bool(film_var.get()), "subtitles": bool(subtitle_var.get()), "aspect": desired_aspect(),
-                        "style_mode": style_var.get() if style_var.get() in STYLES else "ปกติ"})
+        if not video_mode:
+            relink_scene_images(project, state["folder"])
+            project.update({"film": bool(film_var.get()), "aspect": desired_aspect(),
+                            "style_mode": style_var.get() if style_var.get() in STYLES else "ปกติ"})
+        project["subtitles"] = bool(subtitle_var.get())
         project.setdefault("done", {}).pop("video", None)
         save_project()
         state["busy"], state["stop"] = True, False
@@ -7023,6 +7024,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return result["value"]
 
     def start_pipeline(only=None, character_limit=None):
+        if video_mode and only == "video":
+            render_video_selected()
+            return
         project = state["project"]
         if state["busy"]:
             return
