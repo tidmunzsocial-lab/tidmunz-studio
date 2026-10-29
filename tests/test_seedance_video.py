@@ -100,6 +100,37 @@ def launcher_tree():
     return ast.parse((ROOT / "snapgen_gui_v2.py").read_text(encoding="utf-8-sig"))
 
 
+def test_slow2x_wrapper_honors_auto_scene_override_even_if_global_checkbox_is_on(tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    g = {"_ai_slow2x_override": False, "_auto_video_upscale_2x_override": True}
+    calls, logs = [], []
+    global_slow2x = True
+    node = next(n for n in ast.walk(launcher_tree()) if isinstance(n, ast.FunctionDef)
+                and n.name == "_snapgen_make_ai_slow2x")
+    ns = {
+        "g": g,
+        "Path": Path,
+        "_latest_export_video": lambda: None,
+        "_mute_download_enabled": lambda: False,
+        "_ai_slow2x_enabled": lambda: (bool(g["_ai_slow2x_override"])
+                                        if g.get("_ai_slow2x_override") is not None else global_slow2x),
+        "_slow2x_mod": SimpleNamespace(make_ai_slow2x=lambda *a, **kw: calls.append((a, kw)) or str(source)),
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "slow2x-wrapper", "exec"), ns)
+
+    result = ns[node.name](str(source), log=logs.append)
+
+    assert result == str(source)
+    assert calls == []
+    assert any("ฉากนี้ไม่ใช้ Slow 2x" in line for line in logs)
+
+    g["_ai_slow2x_override"] = True
+    ns[node.name](str(source), log=logs.append)
+    assert len(calls) == 1
+    assert calls[0][1]["upscale_2x"] is True
+
+
 def test_saved_slot_restores_seedance_instead_of_recovered_default():
     class Var:
         def __init__(self, value=""):

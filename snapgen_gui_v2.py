@@ -1869,6 +1869,12 @@ try:
                 return str(input_video)
         except Exception:
             pass
+        # The recovered core can call this wrapper after the Auto download hook.
+        # Honor Auto's per-shot decision here too, or the global checkbox slows dialogue shots anyway.
+        if not _ai_slow2x_enabled():
+            if callable(log):
+                log("[slow2x] ข้าม — ปิดไว้หรือฉากนี้ไม่ใช้ Slow 2x")
+            return str(input_video)
         try:
             inp_path = Path(input_video)
             if not (inp_path.is_file() and inp_path.stat().st_size > 0):
