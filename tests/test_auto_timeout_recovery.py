@@ -24,7 +24,7 @@ def test_524_survives_restart_and_never_silently_resubmits(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="HTTP 524"):
         run()
     receipt = next(tmp_path.glob(".*.json"))
-    assert json.loads(receipt.read_text()) == {"task_id": None}
+    assert json.loads(receipt.read_text()) == {"submitted": True}
     assert "test-key" not in receipt.read_text()
     with pytest.raises(RuntimeError, match="ยังไม่ส่ง API ซ้ำ"):
         run()
@@ -33,8 +33,8 @@ def test_524_survives_restart_and_never_silently_resubmits(tmp_path, monkeypatch
     assert calls == ["POST"]
     monkeypatch.setattr(N.urllib.request, "urlopen", lambda request, **kwargs:
         (calls.append(request.get_method()) or io.BytesIO(json.dumps({
-            "id": "recovered-job", "status": "succeeded", "charged_microusd": "8500",
-            "result": {"urls": [IMAGE]}}).encode())))
+            "uuid": "recovered-job", "status": 2, "used_credit": 1,
+            "generated_image": [{"image_url": IMAGE}]}).encode())))
     assert Path(run(confirm_resubmit=lambda name: name == "scene_001")).read_bytes() == b"generated-image"
     assert calls == ["POST", "POST"] and not receipt.exists()
 
@@ -45,7 +45,7 @@ def test_known_task_survives_poll_failure_and_resume_uses_only_get(tmp_path, mon
     def reply(request, **kwargs):
         calls.append(request.get_method())
         if request.get_method() == "POST":
-            return io.BytesIO(b'{"id":"existing-job","status":"queued"}')
+            return io.BytesIO(b'{"uuid":"existing-job","status":1}')
         raise HTTPError(request.full_url, 524, "timeout", {}, io.BytesIO(b"timeout"))
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     def run():
@@ -53,79 +53,81 @@ def test_known_task_survives_poll_failure_and_resume_uses_only_get(tmp_path, mon
     with pytest.raises(RuntimeError, match="existing-job"):
         run()
     assert calls == ["POST", "GET", "GET", "GET"]
-    assert json.loads(next(tmp_path.glob(".*.json")).read_text())["task_id"] == "existing-job"
+    assert json.loads(next(tmp_path.glob(".*.json")).read_text())["uuid"] == "existing-job"
     monkeypatch.setattr(N.urllib.request, "urlopen", lambda request, **kwargs:
         (calls.append(request.get_method()) or io.BytesIO(json.dumps({
-            "id": "existing-job", "status": "succeeded", "charged_microusd": "150000",
-            "result": {"urls": [IMAGE]}}).encode())))
+            "uuid": "existing-job", "status": 2, "used_credit": 15,
+            "generated_image": [{"image_url": IMAGE}]}).encode())))
     assert Path(run()).read_bytes() == b"generated-image"
     assert calls[-1] == "GET" and calls.count("POST") == 1
-    assert records == [{"task_id": "existing-job", "used_credit": 15}]
+    assert records == [{"task_id": "existing-job", "used_credit": 15.0}]
 
 
 def test_known_async_task_recovers_without_another_post(tmp_path, monkeypatch):
     calls = []
     def reply(request, **kwargs):
         calls.append(request.get_method())
-        payload = ({"id": "stream-job", "status": "queued"} if request.get_method() == "POST" else
-                   {"id": "stream-job", "status": "succeeded", "charged_microusd": "8500",
-                    "result": {"urls": [IMAGE]}})
+        payload = ({"uuid": "stream-job", "status": 1} if request.get_method() == "POST" else
+                   {"uuid": "stream-job", "status": 2, "used_credit": 1,
+                    "generated_image": [{"image_url": IMAGE}]})
         return io.BytesIO(json.dumps(payload).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     result = N.snapgen_image("scene", [], str(tmp_path), "scene", "9:16", "key")
     assert Path(result).read_bytes() == b"generated-image" and calls == ["POST", "GET"]
 
 
-def test_502_retries_same_image_request_with_same_idempotency_key(tmp_path, monkeypatch):
-    requests, delays = [], []
-    monkeypatch.setattr(N.time, "sleep", delays.append)
+def test_502_is_ambiguous_and_never_resubmits_without_confirmation(tmp_path, monkeypatch):
+    requests = []
     def reply(request, **kwargs):
         requests.append(request)
         if len(requests) == 1:
             raise HTTPError(request.full_url, 502, "Bad Gateway", {}, io.BytesIO(b"<html>Cloudflare</html>"))
         return io.BytesIO(json.dumps({
-            "id": "retry-job", "status": "succeeded", "charged_microusd": "8500",
-            "result": {"urls": [IMAGE]},
+            "uuid": "retry-job", "status": 2, "used_credit": 1,
+            "generated_image": [{"image_url": IMAGE}],
         }).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
 
-    result = N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
+    with pytest.raises(RuntimeError, match="HTTP 502"):
+        N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
+    with pytest.raises(RuntimeError, match="ยังไม่ส่ง API ซ้ำ"):
+        N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
+    result = N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key",
+                             confirm_resubmit=lambda _name: True)
 
     assert Path(result).read_bytes() == b"generated-image"
     assert [request.get_method() for request in requests] == ["POST", "POST"]
-    assert requests[0].get_header("Idempotency-key") == requests[1].get_header("Idempotency-key")
-    assert requests[0].data == requests[1].data
-    assert delays == [2]
-    assert not list(tmp_path.glob(".*_snapgen_*.json"))
+    assert requests[0].get_header("Idempotency-key") is None
+    assert not list(tmp_path.glob(".*_snapgen_lower_*.json"))
 
 
-def test_exhausted_502_can_resume_with_same_key_without_confirmation(tmp_path, monkeypatch):
-    post_requests, delays = [], []
-    monkeypatch.setattr(N.time, "sleep", delays.append)
+def test_503_requires_confirmation_before_any_resubmit(tmp_path, monkeypatch):
+    post_requests = []
     def unavailable(request, **kwargs):
         post_requests.append(request)
         raise HTTPError(request.full_url, 503, "Service Unavailable", {}, io.BytesIO(b"<html>Cloudflare</html>"))
     monkeypatch.setattr(N.urllib.request, "urlopen", unavailable)
 
-    with pytest.raises(RuntimeError, match="Cloudflare/SnapGen gateway HTTP 503"):
+    with pytest.raises(RuntimeError, match="HTTP 503"):
         N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
-    receipt = next(tmp_path.glob(".*_snapgen_*.json"))
-    assert json.loads(receipt.read_text()) == {"task_id": None, "retryable_status": 503}
-    assert len(post_requests) == 3 and delays == [2, 4]
-    idem_key = post_requests[0].get_header("Idempotency-key")
-    assert all(request.get_header("Idempotency-key") == idem_key for request in post_requests)
+    receipt = next(tmp_path.glob(".*_snapgen_lower_*.json"))
+    assert json.loads(receipt.read_text()) == {"submitted": True}
+    assert len(post_requests) == 1
+    with pytest.raises(RuntimeError, match="ยังไม่ส่ง API ซ้ำ"):
+        N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
 
     def recovered(request, **kwargs):
         post_requests.append(request)
         return io.BytesIO(json.dumps({
-            "id": "resumed-job", "status": "succeeded", "charged_microusd": "8500",
-            "result": {"urls": [IMAGE]},
+            "uuid": "resumed-job", "status": 2, "used_credit": 1,
+            "generated_image": [{"image_url": IMAGE}],
         }).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", recovered)
-    result = N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key")
+    result = N.snapgen_image("scene", [], str(tmp_path), "scene_001", "9:16", "key",
+                             confirm_resubmit=lambda _name: True)
 
     assert Path(result).read_bytes() == b"generated-image"
-    assert post_requests[-1].get_header("Idempotency-key") == idem_key
+    assert [request.get_method() for request in post_requests] == ["POST", "POST"]
     assert not receipt.exists()
 
 

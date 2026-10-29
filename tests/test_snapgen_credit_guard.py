@@ -152,13 +152,13 @@ def test_expensive_or_unverified_result_is_saved_then_new_jobs_pause(tmp_path, m
     def reply(request, **kwargs):
         requests.append(request)
         if request.get_method() == "POST":
-            job = f"job-{sum(r.get_method() == 'POST' for r in requests)}"
-            result = {"id": job, "status": "queued"}
+            job = f"history-{sum(r.get_method() == 'POST' for r in requests)}"
+            result = {"uuid": job, "status": 1, "estimated_credit": 1}
         else:
             job = request.full_url.rsplit("/", 1)[-1]
-            result = {"id": job, "status": "succeeded",
-                      "charged_microusd": str(cost * 10000) if cost is not None else None,
-                      "result": {"urls": ["data:image/png;base64," + base64.b64encode(generated).decode()]}}
+            result = {"uuid": job, "status": 2, "used_credit": cost,
+                      "generated_image": [{"image_url":
+                          "data:image/png;base64," + base64.b64encode(generated).decode()}]}
         return io.BytesIO(json.dumps(result).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     with pytest.raises(N.ImageProviderError): scope["stage_images"]()
@@ -180,16 +180,18 @@ def test_history_lookup_confirms_cost_without_second_generation(tmp_path, monkey
     encoded = "data:image/png;base64," + base64.b64encode(b"generated-image").decode()
     def reply(request, **kwargs):
         calls.append(request)
-        value = ({"id": "job-1", "status": "queued"} if request.get_method() == "POST"
-                 else {"id": "job-1", "status": "succeeded", "charged_microusd": "140000",
-                       "result": {"urls": [encoded]}})
+        value = ({"uuid": "history-1", "status": 1, "estimated_credit": 1}
+                 if request.get_method() == "POST"
+                 else {"uuid": "history-1", "status": 2, "used_credit": 14,
+                       "generated_image": [{"image_url": encoded}]})
         return io.BytesIO(json.dumps(value).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     output = N.snapgen_image("scene", [], str(tmp_path), "scene", "9:16", "test-key", on_credit=records.append)
     assert [request.get_method() for request in calls] == ["POST", "GET"]
     assert calls[0].full_url == N.SNAPGEN_IMAGE_URL
-    assert calls[-1].full_url.endswith("/tasks/job-1")
-    assert records == [{"task_id": "job-1", "used_credit": 14}]
+    assert calls[0].get_header("X-api-key") == "test-key"
+    assert calls[-1].full_url.endswith("/history/history-1")
+    assert records == [{"task_id": "history-1", "used_credit": 14.0}]
     assert Path(output).read_bytes() == b"generated-image"
 
 
@@ -197,8 +199,8 @@ def test_async_charge_is_reported_with_the_finished_image(tmp_path, monkeypatch)
     records = []
     encoded = "data:image/png;base64," + base64.b64encode(b"paid-image").decode()
     monkeypatch.setattr(N.urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(json.dumps({
-        "id": "job", "status": "succeeded", "charged_microusd": "150000",
-        "result": {"urls": [encoded]}}).encode()))
+        "uuid": "job", "status": 2, "used_credit": 15,
+        "generated_image": [{"image_url": encoded}]}).encode()))
     result = N.snapgen_image("scene", [], str(tmp_path), "scene", "9:16", "test-key", on_credit=records.append)
     assert Path(result).read_bytes() == b"paid-image"
 
@@ -208,9 +210,10 @@ def test_pretty_json_and_initial_zero_do_not_hide_the_final_charge(tmp_path, mon
     encoded = "data:image/png;base64," + base64.b64encode(b"paid-image").decode()
     def reply(request, **kwargs):
         calls.append(request)
-        payload = ({"id": "job", "status": "queued"} if request.get_method() == "POST" else
-                   {"id": "job", "status": "succeeded", "charged_microusd": "180000",
-                    "result": {"urls": [encoded]}})
+        payload = ({"uuid": "job", "status": 1, "estimated_credit": 1}
+                   if request.get_method() == "POST" else
+                   {"uuid": "job", "status": 2, "used_credit": 18,
+                    "generated_image": [{"image_url": encoded}]})
         return io.BytesIO(json.dumps(payload, indent=2).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     N.snapgen_image("scene", [], str(tmp_path), "scene", "9:16", "test-key", on_credit=records.append)
@@ -221,8 +224,8 @@ def test_pretty_json_and_initial_zero_do_not_hide_the_final_charge(tmp_path, mon
 def test_successful_pretty_json_response_keeps_credit_and_image(tmp_path, monkeypatch):
     records = []
     encoded = "data:image/png;base64," + base64.b64encode(b"paid-image").decode()
-    raw = json.dumps({"id": "job", "status": "succeeded", "charged_microusd": "120000",
-                      "result": {"urls": [encoded]}}, indent=2)
+    raw = json.dumps({"uuid": "job", "status": 2, "used_credit": 12,
+                      "generated_image": [{"image_url": encoded}]}, indent=2)
     monkeypatch.setattr(N.urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(raw.encode()))
     result = N.snapgen_image("scene", [], str(tmp_path), "scene", "9:16", "test-key", on_credit=records.append)
     assert records == [{"task_id": "job", "used_credit": 12}]

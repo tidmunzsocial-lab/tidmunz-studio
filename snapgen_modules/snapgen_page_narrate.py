@@ -44,10 +44,6 @@ try:
 except ImportError:
     from snapgen_credit_guard import image_billing, image_response_items, record_image_billing, credit_consent_required, credit_warning_text
 try:
-    from .snapgen_image_api_config import current_image_api_key
-except ImportError:
-    from snapgen_image_api_config import current_image_api_key
-try:
     from .snapgen_seedance_video import (MODELS as SEEDANCE_MODELS, DURATIONS as SEEDANCE_DURATIONS,
                                          auto_clip_settings, scene_references)
 except ImportError:
@@ -72,8 +68,16 @@ SIZES_2K = {"16:9": (2560, 1440), "9:16": (1440, 2560)}
 
 
 def _snapgen_api_key_value(page_env, runtime_env) -> str:
-    """Read the SnapGen.org image key, never the legacy api.snapgen.ai video key."""
-    return current_image_api_key(page_env, runtime_env)
+    """Read the current SnapGen key, preferring page state over stale runtime state."""
+    for environment in (page_env, runtime_env):
+        try:
+            keyvar = environment.get("api_key_var")
+            value = str(keyvar.get() if keyvar is not None and hasattr(keyvar, "get") else "").strip()
+        except Exception:
+            value = ""
+        if value:
+            return value
+    return ""
 
 
 def narrate_video_size(project):
@@ -90,11 +94,12 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Heavy work (FFmpeg, Whisper) runs below normal priority so the PC stays usable.
 LOW_PRIORITY = NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
 _ENCODER_CACHE: dict = {}
-SNAPGEN_IMAGE_URL = "https://api.snapgen.org/v1/images/generations"
+SNAPGEN_IMAGE_URL = "https://api.snapgen.ai/uapi/v1/imagen/gpt-image-2.5-lower"
+SNAPGEN_HISTORY_URL = "https://api.snapgen.ai/uapi/v1/history/"
 SNAPGEN_USER_AGENT = "TidmunzStudio/1.0"
 COMFYUI_URL = os.environ.get("SNAPGEN_COMFYUI_URL", "")
 GPT_WEB_LABEL = "GPT Web (Chrome เดิม)"
-SNAPGEN_LABEL = "SnapGen API · GPT Image 2.5 · 1K"
+SNAPGEN_LABEL = "SnapGen API · GPT Image 2.5 Lower"
 QWEN_LABEL = "Qwen 2.1 (ComfyUI ในเครื่อง)"
 PER_STAGE_LABEL = "เลือกแยกตามขั้น (ถามครั้งละหัวข้อ)"
 IMAGE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL, "snapgen": SNAPGEN_LABEL,
@@ -231,11 +236,13 @@ def _save_image_result(result, target: Path, api_key: str = "") -> str:
 
 def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
                   aspect: str, api_key: str, on_credit=None, confirm_resubmit=None) -> str:
-    """Create a GPT Image 2.5 Ext 1K image through the shared SnapGen account."""
+    """Submit GPT Image 2.5 Lower as multipart, then follow its SnapGen history UUID."""
     if not api_key:
-        raise RuntimeError("ใส่ SnapGen.org Image API key ใน ตั้งค่า > SnapGen API ก่อน")
-    import hashlib
-    import mimetypes
+        raise RuntimeError("ใส่ SnapGen API key ใน ตั้งค่า > SnapGen API ก่อน")
+
+    allowed_aspects = {"1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "3:2", "2:3"}
+    if aspect not in allowed_aspects:
+        raise RuntimeError(f"GPT Image 2.5 Lower ไม่รองรับสัดส่วน {aspect}")
 
     references = []
     for raw_path in refs:
@@ -250,77 +257,47 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
         elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
             mime = "image/webp"
         else:
-            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if not mime.startswith("image/"):
-            raise RuntimeError(f"ไฟล์อ้างอิงไม่ใช่รูปภาพ: {path.name}")
-        if mime not in {"image/png", "image/jpeg", "image/webp"}:
             import io
             from PIL import Image, ImageOps
-            with Image.open(io.BytesIO(data)) as source:
-                image = ImageOps.exif_transpose(source)
-                alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
-                image = image.convert("RGBA" if alpha else "RGB")
-                mime = "image/webp" if alpha else "image/jpeg"
-                buffer = io.BytesIO()
-                image.save(buffer, "WEBP" if alpha else "JPEG", quality=90)
-                data = buffer.getvalue()
-        references.append((path, mime, data))
-    if len(references) > 16:
-        raise RuntimeError(f"GPT Image 2.5 Ext รับรูปอ้างอิงได้สูงสุด 16 รูป (ได้รับ {len(references)})")
-
-    # The JSON endpoint caps the complete request at 10 MiB; leave room for base64 expansion and prompt text.
-    max_request_bytes = 7 * 1024 * 1024
-    if sum(len(data) for _, _, data in references) > max_request_bytes:
-        import io
-        from PIL import Image, ImageOps
-        per_image = max(256 * 1024, max_request_bytes // max(1, len(references)))
-        prepared = []
-        for path, mime, data in references:
-            if len(data) > per_image:
+            try:
                 with Image.open(io.BytesIO(data)) as source:
                     image = ImageOps.exif_transpose(source)
                     alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
                     image = image.convert("RGBA" if alpha else "RGB")
                     mime = "image/webp" if alpha else "image/jpeg"
-                    for _ in range(12):
-                        for quality in (92, 85, 78):
-                            buffer = io.BytesIO()
-                            image.save(buffer, "WEBP" if alpha else "JPEG", quality=quality,
-                                       **({} if alpha else {"subsampling": 0}))
-                            data = buffer.getvalue()
-                            if len(data) <= per_image:
-                                break
-                        if len(data) <= per_image:
-                            break
-                        scale = min(0.85, (per_image / len(data)) ** 0.5 * 0.95)
-                        image = image.resize((max(1, int(image.width * scale)),
-                                              max(1, int(image.height * scale))), Image.Resampling.LANCZOS)
-                if len(data) > per_image:
-                    raise RuntimeError(f"บีบอัดรูปอ้างอิง {path.name} สำหรับ SnapGen ไม่สำเร็จ")
-            prepared.append((path, mime, data))
-        references = prepared
+                    buffer = io.BytesIO()
+                    image.save(buffer, "WEBP" if alpha else "JPEG", quality=90)
+                    data = buffer.getvalue()
+            except Exception as exc:
+                raise RuntimeError(f"ไฟล์อ้างอิงไม่ใช่รูปภาพที่รองรับ: {path.name}") from exc
+        if len(data) > 10 * 1024 * 1024:
+            raise RuntimeError(f"รูปอ้างอิง {path.name} เกินขนาดสูงสุด 10 MB")
+        suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
+        references.append(("files", f"reference_{len(references) + 1:02d}{suffix}", data))
+    if len(references) > 10:
+        raise RuntimeError(f"GPT Image 2.5 Lower รับรูปอ้างอิงได้สูงสุด 10 รูป (ได้รับ {len(references)})")
 
-    data_urls = [f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
-                 for _path, mime, data in references]
-    ref_hashes = [hashlib.sha256(data).hexdigest() for _path, _mime, data in references]
-
-    fingerprint = hashlib.sha256(json.dumps(
-        [prompt, aspect, api_key, ref_hashes], ensure_ascii=False).encode("utf-8")).hexdigest()
+    import hashlib
+    ref_hashes = [hashlib.sha256(data).hexdigest() for _field, _filename, data in references]
+    fingerprint = hashlib.sha256(
+        json.dumps([prompt, aspect, ref_hashes], ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    receipt = Path(output_dir) / f".{name}_snapgen_{fingerprint[:16]}.json"
-    previous = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
-    task_id = previous.get("task_id")
-    retryable_status = previous.get("retryable_status")
-    if previous and not task_id and retryable_status not in (502, 503):
+    receipt = Path(output_dir) / f".{name}_snapgen_lower_{fingerprint[:16]}.json"
+    try:
+        previous = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"{name}: ใบรับรองงาน SnapGen อ่านไม่ได้ — ตรวจ History ก่อนส่งใหม่") from exc
+    job_uuid = previous.get("uuid")
+    if previous and not job_uuid:
         if not callable(confirm_resubmit) or not confirm_resubmit(name):
-            raise RuntimeError(f"{name}: งาน SnapGen ก่อนหน้าหมดเวลารอโดยไม่ได้เลขงาน — อาจหักเครดิตแล้ว "
-                               "ตรวจ SnapGen History ก่อนทำใหม่; ยังไม่ส่ง API ซ้ำ")
+            raise RuntimeError(f"{name}: งาน SnapGen ก่อนหน้าไม่มี UUID — ตรวจ History ก่อนยืนยันส่งใหม่; ยังไม่ส่ง API ซ้ำ")
+        receipt.unlink(missing_ok=True)
+        previous = {}
 
-    def remember(task=None, retryable_status=None):
-        # Persist only the gateway task ID; never write prompts, reference bytes, or API keys.
-        record = {"task_id": task}
-        if retryable_status in (502, 503):
-            record["retryable_status"] = retryable_status
+    def remember(uuid=None):
+        # Keep only the service UUID; never write the prompt, reference bytes, or API key.
+        record = {"uuid": str(uuid)} if uuid else {"submitted": True}
         temporary = receipt.with_suffix(".tmp")
         temporary.write_text(json.dumps(record), encoding="utf-8")
         temporary.replace(receipt)
@@ -328,106 +305,132 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
     def read_json(response):
         return json.loads(response.read().decode("utf-8", "replace"))
 
-    last_reported = [None]
-    def report_credit(payload):
-        if not isinstance(payload, dict):
-            return
-        found_id = payload.get("id") or task_id
-        raw = payload.get("charged_microusd")
-        try:
-            used = float(raw) / 10000 if raw is not None else None
-        except (TypeError, ValueError):
-            used = None
-        if used is not None and (not math.isfinite(used) or used < 0):
-            used = None
-        record = {"task_id": str(found_id) if found_id else None, "used_credit": used}
-        if on_credit and (used is not None or payload.get("status") == "succeeded") and record != last_reported[0]:
-            last_reported[0] = record
-            on_credit(record)
+    def status_code(payload):
+        return str((payload or {}).get("status") or "").strip().lower()
 
     task = None
-    if not task_id:
-        body = {"model": "gpt-image-2.5-ext", "prompt": prompt, "resolution": "1K",
-                "size": aspect, "n": 1}
-        if data_urls:
-            body["image_urls"] = data_urls
-        encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        idempotency_key = f"tidmunz-{fingerprint}"
-        headers = {"Authorization": f"Bearer {api_key}", "User-Agent": SNAPGEN_USER_AGENT,
-                   "Accept": "application/json", "Content-Type": "application/json",
-                   "Prefer": "respond-async", "Idempotency-Key": idempotency_key}
-        remember()  # If POST times out, require confirmation before any retry.
-        for attempt in range(3):
-            request = urllib.request.Request(SNAPGEN_IMAGE_URL, data=encoded, method="POST", headers=headers)
-            try:
-                with urllib.request.urlopen(request, timeout=180) as response:
-                    task = read_json(response)
-                    task_id = (task.get("id") if isinstance(task, dict) else None) or response.headers.get("x-gateway-task-id")
-                    if task_id:
-                        remember(task_id)
-                break
-            except urllib.error.HTTPError as exc:
-                code = getattr(exc, "code", None)
-                if code in (502, 503) and attempt < 2:
-                    # SnapGen documents these as transient upstream failures. Reuse the
-                    # exact body and Idempotency-Key so a lost response cannot double-bill.
-                    exc.close()
-                    time.sleep(2 ** (attempt + 1))
-                    continue
-                detail = exc.read().decode("utf-8", "replace").strip()[:500]
-                if code in (502, 503):
-                    remember(retryable_status=code)
-                    if "<html" in detail.lower() or "cloudflare" in detail.lower():
-                        detail = f"Cloudflare/SnapGen gateway HTTP {code}; ลองใหม่ได้ภายหลัง"
-                elif code and 400 <= code < 500 and code != 408:
-                    receipt.unlink(missing_ok=True)
-                raise RuntimeError(f"SnapGen GPT Image 2.5 Ext HTTP {code or 'ขัดข้อง'}: {detail}") from exc
-            except (OSError, ValueError, http.client.HTTPException) as exc:
-                raise RuntimeError("SnapGen GPT Image 2.5 Ext: ส่งคำขอแล้วแต่ยังไม่ได้ task ID — ตรวจงานใน SnapGen "
-                                   "ก่อนยืนยันส่งใหม่; ระบบจะไม่ยิงซ้ำอัตโนมัติ") from exc
-        if not task_id and isinstance(task, dict) and task.get("status") not in ("succeeded", "failed"):
-            raise RuntimeError("SnapGen ไม่ได้ส่ง task ID กลับมา — ตรวจ SnapGen ก่อนทำใหม่")
+    if not job_uuid:
+        body, boundary = _multipart(
+            {"prompt": prompt, "aspect_ratio": aspect}, references
+        )
+        request = urllib.request.Request(
+            SNAPGEN_IMAGE_URL, data=body, method="POST",
+            headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
+                     "Accept": "application/json",
+                     "Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        remember()  # An ambiguous POST must never be repeated silently.
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                task = read_json(response)
+        except urllib.error.HTTPError as exc:
+            code = getattr(exc, "code", None)
+            detail = exc.read().decode("utf-8", "replace").strip()[:500]
+            if code and 400 <= code < 500 and code != 408:
+                receipt.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"SnapGen GPT Image 2.5 Lower HTTP {code or 'ขัดข้อง'}: {detail}"
+            ) from exc
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            raise RuntimeError(
+                "SnapGen GPT Image 2.5 Lower: ส่งคำขอแล้วแต่ยังไม่ได้ UUID — "
+                "ตรวจ SnapGen History ก่อนส่งซ้ำ"
+            ) from exc
+        if not isinstance(task, dict):
+            raise RuntimeError("SnapGen ตอบกลับไม่ใช่ JSON object — ตรวจ History ก่อนส่งซ้ำ")
+        job_uuid = task.get("uuid") or task.get("conversion_uuid")
+        if job_uuid:
+            remember(job_uuid)
 
-    if not isinstance(task, dict) or task.get("status") not in ("succeeded", "failed", "expired", "reconciliation_required"):
+    last_reported = [None]
+
+    def report_credit(payload):
+        if not on_credit or not isinstance(payload, dict):
+            return
+        record = image_billing(payload, job_uuid)
+        if (record.get("used_credit") is not None
+                or status_code(payload) in {"2", "completed", "complete", "successful", "succeeded"}):
+            if record != last_reported[0]:
+                last_reported[0] = record
+                on_credit(record)
+
+    result = _image_result(task)
+    if result:
+        report_credit(task)
+    else:
+        status = status_code(task)
+        if status in {"3", "failed", "error"}:
+            receipt.unlink(missing_ok=True)
+            raise RuntimeError(str(task.get("error_message") or task.get("status_desc") or
+                                   "SnapGen สร้างภาพไม่สำเร็จ"))
+        if not job_uuid:
+            raise RuntimeError(
+                "SnapGen รับคำขอแล้วแต่ไม่ได้ส่ง UUID กลับมา — ตรวจ SnapGen History ก่อนส่งซ้ำ"
+            )
+
         poll_errors = 0
-        for _ in range(180):
+        for _ in range(240):
             request = urllib.request.Request(
-                "https://api.snapgen.org/v1/tasks/" + urllib.parse.quote(str(task_id), safe=""),
-                headers={"Authorization": f"Bearer {api_key}", "User-Agent": SNAPGEN_USER_AGENT,
-                         "Accept": "application/json"})
+                SNAPGEN_HISTORY_URL + urllib.parse.quote(str(job_uuid), safe=""),
+                headers={"x-api-key": api_key, "User-Agent": SNAPGEN_USER_AGENT,
+                         "Accept": "application/json"}
+            )
             try:
                 with urllib.request.urlopen(request, timeout=60) as response:
                     task = read_json(response)
                 poll_errors = 0
+            except urllib.error.HTTPError as exc:
+                code = getattr(exc, "code", None)
+                detail = exc.read().decode("utf-8", "replace").strip()[:300]
+                if code in (401, 403, 404):
+                    raise RuntimeError(
+                        f"SnapGen History HTTP {code} สำหรับ UUID {job_uuid}: {detail}"
+                    ) from exc
+                poll_errors += 1
+                if poll_errors >= 3:
+                    raise RuntimeError(f"ดึง SnapGen History {job_uuid} ไม่สำเร็จ: HTTP {code}") from exc
+                time.sleep(5)
+                continue
             except (OSError, ValueError, http.client.HTTPException) as exc:
                 poll_errors += 1
                 if poll_errors >= 3:
-                    raise RuntimeError(f"ดึง SnapGen task {task_id} ไม่สำเร็จ — กดทำต่อเพื่ออ่านงานเดิม; ไม่ยิงใหม่") from exc
-                time.sleep(10)
+                    raise RuntimeError(
+                        f"ดึง SnapGen History {job_uuid} ไม่สำเร็จ — กดทำต่อเพื่ออ่านงานเดิม; ไม่ยิงใหม่"
+                    ) from exc
+                time.sleep(5)
                 continue
+            if not isinstance(task, dict):
+                poll_errors += 1
+                if poll_errors >= 3:
+                    raise RuntimeError(f"SnapGen History {job_uuid} ตอบกลับไม่ใช่ JSON object")
+                time.sleep(5)
+                continue
+
             report_credit(task)
-            status = str(task.get("status") or "").lower() if isinstance(task, dict) else ""
-            if status in {"succeeded", "failed", "expired", "reconciliation_required"}:
+            status = status_code(task)
+            if status in {"2", "completed", "complete", "successful", "succeeded"}:
+                result = _image_result(task)
                 break
-            time.sleep(10)
+            if status in {"3", "failed", "error"}:
+                receipt.unlink(missing_ok=True)
+                raise RuntimeError(str(task.get("error_message") or task.get("status_desc") or
+                                       "SnapGen สร้างภาพไม่สำเร็จ"))
+            time.sleep(5)
 
-    status = str((task or {}).get("status") or "").lower()
-    if status != "succeeded":
-        error = (task or {}).get("error") or {}
-        detail = error.get("message") or error.get("code") if isinstance(error, dict) else error
-        if status in {"failed", "expired"}:
-            receipt.unlink(missing_ok=True)
-        raise RuntimeError(f"SnapGen GPT Image 2.5 Ext {status or 'ยังทำไม่เสร็จ'}: "
-                           f"{str(detail or 'ตรวจ SnapGen task ก่อนลองใหม่')[:500]} · {task_id or 'ไม่มี task ID'}")
+        if not result:
+            status = status_code(task)
+            if status not in {"2", "completed", "complete", "successful", "succeeded"}:
+                raise RuntimeError(
+                    f"SnapGen ยังประมวลผลไม่เสร็จ (UUID: {job_uuid}) — กดทำต่อเพื่ออ่าน History เดิม"
+                )
+            raise RuntimeError(
+                f"SnapGen History {job_uuid} สำเร็จแต่ยังไม่มีไฟล์ภาพ — ตรวจ History ก่อนทำต่อ"
+            )
 
-    report_credit(task)
-    image = _image_result(task.get("result")) or _image_result(task.get("data"))
-    if not image:
-        raise RuntimeError(f"SnapGen task {task_id} สำเร็จแต่ไม่มีลิงก์รูป — เก็บ task ไว้แล้ว")
     target = Path(output_dir) / f"{name}_snapgen.png"
-    result = _save_image_result(image, target, api_key)
+    result_path = _save_image_result(result, target, api_key)
     receipt.unlink(missing_ok=True)
-    return result
+    return result_path
 
 def _comfy_json(path: str, payload=None, base: str | None = None):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -4138,7 +4141,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 return None
 
         before = balance()
-        log(f"{name}: SnapGen API · GPT Image 2.5 Ext · 1K · แนบไฟล์ {len(refs)} รูป"
+        log(f"{name}: SnapGen API · GPT Image 2.5 Lower · แนบไฟล์ {len(refs)} รูป"
             + (f" · เครดิตก่อน {before:g}" if before is not None else ""))
         def on_credit(record):
             with state["lock"]:
@@ -4183,7 +4186,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         except Exception as exc:
             # A timed-out request may already be processing; do not auto-submit another paid job.
             detail = str(exc)
-            retry_hint = (" — กดทำต่อเพื่อลองซ้ำด้วย Idempotency-Key เดิม"
+            retry_hint = (" — ตรวจ History ก่อนยืนยันส่งซ้ำ"
                           if "HTTP 502" in detail or "HTTP 503" in detail else " — ตรวจ History ก่อนลองใหม่")
             raise ImageProviderError(f"SnapGen API: {detail}{retry_hint}") from exc
         if api_context is not None:
@@ -5362,7 +5365,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project = state["project"]
         api_context = {"api_key": _snapgen_api_key_value(g, runtime)}
         if not api_context["api_key"]:
-            raise ImageProviderError("ใส่ SnapGen.org Image API key ใน ตั้งค่า > SnapGen API ก่อน")
+            raise ImageProviderError("ใส่ SnapGen API key ใน ตั้งค่า > SnapGen API ก่อน")
         required = (set() if video_mode else
                     {c["name"] for c, _ in characters_needing_refs(project.get("context") or {}, scenes)})
         jobs = []
@@ -6878,6 +6881,27 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         event.wait()
         return bool(answer.get("yes"))
 
+    def snapgen_image_price_note(count=None):
+        """Show the live account price-list value; never hardcode image credits."""
+        data = prices.get("data") or {}
+        if not data and snapgen_prices is not None:
+            try:
+                cache = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Tidmunz Studio" / "snapgen_data" / "video_prices.json"
+                data = snapgen_prices.fetch(cache)
+                prices["data"] = data
+            except Exception:
+                data = {"rows": [], "stale": True}
+        unit_price = (snapgen_prices.image_cost(data.get("rows") or [], "gpt-image-2.5-lower")
+                      if snapgen_prices is not None else None)
+        if unit_price is None:
+            return "ดึงราคา GPT Image 2.5 Lower จากเว็บ SnapGen ไม่ได้"
+        note = f"{unit_price:g} เครดิต/รูป"
+        if count is not None:
+            note += f" · รวมประมาณ {unit_price * count:g} เครดิต"
+        if data.get("stale"):
+            note += " (ราคาเก่าจาก cache)"
+        return note
+
     def confirm_credits(character_limit=None) -> bool:
         """Shown after planning (text only, no image credits), with exact numbers."""
         project = state["project"]
@@ -6897,6 +6921,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             scene_provider = VIDEO_AUTO_SCENE_PROVIDER_LABELS.get(
                 (project.get("image_stage_providers") or {}).get("images"),
                 "เลือก GPT Chrome / SnapGen API ก่อนเริ่มสร้างรูปฉาก")
+            image_stage_provider = (project.get("image_stage_providers") or {}).get("images")
+            image_cost_line = (f"\nค่า API รูปฉาก: {snapgen_image_price_note(missing)}"
+                               if image_stage_provider == "snapgen" and missing else "")
             return ask_on_ui(
                 "ออโต้ — ยืนยันใช้เครดิต",
                 f"วางแผนเสร็จแล้ว\n\nไฟล์แนบที่จะใช้ ({len(matched)}): {', '.join(matched[:15]) or '-'}\n"
@@ -6904,6 +6931,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 + f"รูปฉาก {missing} รูป + คลิปวิดีโอ {len(todo)} คลิป\n"
                 + (f"\nรูปฉาก: {scene_provider}; สตอรี่บอร์ดเลือก {VIDEO_AUTO_IMAGE_PROVIDER_LABELS.get(project.get('storyboard_provider'), GPT_WEB_LABEL)} "
                    "แนบแม่แบบตาราง 3x3 และใช้ชีตก่อนหน้าเป็นเรฟความต่อเนื่องตั้งแต่ชีตที่ 2\n" if missing + sheets else "")
+                + image_cost_line
                 + f"   {clip_summary(todo)}\n   (สโลว์×2 = ทำ AI Slow 2x หลังได้คลิป)\n\nเริ่มเลยไหม?")
         ensure_same_person()  # text only: a ghost of a known person is drawn from that person's face
         remake = set(forms_to_remake(existing))
@@ -6929,16 +6957,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         quota = ("\n⚠ เกิน 120 รูป จะใช้มากกว่า 1 วัน (หยุดรอเมื่อโควตาหมด แล้วกดทำต่อได้)" if total > 120
                  else "\nChatGPT สร้างรูปได้ประมาณ 120 รูปต่อวัน ถ้าโควตาหมดระหว่างทาง โปรแกรมจะหยุดรอ แล้วกดทำต่อได้")
         if project.get("image_provider") == "snapgen":
-            quota = (f"\nสร้างรูปผ่าน SnapGen API · GPT Image 2.5 Ext · 1K"
-                     f"\nราคาตามเอกสาร 2 เครดิต/รูป รวมประมาณ {total * 2} เครดิตก่อนส่วนลด"
-                     "\nโปรแกรมบันทึกยอดเครดิตก่อน–หลังแต่ละรูป")
+            quota = (f"\nสร้างรูปผ่าน {SNAPGEN_LABEL}"
+                     f"\nราคาปัจจุบัน {snapgen_image_price_note(total)}"
+                     "\nโปรแกรมบันทึกยอดเครดิตจริงจาก History หลังสร้างเสร็จ")
         elif project.get("image_provider") == "qwen":
             quota = ("\nสร้างรูปด้วย Qwen 2.1 ใน ComfyUI บนเครื่องนี้ ไม่ใช้เครดิต SnapGen"
                      "\nแนบเรฟตามฉากเหมือนเดิม ประมวลผลทีละรูปตามคิว GPU")
         elif project.get("image_provider") == "per_stage":
             quota = ("\nเลือกผู้สร้างรูปแยกตามหัวข้อ: รูปตัวละคร / สตอรี่ชีต / รูปฉาก"
                      "\nเลือกได้ GPT Chrome / SnapGen API / Qwen ในเครื่อง"
-                     "\nขั้นที่เลือก API: ราคาในเอกสาร 2 เครดิต/รูปก่อนส่วนลด และบันทึกเครดิตก่อน–หลัง")
+                     f"\nSnapGen API: {snapgen_image_price_note()}; โปรแกรมบันทึกเครดิตจริงจาก History")
         return ask_on_ui(
             "เล่าภาพ — ยืนยันใช้เครดิต",
             f"วางแผนเสร็จแล้ว จะสร้างรูปทั้งหมด {total} รูป\n\n"

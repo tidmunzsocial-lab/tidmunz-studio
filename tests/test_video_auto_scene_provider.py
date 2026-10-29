@@ -30,7 +30,7 @@ def load(scope, name, parent=None):
 def test_storyboard_provider_menu_offers_snapgen_api():
     assert N.VIDEO_AUTO_IMAGE_PROVIDER_LABELS == {
         "gpt_web": N.GPT_WEB_LABEL,
-        "snapgen": "SnapGen API · GPT Image 2.5 · 1K",
+        "snapgen": "SnapGen API · GPT Image 2.5 Lower",
     }
     assert N.VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS == N.VIDEO_AUTO_IMAGE_PROVIDER_LABELS
     assert N.normalize_video_auto_storyboard_provider("gpt_web") == "gpt_web"
@@ -122,14 +122,16 @@ def test_cancel_submits_nothing_and_narrate_keeps_its_provider(tmp_path):
 
 def batch_scope(tmp_path, count=12):
     paths = []
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), "blue").save(buffer, "PNG")
     for name in ("actor.png", "location.png", "panel.png"):
-        path = tmp_path / name; path.write_bytes(b"reference"); paths.append(str(path))
+        path = tmp_path / name; path.write_bytes(buffer.getvalue()); paths.append(str(path))
     scenes = [{"prompt": f"shot-{i}", "board": paths[2]} for i in range(count)]
     project = {"scenes": scenes, "aspect": "9:16"}
     state = {"project": project, "folder": str(tmp_path), "lock": threading.RLock()}
     noop = lambda *args, **kwargs: None
     scope = dict(vars(N), state=state, video_mode=True, runtime={},
-                 g={"snapgen_image_api_key_var": SimpleNamespace(get=lambda: "test-key")},
+                 g={"api_key_var": SimpleNamespace(get=lambda: "test-key")},
                  attachments_for=lambda scene, limit=None: paths[:2],
                  scene_prompt=lambda scene: scene["prompt"], check_stop=noop,
                  save_project=lambda: (tmp_path / "project.json").write_text(json.dumps(project)),
@@ -214,11 +216,10 @@ def test_api_reference_overflow_fails_before_any_submission(tmp_path):
         scope["stage_images"]()
 
 
-def test_video_auto_sends_snapgen_1k_request_with_panel_first(tmp_path, monkeypatch):
+def test_video_auto_sends_snapgen_lower_multipart_with_panel_first(tmp_path, monkeypatch):
     scope, paths = batch_scope(tmp_path, 1)
-    # Image requests use their own live key; the legacy video credential must not win.
-    scope["runtime"]["snapgen_image_api_key_var"] = SimpleNamespace(get=lambda: "stale-invalid-key")
-    scope["runtime"]["api_key_var"] = SimpleNamespace(get=lambda: "legacy-video-key")
+    # The shared SnapGen key comes from the current page; stale runtime state must not win.
+    scope["runtime"]["api_key_var"] = SimpleNamespace(get=lambda: "stale-invalid-key")
     scope["IMAGES_PER_CHAT"] = 12
     load(scope, "generate_via_snapgen")
     load(scope, "make_image")
@@ -230,33 +231,34 @@ def test_video_auto_sends_snapgen_1k_request_with_panel_first(tmp_path, monkeypa
     requests = []
     def reply(request, **kwargs):
         requests.append(request)
-        payload = ({"id": "job-1", "status": "queued"} if request.get_method() == "POST" else
-                   {"id": "job-1", "status": "succeeded", "charged_microusd": "8500",
-                    "result": {"urls": ["data:image/png;base64," +
-                                           base64.b64encode(generated).decode("ascii")]}})
+        payload = ({"uuid": "history-1", "status": 1, "estimated_credit": 1}
+                   if request.get_method() == "POST" else
+                   {"uuid": "history-1", "status": 2, "used_credit": 1,
+                    "generated_image": [{"image_url": "data:image/png;base64," +
+                                          base64.b64encode(generated).decode("ascii")}]})
         return io.BytesIO(json.dumps(payload).encode())
     monkeypatch.setattr(N.urllib.request, "urlopen", reply)
     scope["stage_images"]()
     assert [request.get_method() for request in requests] == ["POST", "GET"]
     request = requests[0]
     assert request.full_url == N.SNAPGEN_IMAGE_URL
-    assert request.get_header("Authorization") == "Bearer test-key"
-    assert request.get_header("Prefer") == "respond-async"
-    fields = json.loads(request.data)
-    assert fields["model"] == "gpt-image-2.5-ext" and fields["resolution"] == "1K"
-    assert fields["size"] == "9:16" and "shot-0" in fields["prompt"]
-    assert "STORYBOARD PANEL" in fields["prompt"]
-    assert [base64.b64decode(ref.split(",", 1)[1]) for ref in fields["image_urls"]] == [generated] * 3
+    assert (request.get_header("X-api-key") or request.get_header("x-api-key")) == "test-key"
+    assert request.get_header("Content-type").startswith("multipart/form-data; boundary=")
+    assert b'name="prompt"' in request.data and b"shot-0" in request.data
+    assert b"STORYBOARD PANEL" in request.data
+    assert b'name="aspect_ratio"' in request.data and b"9:16" in request.data
+    assert request.data.count(b'name="files"') == 3
+    assert b"reference_01.png" in request.data
+    assert b"reference_02.png" in request.data
+    assert b"reference_03.png" in request.data
+    assert requests[-1].full_url.endswith("/history-1")
     assert Path(scope["state"]["project"]["scenes"][0]["image"]).read_bytes() == generated
 
 
-def test_video_auto_requires_image_gateway_key_before_request(tmp_path):
-    scope, _paths = batch_scope(tmp_path, 1)
-    scope["g"]["snapgen_image_api_key_var"] = SimpleNamespace(get=lambda: "")
-    scope["runtime"]["api_key_var"] = SimpleNamespace(get=lambda: "valid-legacy-video-key")
-    scope["snapgen_image"] = lambda *args, **kwargs: pytest.fail("must stop before API request")
-    with pytest.raises(N.ImageProviderError, match="SnapGen.org Image API key"):
-        scope["stage_images"]()
+def test_image_api_key_prefers_current_page_value_to_stale_runtime():
+    current = {"api_key_var": SimpleNamespace(get=lambda: "page-key")}
+    stale = {"api_key_var": SimpleNamespace(get=lambda: "stale-key")}
+    assert N._snapgen_api_key_value(current, stale) == "page-key"
 
 
 def test_stop_drains_five_submitted_jobs_and_saves_all_results():

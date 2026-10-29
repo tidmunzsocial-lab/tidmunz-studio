@@ -65,6 +65,23 @@ def cost(rows: list, model: str, resolution: str | None, seconds: int) -> float 
     return best
 
 
+def image_cost(rows: list, model: str) -> float | None:
+    """Return one unambiguous per-image credit price from the live price list."""
+    prices = set()
+    for row in rows:
+        if row.get("model_name") != model or row.get("price_unit") != "image":
+            continue
+        if str(row.get("currency", "")).lower() not in {"credit", "credits"}:
+            continue
+        try:
+            price = float(row.get("effective_price"))
+        except (TypeError, ValueError):
+            continue
+        if price >= 0 and price < float("inf"):
+            prices.add(price)
+    return next(iter(prices)) if len(prices) == 1 else None
+
+
 def cheapest_grok_720p_10s(rows: list) -> tuple[str, float] | None:
     """Cheapest of Grok Lite and Grok Lower for the standard 720p, 10 s clip."""
     candidates = []
