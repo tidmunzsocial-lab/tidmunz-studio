@@ -2,6 +2,10 @@
 import ast
 import copy
 import hashlib
+import io
+import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -36,3 +40,40 @@ def test_same_story_normalization_and_explicit_new_history_are_allowed():
     ns["_check_prompt_ref_context_story"](" old story\r\n")
     ns["_prompt_ref_conversation"] = {}
     ns["_check_prompt_ref_context_story"]("new story")
+
+
+@pytest.mark.parametrize("pending,story_hash,required,retries", [
+    (True, "", False, 2), (False, "", False, 1),
+    (True, "completed", False, 1), (True, "", True, 1)])
+def test_only_explicit_incomplete_new_story_recovers_from_404(monkeypatch, pending, story_hash, required, retries):
+    ns = scope()
+    node = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_prompt_ref_chat")
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "prompt_ref", "exec"), ns)
+    ns["_prompt_ref_conversation"].update(new_story_requested=pending, story_hash=story_hash)
+    requests = []
+
+    def post(request, **kwargs):
+        requests.append(json.loads(request.data))
+        if len(requests) == 1:
+            body = b'{"error":{"code":"chatgpt_conversation_not_found","message":"conversation_not_found"}}'
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(body))
+        return io.BytesIO(json.dumps({"conversation_id": "fresh", "parent_message_id": "reply",
+                                     "choices": [{"message": {"content": "FILE_READY"}}]}).encode())
+
+    ns.update(json=json, _chatgpt_api_base=lambda: "http://localhost/v1",
+              _save_prompt_ref_conversation=lambda: None,
+              _reset_prompt_ref_conversation=lambda: ns["_prompt_ref_conversation"].clear(),
+              _extract_bridge_cursor=lambda data: (data["conversation_id"], data["parent_message_id"]),
+              Path=Path, __builtins__=__builtins__)
+    import os
+    ns["os"] = os
+    monkeypatch.setattr(urllib.request, "urlopen", post)
+    if retries == 2:
+        assert ns["_prompt_ref_chat"]([{"role": "user", "content": "story"}], require_history=required) == "FILE_READY"
+        assert "metadata" not in requests[1]
+        assert ns["_prompt_ref_conversation"]["conversation_id"] == "fresh"
+    else:
+        with pytest.raises(RuntimeError, match="conversation_not_found"):
+            ns["_prompt_ref_chat"]([{"role": "user", "content": "story"}], require_history=required)
+        assert ns["_prompt_ref_conversation"]["conversation_id"] == "original"
+    assert len(requests) == retries

@@ -8394,6 +8394,7 @@ def _mark_prompt_ref_context_ready(parent_message_id=None):
     if not _prompt_ref_cursor_ready():
         raise RuntimeError("ยังไม่มีประวัติ GPT สำหรับบันทึก Context")
     _prompt_ref_conversation.update({
+        "new_story_requested": False,
         "context_ready": True,
         "context_conversation_id": str(_prompt_ref_conversation.get("conversation_id") or ""),
         "context_parent_message_id": str(parent_message_id or _prompt_ref_conversation.get("parent_message_id") or ""),
@@ -8531,6 +8532,20 @@ def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, mod
                 # Bridge returned structured JSON, so its process is alive.
                 # Rebuilding cannot fix account/model/storage provider errors.
                 if bridge_error_body:
+                    # The user explicitly started a new story, but an incomplete
+                    # first upload may have left an inaccessible cursor behind.
+                    # Retry only its initial turn, never an established history.
+                    missing_chat = ("chatgpt_conversation_not_found" in bridge_error_body
+                                    or "conversation_not_found" in bridge_error_body)
+                    if (_repair_retry and not require_history and exc.code == 404
+                            and missing_chat and _prompt_ref_conversation.get("new_story_requested")
+                            and not _prompt_ref_conversation.get("story_hash")
+                            and requested_conversation_id):
+                        _reset_prompt_ref_conversation()
+                        _prompt_ref_conversation["new_story_requested"] = True
+                        _save_prompt_ref_conversation()
+                        return _prompt_ref_chat(messages, require_history=False,
+                                                _repair_retry=False, model=model)
                     raise RuntimeError(f"Prompt-Ref Bridge/GPT ทำงานไม่สำเร็จ: {transport_error}") from exc
             recoverable = not isinstance(exc, urllib.error.HTTPError) or exc.code >= 500
             if not (_repair_retry and recoverable and _repair_prompt_ref_bridge_once()):
