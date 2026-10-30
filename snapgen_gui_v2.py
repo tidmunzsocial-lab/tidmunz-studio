@@ -2409,6 +2409,8 @@ try:
             "karaoke": EXPORT_KARAOKE,
             "audio": EXPORT_AUDIO,
         }
+        if mode == "ref" and callable(g.get("ref_folder")):
+            return g["ref_folder"]()
         if mode == "audio":
             # Audio output intentionally lives beside the selected source file.
             # The one shared top-right Open Folder button must follow that page's

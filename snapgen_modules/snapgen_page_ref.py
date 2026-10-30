@@ -111,6 +111,14 @@ def _ref_auto_history_payload(auto, entity_kind):
     return {"_use_ref_story_history": True}
 
 
+def ref_story_folder(export_root, title):
+    """A Windows-safe story directory; unnamed manual work keeps the legacy root."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", " ".join(str(title or "").split()))[:60].strip(" .")
+    if name.split(".", 1)[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        name = "_" + name
+    return Path(export_root) / name if name else Path(export_root)
+
+
 def install(g: dict, root: tk.Misc) -> tk.Misc:
     """Build this page and return its root frame."""
     globals().update(g)
@@ -129,6 +137,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
 
     lock_g = {"_selection_locks": {}, "_selection_lock_vars": []}
     export_ref_dir = g.get("EXPORT_REF", BASE / "ref")
+
+    def _ref_output_folder():
+        return ref_story_folder(g.get("EXPORT_REF", export_ref_dir), _ref_done_story())
+
+    g["ref_folder"] = _ref_output_folder
     ref_page = tk.Frame(root, bg="#FAFAF7")
     g["ref_page"] = ref_page
     ref_name_var = tk.StringVar(value="")
@@ -902,10 +915,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         event.wait()
         return bool(answer and answer[0])
 
-    def _ref_image_request(options, prompt, name, refs, web_payload, raw_prompt=None):
+    def _ref_image_request(options, prompt, name, refs, web_payload, raw_prompt=None, output_dir=None):
+        output_dir = Path(output_dir) if output_dir is not None else _ref_output_folder()
+        output_dir.mkdir(parents=True, exist_ok=True)
         if options["provider"] == "gpt_web":
             return g["_do_image_request"](web_payload, is_edit=bool(refs), prompt=prompt,
-                name_hint=name, raw_prompt=raw_prompt or prompt, output_dir=str(export_ref_dir))
+                name_hint=name, raw_prompt=raw_prompt or prompt, output_dir=str(output_dir))
         import hashlib
         import uuid
         from snapgen_page_narrate import snapgen_image
@@ -940,7 +955,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         result = snapgen_image(prompt, refs, str(scratch), "ref", "1:1", options["api_key"],
                                on_credit=on_credit, confirm_resubmit=confirm_resubmit)
         safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name))[:60].strip(" .") or "ref"
-        target = Path(export_ref_dir) / f"ref_{safe}_{uuid.uuid4().hex[:12]}.png"
+        target = output_dir / f"ref_{safe}_{uuid.uuid4().hex[:12]}.png"
         shutil.copy2(result, target)
         return str(target)
 
@@ -1035,7 +1050,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     for _w in (gallery, gallery_canvas, gallery_inner, gallery_scroll):
         _rg_bind_wheel(_w)
 
-    def _ref_plain_file(path, stem):
+    def _ref_plain_file(path, stem, output_dir=None):
         """Keep a finished Ref picture under its plain name (<name>.png), whichever way it was made.
 
         Both routes (SnapGen API and GPT Web) hand back a unique file (ref_<name>_<id>.png, name_<time>.png ...).
@@ -1047,12 +1062,14 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", " ".join(str(stem or "").split()))[:80].strip(" .")
         if not safe:
             return str(path)
-        target = Path(export_ref_dir) / (safe + (source.suffix.lower() or ".png"))
+        folder = Path(output_dir) if output_dir is not None else _ref_output_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / (safe + (source.suffix.lower() or ".png"))
         try:
             if source.resolve() == target.resolve():
                 return str(source)
             if target.exists():
-                old_dir = Path(export_ref_dir) / "_เก่า"
+                old_dir = folder / "_เก่า"
                 old_dir.mkdir(exist_ok=True)
                 old = old_dir / f"{safe}_{time.strftime('%Y%m%d-%H%M%S')}{target.suffix}"
                 counter = 1
@@ -1202,9 +1219,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         "aspect_ratio": "1:1", "history_and_training_disabled": False,
                         "images": [encoder(p)], "_use_ref_story_history": True,
                     }
-                    out = _ref_image_request(options, prompt, f"{Path(p).stem}_แก้ไข", [p], payload, comment)
+                    out = _ref_image_request(options, prompt, f"{Path(p).stem}_แก้ไข", [p], payload, comment,
+                                             output_dir=Path(p).parent)
                     out = _normalize_ref_output(out, _ref_plain_stem(Path(p).stem))
-                    out = _ref_plain_file(out, _ref_plain_stem(Path(p).stem))
+                    out = _ref_plain_file(out, _ref_plain_stem(Path(p).stem), output_dir=Path(p).parent)
                     root.after(0, lambda out=out: (
                         _ref_gallery_add(str(out), True, is_ghost=is_ghost),
                         _ref_log(f"[แก้ Ref] ✓ {out}"), _notify_done(),
@@ -2079,17 +2097,18 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     def _ref_done_story():
         get_title = g.get("get_ref_story_title")
         try:
-            return str(get_title() if callable(get_title) else "")
+            return str((get_title() if callable(get_title) else "") or _prompt_ref_story_title())
         except Exception:
             return ""
 
     def _ref_done_load():
-        try:
-            data = json.loads(ref_done_path.read_text(encoding="utf-8"))
-            if data.get("story") == _ref_done_story() and isinstance(data.get("items"), dict):
-                return data["items"]
-        except (OSError, ValueError, AttributeError):
-            pass
+        for path in (_ref_output_folder() / "_ref_done.json", ref_done_path):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if data.get("story") == _ref_done_story() and isinstance(data.get("items"), dict):
+                    return data["items"]
+            except (OSError, ValueError, AttributeError):
+                pass
         return {}
 
     def _ref_already_done(kind, name):
@@ -2100,9 +2119,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         items = _ref_done_load()
         items[f"{kind}:{name}"] = str(path)
         try:
-            ref_done_path.parent.mkdir(parents=True, exist_ok=True)
-            ref_done_path.write_text(json.dumps({"story": _ref_done_story(), "items": items},
-                                                ensure_ascii=False, indent=1), encoding="utf-8")
+            for path in (_ref_output_folder() / "_ref_done.json", ref_done_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"story": _ref_done_story(), "items": items},
+                                           ensure_ascii=False, indent=1), encoding="utf-8")
         except OSError:
             pass
 
@@ -2166,6 +2186,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             if not ok_bridge:
                 return
         selected_story_type = _current_ref_story_type_id()
+        output_folder = _ref_output_folder()
+        output_folder.mkdir(parents=True, exist_ok=True)
+        _ref_log(f"[ref] โฟลเดอร์เรื่อง: {output_folder}")
         # Auto buttons are Context-driven by definition.  A single manual Ref
         # follows the new checkbox and never reads Tk variables in the worker.
         context_enabled = bool(auto or ref_use_context_var.get())
@@ -2263,9 +2286,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         _ref_log(f"[ref] แนบรูปอ้างอิง: {os.path.basename(ref_image)}")
                     file_hint = _outfit_name_hint(name, entity_kind or context_kind)
                     out = _ref_image_request(options, prompt, file_hint,
-                        [ref_image] if ref_image else [], payload)
+                        [ref_image] if ref_image else [], payload, output_dir=output_folder)
                     out = _normalize_ref_output(out, name)
-                    out = _ref_plain_file(out, file_hint)
+                    out = _ref_plain_file(out, file_hint, output_dir=output_folder)
                     if auto and entity_kind in ("character", "location"):
                         _ref_mark_done(entity_kind, name, out)
                     root.after(0, lambda out=out, ghost=bool(ghost_design): (
