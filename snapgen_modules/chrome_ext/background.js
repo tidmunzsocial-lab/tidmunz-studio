@@ -225,7 +225,8 @@ async function freshTab(tabId, url) {
 
 async function openPage(tabId, url, retryWithFreshTab = true) {
   try {
-    await chrome.tabs.update(tabId, {url});
+    const current = await chrome.tabs.get(tabId);
+    if (current.url !== url || current.pendingUrl) await chrome.tabs.update(tabId, {url});
   } catch (e) {
     if (!/navigation rejected|no tab with id|cannot access/i.test(String(e && e.message || e))) throw e;
     tabId = await freshTab(tabId, url);
@@ -237,15 +238,18 @@ async function openPage(tabId, url, retryWithFreshTab = true) {
     await sleep(1000);
     let ready = null;
     try {
-      ready = await inPage(tabId, () => {
+      ready = await inPage(tabId, targetUrl => {
         const body = document.body ? document.body.innerText.slice(0, 300) : "";
         const page = (document.title + " | " + body).replace(/\s+/g, " ").slice(0, 160);
         if (/^\/auth\/(?:login|logout)(?:\/|$)/i.test(location.pathname)) return {state: "logged_out", page};
         if (/just a moment|verify you are human|ยืนยันว่าคุณเป็นมนุษย์|checking your browser/i.test(page)) return {state: "challenge", page};
+        const target = new URL(targetUrl);
+        if (location.origin !== target.origin || location.pathname !== target.pathname)
+          return {state: "navigating", page};
         if (document.querySelector('form div.ProseMirror[role="textbox"]') ||
             document.querySelector('form #prompt-textarea[contenteditable="true"]')) return {state: "ok", page};
         return {state: "", page};
-      });
+      }, [url]);
     } catch (e) {}  // still navigating
     if (ready && ready.state === "ok") return tabId;
     if (ready && ready.page) seen = ready.page;
