@@ -350,9 +350,18 @@ async function pageSend(job) {
   let before = [];  // messages already in the chat: everything else is this job's answer
   const oldPointers = [];  // pictures already in the chat (earlier pictures, references): never the answer
   if (job.conversation_id) {
-    const check = await fetch(`/backend-api/conversation/${job.conversation_id}`,
-      {headers: {Authorization: "Bearer " + session.accessToken}});
-    if (check.status === 404 || check.status === 403) return {error: "ChatGPT conversation failed: 404 — not found for this account", not_found: true};
+    // A just-created chat may not yet be readable after navigation. Retry GET
+    // only, never send the prompt twice or silently start another chat.
+    let check;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      check = await fetch(`/backend-api/conversation/${job.conversation_id}`,
+        {cache: "no-store", headers: {Authorization: "Bearer " + session.accessToken}});
+      if (check.status !== 404 || attempt === 2) break;
+      await sleep(1500);
+    }
+    if (check.status === 404) return {error: "ChatGPT conversation failed: 404 — not found for this account", not_found: true};
+    if (!check.ok) return {error: `ChatGPT conversation read failed: HTTP ${check.status} — message not sent`,
+                          provider_status: check.status};
     const data = await check.json();
     before = Object.keys(data.mapping || {});
     for (const node of Object.values(data.mapping || {}))
@@ -429,7 +438,13 @@ async function pagePoll(kind, state) {
 
   const token = (await (await fetch("/api/auth/session")).json()).accessToken;
   const auth = {headers: {Authorization: "Bearer " + token}};
-  const data = await (await fetch(`/backend-api/conversation/${cid}`, auth)).json();
+  const response = await fetch(`/backend-api/conversation/${cid}`, {...auth, cache: "no-store"});
+  if (!response.ok) {
+    if (response.status === 404 && elapsed < 30) return {done: false, cid, idle};
+    return {error: `ChatGPT conversation read failed: HTTP ${response.status} — reply not recovered`,
+            provider_status: response.status};
+  }
+  const data = await response.json();
   const nodes = Object.entries(data.mapping || {}).filter(([id, n]) => n.message && !state.before.includes(id))
     .map(([, n]) => n.message).sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
   const skip = new Set(state.oldPointers || []);

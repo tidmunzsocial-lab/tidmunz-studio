@@ -143,6 +143,10 @@ def image_job(body: dict) -> dict:
 
 def error_reply(result: dict) -> tuple[int, dict]:
     error = str(result.get("error") or "ChatGPT (Chrome) error")
+    if result.get("provider_status") in (401, 403):
+        status = int(result["provider_status"])
+        return status, {"error": {"code": "chatgpt_conversation_access_denied",
+                                 "provider_status": status, "message": error}}
     if result.get("not_found") or "conversation failed: 404" in error:
         return 404, {"error": {"code": "chatgpt_conversation_not_found",
                                "message": "conversation_not_found — " + error}}
