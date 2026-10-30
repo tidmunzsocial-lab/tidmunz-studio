@@ -87,7 +87,8 @@ def test_stop_resume_and_restart_ask_once_per_run_and_keep_storyboard(tmp_path):
         raise N.Stopped()
     scope.update(project=scope["state"]["project"], only=None, character_limit=None,
                  stages=[("images", "รูปฉาก", 1)], STAGE_FUNCS={"images": images},
-                 confirm_credits=lambda **kw: True, refresh_stages=lambda *a: None,
+                 confirm_credits=lambda **kw: True, review_var=SimpleNamespace(get=lambda: False),
+                 refresh_stages=lambda *a: None,
                  refresh_all=lambda: None, ui=lambda fn, *a: fn(*a), g={},
                  stage_var=Widget(), detail_var=Widget(), bar=Widget(), start_btn=Widget())
     worker = load(scope, "worker", "start_pipeline")

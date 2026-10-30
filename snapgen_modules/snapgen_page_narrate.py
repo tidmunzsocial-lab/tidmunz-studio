@@ -7164,7 +7164,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         state["active_image_stage"] = key
                         image_provider_for(key)
                     if key in ("characters", "storyboard", "images") and not confirmed:
-                        if not confirm_credits(character_limit=character_limit):
+                        # Full Auto runs without review must not wait for another Continue.
+                        needs_confirmation = not video_mode or bool(only) or review_var.get()
+                        if needs_confirmation and not confirm_credits(character_limit=character_limit):
                             log("⏸ ยังไม่สร้างรูป — แผนฉากยังอยู่ แก้แล้วกดเริ่มเพื่อทำต่อได้")
                             ui(stage_var.set, "รอยืนยันก่อนสร้างรูป")
                             return
