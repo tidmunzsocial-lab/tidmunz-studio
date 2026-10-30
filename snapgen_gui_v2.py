@@ -693,7 +693,7 @@ def _snapgen_friendly_bridge_error(msg):
             "1. ใช้บัญชี ChatGPT เดิมใน Chrome ของโปรแกรม\n"
             "2. ถ้าแชตเดิมยังอยู่ ให้ตรวจว่าหน้าต่าง Chrome เปิดอยู่และส่วนขยายเชื่อมต่อแล้ว\n"
             "3. ถ้าแชตถูกลบหรือมาจากคนละบัญชี ให้กด เริ่มเรื่องใหม่ ใน Prompt-Ref เอง แล้วส่งบทอีกครั้ง\n\n"
-            "ระบบยังคงกฎประวัติเดียว: หน้า Texture จะไม่เปิดประวัติใหม่เอง\n\n"
+            "ระบบยังคงกฎประวัติเดียว: โปรแกรมจะไม่เปิดประวัติใหม่เอง\n\n"
             "รายละเอียดเดิม:\n" + raw
         )
     if _snapgen_bridge_needs_login(raw):
@@ -8614,11 +8614,24 @@ def _ingest_prompt_ref_story(full_story, source_file="auto"):
     return reply
 
 
+def _check_prompt_ref_context_story(story):
+    """Never append a newly selected story to another story's existing chat."""
+    bound_hash = str(_prompt_ref_conversation.get("story_hash") or "")
+    if (_prompt_ref_cursor_ready() and bound_hash and story
+            and bound_hash != _prompt_ref_story_hash(story)):
+        raise RuntimeError(
+            "บทหลักที่เลือกไม่ตรงกับบทในประวัติ Prompt-Ref เดิม — ยังไม่ได้ส่งบทหรือแก้ Context\n"
+            "ถ้าจะทำเรื่องใหม่ ให้กด เริ่มเรื่องใหม่ ใน Prompt-Ref แล้วส่งบทใหม่\n"
+            "ถ้าจะทำเรื่องเดิม ให้เลือกไฟล์บทเดิมและใช้บัญชี ChatGPT เจ้าของประวัติ"
+        )
+
+
 def _ingest_and_build_prompt_ref_context(full_story, source_file="auto"):
     """Send a story in small turns, then build Context in the same history."""
     story = str(full_story or "").strip()
     if not story:
         raise RuntimeError("ยังไม่มีบททั้งเรื่อง")
+    _check_prompt_ref_context_story(story)
     upload_path = _prompt_ref_source_upload_path() if source_file == "auto" else (Path(source_file) if source_file else None)
     source_kind = "DOCX" if upload_path and upload_path.is_file() and upload_path.suffix.lower() == ".docx" else "TEXT"
     # Team PCs proved that one large story+schema request can make their local
@@ -8664,6 +8677,7 @@ def _ingest_and_build_prompt_ref_context(full_story, source_file="auto"):
 
 def _attach_docx_and_build_prompt_ref_context(source_file, story_for_hash=""):
     """Attach the real DOCX once, then request Context in that same history (sent to ChatGPT as its text)."""
+    _check_prompt_ref_context_story(story_for_hash)
     source = Path(source_file).resolve()
     if not source.is_file():
         raise RuntimeError(f"ไม่พบไฟล์บทหลัก: {source}")
@@ -11978,7 +11992,7 @@ def _open_prompt_bank_ai():
                         try:
                             if not cw.winfo_exists():
                                 return
-                            set_context_state("error", "อัปเดต Context ไม่สำเร็จ", "Bridge ตอบกลับผิดพลาด ลองใหม่เมื่อระบบพร้อม")
+                            set_context_state("error", "อัปเดต Context ไม่สำเร็จ", friendly_gpt_error(msg)[:600])
                             sum_btn.config(state="normal")
                             g["show_error"]("Bridge สรุปบทหลัก failed", friendly_gpt_error(msg))
                         except tk.TclError:
