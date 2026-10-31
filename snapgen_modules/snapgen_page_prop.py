@@ -1375,7 +1375,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         try:
             # Import by the full module path so this page can never pick up a
             # stale hunyuan3d.pyc or another same-named module from sys.path.
-            from snapgen_modules.hunyuan3d import Hunyuan3DClient, Hunyuan3DError
+            from snapgen_modules.hunyuan3d import (
+                Hunyuan3DClient,
+                Hunyuan3DError,
+                resize_for_hunyuan_upload,
+            )
             # BASE from the recovered app already points at snapgen_data.
             # Resolve from this module instead so the path cannot become
             # snapgen_data/snapgen_data when the runtime environment changes.
@@ -1409,10 +1413,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     _prop_log(f"[Hunyuan] {line.split('|', 1)[1]}")
             if remove.wait() != 0 or not foreground.is_file():
                 raise RuntimeError("RMBG 2.0 ลบพื้นหลังไม่สำเร็จ")
-            _prop_log(f"[Hunyuan] ส่งรูปโปร่งใส: {foreground.name}")
+            upload_image = resize_for_hunyuan_upload(
+                str(foreground), str(out_dir / "background_removed_1024.png")
+            )
+            _prop_log(
+                f"[Hunyuan] ย่อรูปหลังตัดพื้นหลังเป็น 1024×1024: "
+                f"{upload_image.stat().st_size / 1024:.0f} KB"
+            )
             # hunyuan3d.py owns the complete local-file/URL flow so every
             # caller behaves the same and this page does not duplicate it.
-            task_id = client.image_to_3d(str(foreground))
+            task_id = client.image_to_3d(str(upload_image))
             _prop_log(f"[3D] task_id: {task_id} — รอประมวลผล...")
             result = client.wait_for_task(task_id, timeout=600)
             saved = client.download_result(result, out_dir=str(out_dir), formats=["fbx"])

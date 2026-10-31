@@ -48,6 +48,23 @@ class Hunyuan3DError(Exception):
     pass
 
 
+def resize_for_hunyuan_upload(image_path: str, output_path: str) -> Path:
+    """Fit an image into a centered, transparent 1024x1024 PNG for upload."""
+    from PIL import Image
+
+    with Image.open(image_path) as source:
+        image = source.convert("RGBA")
+    image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+    canvas.alpha_composite(
+        image,
+        dest=((1024 - image.width) // 2, (1024 - image.height) // 2),
+    )
+    output = Path(output_path)
+    canvas.save(output, format="PNG", optimize=True)
+    return output
+
+
 def _gen_timestamp() -> str:
     return str(int(time.time()))
 
@@ -197,7 +214,7 @@ class Hunyuan3DClient:
         if not resource_url:
             raise Hunyuan3DError(f"No resourceUrl in upload info: {json.dumps(info, ensure_ascii=False)[:500]}")
         try:
-            from qcloud_cos import CosConfig, CosS3Client
+            from qcloud_cos import CosConfig, CosS3Client, CosServiceError
         except Exception as e:
             raise Hunyuan3DError(f"qcloud_cos missing: {e}") from e
         config = CosConfig(
@@ -214,14 +231,39 @@ class Hunyuan3DClient:
         # terminate silently when called from SnapGen's background thread.
         # put_object follows the same upload flow used by the web page without
         # spawning workers.
-        with p.open("rb") as image_file:
-            cos.put_object(
-                Bucket=info["bucketName"],
-                Body=image_file,
-                Key=info["location"],
-                EnableMD5=False,
-                ContentType=content_type,
-            )
+        try:
+            with p.open("rb") as image_file:
+                cos.put_object(
+                    Bucket=info["bucketName"],
+                    Body=image_file,
+                    Key=info["location"],
+                    EnableMD5=False,
+                    ContentType=content_type,
+                )
+        except CosServiceError as e:
+            if (
+                e.get_error_code() != "UserNetworkTooSlow"
+                or p.suffix.lower() != ".png"
+                or p.stat().st_size <= 4 * 1024 * 1024
+            ):
+                raise
+            # Keep the full-resolution source; retry this rejected upload with
+            # a smaller PNG while preserving any transparency.
+            from io import BytesIO
+            from PIL import Image
+
+            with BytesIO() as reduced_image:
+                with Image.open(p) as image:
+                    image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                    image.save(reduced_image, format="PNG", optimize=True)
+                reduced_image.seek(0)
+                cos.put_object(
+                    Bucket=info["bucketName"],
+                    Body=reduced_image,
+                    Key=info["location"],
+                    EnableMD5=False,
+                    ContentType=content_type,
+                )
         return resource_url
 
     # ── image_to_3d ─────────────────────────────────────────────
