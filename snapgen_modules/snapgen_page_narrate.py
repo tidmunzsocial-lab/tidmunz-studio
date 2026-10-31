@@ -1492,7 +1492,7 @@ VIDEO_MODEL_LABELS = {
     VIDEO_GROK_LITE_MODEL: "Grok Lite · 720p / 1080p",
 }
 VIDEO_MUSE_MODEL = "muse-ai-video"
-VIDEO_MUSE_LABEL = "Muse AI · 10s · ฟรี"
+VIDEO_MUSE_LABEL = "Muse AI · 10s"
 VIDEO_MUSE_SECONDS = 10
 VIDEO_MODEL_LABELS[VIDEO_MUSE_MODEL] = VIDEO_MUSE_LABEL
 VIDEO_CHEAP_MODEL = "vela-ai-video"
@@ -1533,16 +1533,33 @@ def clip_limit(scene: dict) -> float:
     return 20.0 if scene.get("slow") else SHOT_LIMIT
 
 
-def assign_clips(scenes: list, duration: float, economy: bool = False, clip_choice: int = 0) -> None:
+def is_muse_scenery(scene: dict) -> bool:
+    """Use Muse only for an explicitly classified empty establishing view."""
+    return (scene.get("shot_type") == "scenery" and scene.get("has_people") is False
+            and not scene.get("characters") and not scene.get("dialogue")
+            and float(scene.get("shot_seconds") or 0) <= VIDEO_MUSE_SECONDS * CLIP_STRETCH)
+
+
+def muse_scenery_price_allowed(data, max_credits=1) -> bool:
+    if snapgen_prices is None or not data or data.get("stale"):
+        return False
+    price = snapgen_prices.cost(data.get("rows") or [], VIDEO_MUSE_MODEL, None, VIDEO_MUSE_SECONDS)
+    return price is not None and 0 <= price <= max_credits
+
+
+def assign_clips(scenes: list, duration: float, economy: bool = False, clip_choice: int = 0,
+                 video_model: str | None = None, scenery_muse: bool = False) -> None:
     """Store each shot's model, clip length and Slow 2x choice from its narration length.
 
     ``economy``: every shot without a spoken line buys a short clip and plays it Slow 2x
     (about half the video credit), not only the shots GPT marked slow.
     """
     for scene, length in zip(scenes, segment_durations([s["start"] for s in scenes], duration)):
+        scene["shot_seconds"] = length
+        if scene.get("clip") and os.path.isfile(scene["clip"]):
+            continue  # Completed paid assets retain their actual model/speed metadata.
         if scene.get("clip_fallback"):  # vela already failed here: stay on grok-lower
             scene["cheap"] = False
-        scene["shot_seconds"] = length
         spoken = bool(scene.get("dialogue"))  # dialogue: real speed, clip only trimmed, never slowed
         scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
             length, (economy or bool(scene.get("slow"))) and not spoken, bool(scene.get("cheap")) and not spoken,
@@ -1550,6 +1567,18 @@ def assign_clips(scenes: list, duration: float, economy: bool = False, clip_choi
         if clip_choice and not spoken:  # the user fixed the clip length: every narration shot is that long, normal speed
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_AUTO_MODEL, int(clip_choice), False
             scene["slow"] = False
+        if video_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
+            _, seconds, slow = pick_clip(length, (economy or bool(scene.get("slow"))) and not spoken,
+                                         False, 1.0 if spoken else CLIP_STRETCH)
+            if clip_choice and (not spoken or seconds < int(clip_choice)):
+                seconds, slow = int(clip_choice), False
+            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = video_model, seconds, slow
+        elif video_model == VIDEO_MUSE_MODEL:
+            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS, False
+        elif video_model in SEEDANCE_MODELS:
+            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = auto_clip_settings(video_model, scene)
+        if scenery_muse and is_muse_scenery(scene):
+            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS, False
 
 
 def clip_label(scene: dict) -> str:
@@ -2212,7 +2241,8 @@ def video_shots(segments: list, target: float = 8.0, limit: float = SHOT_LIMIT) 
 def plan_video(segments: list, duration: float, names: list, era: str, ask, horror: bool = False,
                progress=None, out: list | None = None, batch: int = 20, script: str = "",
                direction: dict | None = None, refs: list | None = None, aspect: str = "16:9",
-               economy: bool = False, clip_choice: int = 0) -> list:
+               economy: bool = False, clip_choice: int = 0,
+               video_model: str | None = None, scenery_muse: bool = True) -> list:
     """Video mode plan: program-cut shots, GPT writes each one, every shot gets a clip choice.
 
     ``ask(prompt) -> dict`` talks to GPT.  Shots GPT skipped are asked again
@@ -2231,6 +2261,10 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
         shots = video_shots(lines, ECONOMY_TARGET, ECONOMY_LIMIT) if economy else video_shots(lines)
     if economy:
         era = era + ECONOMY_NOTE
+    era += (f". โมเดลวิดีโอที่ผู้ใช้เลือก: {VIDEO_MODEL_LABELS.get(video_model or 'auto', SEEDANCE_MODELS.get(video_model, video_model))}"
+            f"; ความยาวที่เลือก: {clip_choice or 'อัตโนมัติ'} วินาที. "
+            + ("เฉพาะช็อตวิว/เมืองที่ไม่มีคน ไม่มีตัวละคร และไม่มีบทพูด ใช้ Muse AI 10 วินาที เล่นปกติ"
+               if scenery_muse else "ช็อตวิวใช้รุ่นที่เลือกเช่นกัน เพราะยังไม่มีราคา Muse ที่อยู่ในวงเงินยอมรับ"))
     scenes = out if out is not None else []
     # Director pass first: the whole story as film sequences, so shots are directed, not illustrated.
     # ``direction`` is filled in place (the page saves it); a filled one is reused.
@@ -2272,6 +2306,8 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
                 "motion": MOTIONS[len(scenes) % len(MOTIONS)],
                 "slow": str(item.get("slow")).lower() == "true",
                 "cheap": str(item.get("cheap")).lower() == "true",
+                "shot_type": str(item.get("shot_type") or ""),
+                "has_people": item.get("has_people") if isinstance(item.get("has_people"), bool) else None,
                 "shot_no": n,  # number in the director plan (its sequences use these)
             }
             if str(item.get("transition") or "").strip().lower() in TRANSITIONS:
@@ -2287,10 +2323,11 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
     if economy:
         for scene in scenes:
             scene["slow"] = not scene.get("dialogue")
-    split = split_long_scenes(scenes, duration, 0,
-                              limit_for=(lambda scene: float(clip_choice) * CLIP_STRETCH) if clip_choice else clip_limit)
+    split = split_long_scenes(scenes, duration, 0, limit_for=lambda scene:
+                              VIDEO_MUSE_SECONDS * CLIP_STRETCH if scenery_muse and is_muse_scenery(scene) else
+                              float(clip_choice) * CLIP_STRETCH if clip_choice else clip_limit(scene))
     scenes[:] = split
-    assign_clips(scenes, duration, economy, clip_choice)
+    assign_clips(scenes, duration, economy, clip_choice, video_model, scenery_muse=scenery_muse)
     return scenes
 
 
@@ -2592,7 +2629,9 @@ def video_plan_request(numbered: list, names: list, previous: str, era: str, hor
         + (f"แผนผู้กำกับของช่วงนี้: {direction}. " if direction else "")
         + (f"ช็อตก่อนหน้าคือ: {previous}. " if previous else "")
         + "ตอบ JSON เท่านั้น: {\"scenes\":[{\"shot\":1,\"characters\":[],\"location\":\"\",\"prompt\":\"\","
-        "\"video_prompt\":\"\",\"slow\":false,\"cheap\":false,\"transition\":\"dissolve\"}]} "
+        "\"video_prompt\":\"\",\"slow\":false,\"cheap\":false,\"shot_type\":\"character\",\"has_people\":true,\"transition\":\"dissolve\"}]} "
+        "shot_type=scenery เฉพาะวิว/เมือง/สถานที่ที่ไม่มีตัวละครหรือสิ่งมีชีวิตเป็นตัวละครในภาพ; นอกนั้นใช้ character หรือ action. "
+        "has_people=true ถ้ามีคนแม้เป็นชาวบ้าน ตัวประกอบ ฝูงชน เงาคน หรือเห็นจากระยะไกล; false เฉพาะไม่มีคนจริง. ห้ามลบคนเพื่อให้ใช้รุ่นฟรี. "
         "transition = การเปลี่ยนภาพเข้าสู่ช็อตนี้ให้ต่อกันเนียนแบบหนัง: dissolve = ภาพจางซ้อนนุ่มๆ (ฉากเดิมต่อเนื่อง); "
         "fadeblack = มืดลงแล้วค่อยสว่างเข้าช็อตนี้ (เปลี่ยนสถานที่ เช่น ใต้น้ำ→ป่า, เปลี่ยนเวลา เช่น กลางวัน→กลางคืน, ข้ามเวลา, ย้อนอดีต, เปิดซีเควนซ์ใหม่); "
         "cut = ตัดเร็ว (จังหวะกระแทกในฉากต่อสู้หรือเหตุการณ์ฉับพลันเท่านั้น). "
@@ -2671,7 +2710,9 @@ def motion_request(items: list, era: str, horror: bool = False) -> str:
         + REALISM_NOTE + ". ไม่มีตัวหนังสือ ไม่มีคนเล่าเรื่อง. "
         + (HORROR_NOTE if horror else "")
         + f"ยุค/บรรยากาศ: {era}. "
-        "ตอบ JSON เท่านั้น: {\"shots\":[{\"shot\":1,\"seen\":\"\",\"video_prompt\":\"\",\"anatomy\":\"\",\"negative\":\"\"}]} "
+        "ตอบ JSON เท่านั้น: {\"shots\":[{\"shot\":1,\"seen\":\"\",\"video_prompt\":\"\",\"anatomy\":\"\",\"negative\":\"\",\"shot_type\":\"character\",\"has_people\":true}]} "
+        "shot_type=scenery เฉพาะภาพวิว/เมืองว่างที่ไม่มีตัวละคร; นอกนั้น character หรือ action. "
+        "has_people ต้องตัดสินจากรูปจริง: true ถ้าเห็นคนรวมถึงตัวประกอบหรือเงาคน; false เฉพาะไม่มีคนจริง. "
         "seen = สิ่งที่เห็นในรูปจริงตามตาเห็น (ไม่ใช่ตามบท) 1–2 ประโยค: มีใครบ้าง อยู่ตรงไหน หันหน้า/หันข้าง/หันหลัง "
         "ทำอะไร ถืออะไร มุมกล้อง สถานที่ — ใช้ตรวจว่าคำสั่งตรงกับรูปก่อนส่งเจน.\n\n"
         + "\n\n".join(blocks)
@@ -3007,16 +3048,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return bool(video_mode and (state.get("project") or {}).get("economy", economy_var.get()))
 
     def apply_selected_video_model(project):
-        model = project.get("video_model")
-        if model == VIDEO_MUSE_MODEL:
-            for scene in project.get("scenes") or []:
-                if not (scene.get("clip") and os.path.isfile(scene["clip"])):
-                    scene["clip_model"], scene["clip_seconds"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS
-                    scene["clip_slow"] = False
-        if model in SEEDANCE_MODELS:
-            for scene in project.get("scenes") or []:
-                if not (scene.get("clip") and os.path.isfile(scene["clip"])):
-                    scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = auto_clip_settings(model, scene)
+        assign_clips(project.get("scenes") or [], float(project.get("duration") or 0),
+                     bool(project.get("economy", True)), int(project.get("clip_choice") or 0),
+                     project.get("video_model"), scenery_muse=muse_scenery_price_allowed(
+                         prices.get("data"), float(project.get("scenery_muse_max_credits", 1))))
     detail_var = tk.StringVar(value="")
     credit_warning_var = tk.StringVar(value="")
 
@@ -3103,9 +3138,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if selected in SEEDANCE_MODELS:
             model_info = video_model_var.get() + " · ฉาก 1 + Ref ไม่เกิน 3 รูป"
         elif selected == VIDEO_MUSE_MODEL:
-            model_info = video_model_var.get() + " · 10 วิ · 0 เครดิต (อิงราคาที่หน้า SnapGen แสดง)"
+            model_info = video_model_var.get() + " · 10 วิ · ดูราคาปัจจุบันด้านล่าง"
         elif selected in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
-            model_info = video_model_var.get() + " · ทุกฉาก · 6/10/15 วิ"
+            model_info = video_model_var.get() + " · ตามความยาวที่เลือก · วิวไม่มีคนใช้ Muse 10 วิเมื่อราคาไม่เกิน 1 เครดิต"
         else:
             model_info = "อัตโนมัติ: GPT เลือก Grok/Vela ตามช็อต"
         clip_info_var.set(f"ไฟล์แนบ: {Path(folder).name if folder else 'ยังไม่ได้เลือก (เลือกที่หน้ารูป AI)'} · "
@@ -3182,7 +3217,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         return
                 project["video_model"] = chosen
                 state["_video_model_manual"] = True
+                apply_selected_video_model(project)
                 save_project()
+                refresh_table()
             refresh_clip_info()
             try:
                 update_price_line()
@@ -3223,7 +3260,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if project is not None:
                 project["clip_choice"] = next((n for n, label in clip_labels["map"].items()
                                                if label == clip_choice_var.get()), 0)
+                apply_selected_video_model(project)
                 save_project()  # a plan made for another length is asked about when the run starts
+                refresh_table()
             update_price_line()
 
         def video_res_changed(_event=None):
@@ -3324,6 +3363,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         save_project()
                         refresh_clip_info()
                     update_price_line()
+                    if project is not None and not state.get("busy"):
+                        apply_selected_video_model(project)
+                        save_project()
+                        refresh_table()
 
                 ui(apply_current_prices)
             threading.Thread(target=work, daemon=True).start()
@@ -3640,6 +3683,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             apply_price_default = state.get("_video_price_default_on_open")
             if callable(apply_price_default):
                 apply_price_default(project)
+            apply_selected_video_model(project)
+            save_project()
         else:
             image_provider_var.set(IMAGE_PROVIDER_LABELS.get(
                 project.get("image_provider"), GPT_WEB_LABEL))
@@ -4983,7 +5028,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                        horror=project.get("style_mode") == "เรื่องผี", progress=progress, out=scenes_so_far,
                        script=story_script(), direction=project.setdefault("direction", {}),
                        refs=attachment_names(), aspect=desired_aspect(), economy=economy_on(),
-                       clip_choice=int(project.get("clip_choice") or 0))
+                       clip_choice=int(project.get("clip_choice") or 0), video_model=project.get("video_model") or VIDEO_AUTO_MODEL,
+                       scenery_muse=muse_scenery_price_allowed(prices.get("data"), float(project.get("scenery_muse_max_credits", 1))))
             project["planned_clip_choice"] = int(project.get("clip_choice") or 0)
             if project["direction"]:
                 (folder / "director_plan.json").write_text(
@@ -6128,10 +6174,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 scene["forbid"] = merge_forbid(scene.get("forbid"), item.get("negative"), item.get("forbid"))
                 # What GPT saw in the real first frame: the checker compares the request against it.
                 scene["seen"] = str(item.get("seen") or "").strip() if not state.get("motion_text_only") else ""
+                if not state.get("motion_text_only"):
+                    scene["has_people"] = item.get("has_people") if isinstance(item.get("has_people"), bool) else None
+                    if item.get("shot_type") in ("scenery", "character", "action"):
+                        scene["shot_type"] = item["shot_type"]
                 scene["motion_image"] = file_digest(scene["image"])
             missed = [i + 1 for i in batch if scenes[i].get("motion_image") != file_digest(scenes[i]["image"])]
             if missed:
                 log(f"พรอมต์วิดีโอ: GPT ไม่ได้ส่งช็อต {', '.join(map(str, missed))} — ใช้พรอมต์จากแผนเดิม")
+            apply_selected_video_model(project)
             save_project()
             ui(refresh_table)
         log(f"✓ พรอมต์วิดีโอจากรูปจริง + บท: {len(todo)} ช็อต")
@@ -6590,7 +6641,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         before = {str(f): f.stat().st_mtime for f in out_dir.glob("*.mp4")} if out_dir.is_dir() else {}
         started = time.time()
         errors = []
-        selected_model = (state["project"] or {}).get("video_model")
+        apply_selected_video_model(state["project"])
+        selected_model = scene.get("clip_model") or (state["project"] or {}).get("video_model")
         seedance_refs = []
         if selected_model in SEEDANCE_MODELS:
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = auto_clip_settings(selected_model, scene)
@@ -6604,24 +6656,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         elif selected_model == VIDEO_MUSE_MODEL:
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS, False
             log(f"ช็อต {index + 1}: {VIDEO_MUSE_LABEL} · 10 วินาที")
-        elif selected_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
-            dialogue = bool(scene.get("dialogue"))
-            _, seconds, slow = pick_clip(
-                float(scene.get("shot_seconds") or VIDEO_AUTO_AVG_SECONDS),
-                (economy_on() or bool(scene.get("slow"))) and not dialogue,
-                False,
-                1.0 if dialogue else CLIP_STRETCH,
-            )
-            fixed = int((state["project"] or {}).get("clip_choice") or 0)
-            if fixed and not dialogue:
-                seconds, slow = fixed, False
-            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = selected_model, seconds, slow
-        elif scene.get("clip_model") in SEEDANCE_MODELS:
-            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
-                float(scene.get("shot_seconds") or VIDEO_AUTO_AVG_SECONDS),
-                (economy_on() or bool(scene.get("slow"))) and not bool(scene.get("dialogue")),
-                bool(scene.get("cheap")) and not bool(scene.get("dialogue")),
-                1.0 if scene.get("dialogue") else CLIP_STRETCH)
         if not scene.get("seen") and not state.get("motion_text_only"):
             # Written before the request was tied to its own picture (shots used to share one GPT look):
             # look at this shot's real first frame once, so the checker can compare against it.

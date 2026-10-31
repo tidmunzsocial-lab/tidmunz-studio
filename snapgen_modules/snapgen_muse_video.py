@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 MODEL = "muse-ai-video"
-LABEL = "Muse AI · 10s · ฟรี"
+LABEL = "Muse AI · 10s"
 API_URL = "https://api.snapgen.ai/uapi/v1/video-gen/meta"
 SUPPORTED_DURATION = "10"
 
