@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Privacy-safe automatic error reports shared by every SnapGen workstation.
+"""Privacy-filtered local diagnostics for SnapGen.
 
-Reports use GitHub Issues, not commits.  Each PC keeps a local queue until the
-GitHub CLI is signed in, so application work never waits for the network.
+Errors stay on this workstation. No GitHub upload, login, or retry worker runs.
 """
 from __future__ import annotations
 
@@ -20,10 +19,8 @@ import sys
 import threading
 import time
 import traceback
-import urllib.request
 import uuid
 
-REPOSITORY = "apinanautan/tidmunz-studio"
 ERROR_WORDS = re.compile(
     r"(?:\bERROR\b|\bFAILED?\b|\bEXCEPTION\b|\bWARNING\b|\bWARN\b|\bFATAL\b|\bCRITICAL\b|TRACEBACK|ล้มเหลว|ไม่สำเร็จ|ผิดพลาด)",
     re.IGNORECASE,
@@ -34,12 +31,7 @@ _machine_file: Path | None = None
 _session_file: Path | None = None
 _fatal_file: Path | None = None
 _fatal_stream = None
-_worker_lock = threading.Lock()
 _queue_io_lock = threading.Lock()
-_worker_running = False
-_periodic_started = False
-_login_started = False
-_login_last_attempt = 0.0
 _recent: dict[str, float] = {}
 _specs_cache: dict | None = None
 _old_sys_hook = sys.excepthook
@@ -69,9 +61,9 @@ def _pid_alive(pid: int) -> bool:
 
 
 def configure(project_root) -> None:
-    """Point reporter at this portable copy and flush pending reports."""
+    """Keep crash recovery and diagnostics local to this portable copy."""
     global _root, _queue_file, _machine_file, _session_file, _fatal_file
-    global _fatal_stream, _specs_cache, _periodic_started
+    global _fatal_stream, _specs_cache
     if _fatal_stream is not None:
         try:
             _fatal_stream.flush()
@@ -87,19 +79,7 @@ def configure(project_root) -> None:
     _session_file = data / "active_session.json"
     _fatal_file = data / "fatal_python.log"
     _specs_cache = None
-    stale = data / "sending.jsonl"
-    if stale.is_file():
-        try:
-            with _queue_io_lock:
-                with _queue_file.open("a", encoding="utf-8") as out:
-                    out.write(stale.read_text(encoding="utf-8"))
-                stale.unlink(missing_ok=True)
-        except Exception:
-            pass
     threading.Thread(target=_machine_specs, name="SnapGenSpecs", daemon=True).start()
-    if not _periodic_started:
-        _periodic_started = True
-        threading.Thread(target=_periodic_loop, name="SnapGenErrorRetry", daemon=True).start()
     _recover_previous_session()
     bootstrap = data / "bootstrap_error.log"
     try:
@@ -116,7 +96,6 @@ def configure(project_root) -> None:
         _fatal_stream = None
     _write_active_session()
     atexit.register(mark_clean_shutdown)
-    _start_worker()
 
 
 def _recover_previous_session() -> None:
@@ -344,7 +323,6 @@ def _enqueue(kind: str, summary: str, detail: str) -> None:
                 stream.write(json.dumps(item, ensure_ascii=False) + "\n")
     except Exception:
         return
-    _start_worker()
 
 
 def report_exception(kind, exc_type, exc_value, exc_traceback) -> None:
@@ -454,164 +432,6 @@ def install_exception_hooks() -> None:
             if callable(_old_thread_hook):
                 _old_thread_hook(args)
         threading.excepthook = thread_hook
-
-
-def _issue_body(item: dict) -> str:
-    specs = item.get("specs") or {}
-    return "\n".join([
-        "Automatic privacy-filtered SnapGen error report.", "",
-        f"- Machine name: `{specs.get('machine_name', 'unknown')}`",
-        f"- Machine ID: `{specs.get('machine_id', 'unknown')}`",
-        f"- App: `{specs.get('app_version', 'unknown')}`",
-        f"- OS: `{specs.get('os', 'unknown')}`",
-        f"- Python: `{specs.get('python', 'unknown')}`",
-        f"- CPU: `{specs.get('cpu', 'unknown')}`",
-        f"- RAM: `{specs.get('ram_gb', 'unknown')} GB`",
-        f"- GPU: `{specs.get('gpu', 'unknown')}`",
-        f"- Time: `{item.get('occurred_at', '')}`",
-        f"- Area: `{item.get('kind', '')}`",
-        f"- Fingerprint: `{item.get('fingerprint', '')}`", "",
-        "```text", str(item.get("detail") or item.get("summary") or "")[:12000], "```",
-        "", "No prompt, media, account cookie, API key, or raw user path is intentionally included.",
-    ])
-
-
-def _gh_ready() -> bool:
-    gh = shutil.which("gh")
-    if not gh:
-        return False
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        return subprocess.run(
-            [gh, "auth", "status", "--hostname", "github.com"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=12, creationflags=flags,
-        ).returncode == 0
-    except Exception:
-        return False
-
-
-def _upload(item: dict) -> bool:
-    gh = shutil.which("gh")
-    if not gh:
-        return False
-    # Hardware collection runs away from the failing UI. Enrich queued reports
-    # immediately before upload so GitHub still receives complete PC specs.
-    item = dict(item)
-    item["specs"] = _machine_specs()
-    fp = str(item.get("fingerprint") or "")
-    machine_id = str(item["specs"].get("machine_id") or "PC-UNKNOWN")
-    machine_name = str(item["specs"].get("machine_name") or "unknown")
-    app_version = str(item["specs"].get("app_version") or "unknown").strip().lstrip("v") or "unknown"
-    title = f"[SnapGen Error][v{app_version}][{machine_name}][{machine_id}] {item.get('summary', 'Unknown error')[:58]} [{fp}]"
-    body = _issue_body(item)
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    common = dict(capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=40, creationflags=flags)
-    try:
-        found = subprocess.run(
-            [gh, "issue", "list", "--repo", REPOSITORY, "--state", "open",
-             "--search", f"{machine_id} {fp} in:title", "--limit", "1", "--json", "number", "--jq", ".[0].number"],
-            **common,
-        )
-        number = (found.stdout or "").strip() if found.returncode == 0 else ""
-        if number.isdigit():
-            result = subprocess.run([gh, "issue", "comment", number, "--repo", REPOSITORY, "--body", body], **common)
-        else:
-            result = subprocess.run([gh, "issue", "create", "--repo", REPOSITORY, "--title", title, "--body", body], **common)
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _flush() -> None:
-    global _worker_running
-    try:
-        if _queue_file is None or not _queue_file.is_file():
-            return
-        if not _gh_ready():
-            _launch_login_once()
-            return
-        batch = _queue_file.with_name("sending.jsonl")
-        with _queue_io_lock:
-            try:
-                if batch.is_file():
-                    with _queue_file.open("a", encoding="utf-8") as out:
-                        out.write(batch.read_text(encoding="utf-8"))
-                    batch.unlink(missing_ok=True)
-                os.replace(_queue_file, batch)
-            except Exception:
-                return
-        lines = batch.read_text(encoding="utf-8").splitlines()
-        pending = []
-        for line in lines:
-            try:
-                item = json.loads(line)
-            except Exception:
-                continue
-            if not _upload(item):
-                pending.append(item)
-        if pending:
-            with _queue_io_lock:
-                with _queue_file.open("a", encoding="utf-8") as out:
-                    out.write("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in pending))
-        batch.unlink(missing_ok=True)
-    finally:
-        with _worker_lock:
-            _worker_running = False
-
-
-def _start_worker() -> None:
-    global _worker_running
-    with _worker_lock:
-        if _worker_running:
-            return
-        _worker_running = True
-    threading.Thread(target=_flush, name="SnapGenErrorReporter", daemon=True).start()
-
-
-def _periodic_loop() -> None:
-    # Error lists change rarely. A 15-minute retry avoids constant GitHub/API
-    # traffic while still sending queued reports after login/network returns.
-    while True:
-        time.sleep(900)
-        _start_worker()
-
-
-def _launch_login_once() -> None:
-    """Open one browser authorization flow; users never handle logs or Git."""
-    global _login_started, _login_last_attempt
-    if _login_started or time.time() - _login_last_attempt < 900:
-        return
-    gh = shutil.which("gh")
-    if not gh:
-        return
-    _login_started = True
-    _login_last_attempt = time.time()
-    try:
-        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-        process = subprocess.Popen(
-            [gh, "auth", "login", "--hostname", "github.com",
-             "--git-protocol", "https", "--web", "--clipboard"],
-            creationflags=flags,
-        )
-    except Exception:
-        _login_started = False
-        return
-
-    def wait_for_login():
-        global _login_started
-        try:
-            process.wait(timeout=600)
-        except Exception:
-            try:
-                process.terminate()
-            except Exception:
-                pass
-        _login_started = False
-        if _gh_ready():
-            _start_worker()
-
-    threading.Thread(target=wait_for_login, name="SnapGenGitHubLogin", daemon=True).start()
 
 
 def pending_count() -> int:

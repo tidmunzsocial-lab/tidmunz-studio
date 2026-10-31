@@ -428,37 +428,6 @@ if errorlevel 1 (
 )
 echo   qcloud_cos OK
 
-REM GitHub CLI sends privacy-filtered error reports from every workstation.
-REM Missing/login failures never block SnapGen; reports remain queued locally.
-where gh >nul 2>nul
-if errorlevel 1 if exist "snapgen_data\tools\gh\bin\gh.exe" set "PATH=%CD%\snapgen_data\tools\gh\bin;%PATH%"
-where gh >nul 2>nul
-if errorlevel 1 (
-  where winget >nul 2>nul
-  if not errorlevel 1 (
-    echo   Installing GitHub CLI for automatic error reports...
-    winget install --id GitHub.cli -e --accept-package-agreements --accept-source-agreements --silent >nul 2>nul
-  )
-)
-where gh >nul 2>nul
-if errorlevel 1 (
-  echo   [WARN] GitHub CLI not ready. Errors will stay queued until Repair installs it.
-) else (
-  gh auth status --hostname github.com >nul 2>nul
-  if errorlevel 1 (
-    if /I "%~1"=="--no-run" (
-      echo   [WARN] GitHub login deferred until error reporting is used in the app.
-    ) else (
-      echo   Opening browser once for automatic error reports...
-      gh auth login --hostname github.com --git-protocol https --web --clipboard
-      gh auth status --hostname github.com >nul 2>nul
-      if errorlevel 1 echo   [WARN] Browser approval not finished. SnapGen will ask again only when an error must be sent.
-    )
-  ) else (
-    echo   GitHub error reporting ready
-  )
-)
-
 REM ===== Step 5: Verify everything =====
 echo.
 REM ===== Step 5: Verify project files =====

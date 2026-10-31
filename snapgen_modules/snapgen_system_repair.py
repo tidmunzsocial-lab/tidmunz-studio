@@ -81,51 +81,6 @@ def _find_curl(project_root: Path):
     system = shutil.which("curl.exe") or shutil.which("curl")
     return Path(system) if system else None
 
-def _find_gh(project_root: Path):
-    bundled = project_root / "snapgen_data" / "tools" / "gh" / "bin" / "gh.exe"
-    if bundled.is_file():
-        return bundled
-    system = shutil.which("gh.exe") or shutil.which("gh")
-    return Path(system) if system else None
-
-def _ensure_gh(project_root: Path, log) -> Path:
-    existing = _find_gh(project_root)
-    if existing:
-        return existing
-    arch = os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64").upper()
-    wanted = "windows_arm64.zip" if "ARM64" in arch else "windows_amd64.zip"
-    request = urllib.request.Request(
-        "https://api.github.com/repos/cli/cli/releases/latest",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "SnapGen-System-Repair/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        release = json.loads(response.read().decode("utf-8", "replace"))
-    asset = next(
-        (item for item in release.get("assets", []) if str(item.get("name", "")).lower().endswith(wanted)),
-        None,
-    )
-    if not asset or not asset.get("browser_download_url"):
-        raise RuntimeError("หา GitHub CLI สำหรับ Windows รุ่นล่าสุดไม่พบ")
-    target = project_root / "snapgen_data" / "tools" / "gh"
-    with tempfile.TemporaryDirectory(prefix="snapgen-gh-") as td:
-        temp = Path(td)
-        archive = temp / "gh.zip"
-        _download(asset["browser_download_url"], archive, log)
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(temp / "extract")
-        matches = list((temp / "extract").rglob("gh.exe"))
-        if not matches:
-            raise RuntimeError("ดาวน์โหลด GitHub CLI แล้วแต่ไม่พบ gh.exe")
-        target.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(matches[0].parent, target / "bin", dirs_exist_ok=True)
-    gh = target / "bin" / "gh.exe"
-    if not gh.is_file():
-        raise RuntimeError("ติดตั้ง GitHub CLI แบบพกพาไม่สำเร็จ")
-    os.environ["PATH"] = str(gh.parent) + os.pathsep + os.environ.get("PATH", "")
-    log(f"✓ ติดตั้ง GitHub CLI แบบพกพาแล้ว: {gh}")
-    return gh
-
-
 def _ensure_curl(project_root: Path, log) -> Path:
     existing = _find_curl(project_root)
     if existing:
@@ -366,16 +321,6 @@ def repair_all(project_root, log=print, **_old_bridge_args):
     except Exception as exc:
         failures.append(f"curl: {exc}")
         log(f"✗ curl: {exc}")
-
-    try:
-        gh = _ensure_gh(root, log)
-        auth = _run([gh, "auth", "status", "--hostname", "github.com"], timeout=20)
-        if auth.returncode:
-            log("⚠ GitHub ยังไม่ได้ Login — Error จะเก็บคิวในเครื่องและส่งหลัง Login")
-        else:
-            log("✓ ระบบรายงาน Error กลางพร้อมส่ง GitHub Issues")
-    except Exception as exc:
-        log(f"⚠ ตรวจระบบรายงาน Error ไม่สำเร็จ: {exc}")
 
     try:
         if not _find_ffmpeg(root):
