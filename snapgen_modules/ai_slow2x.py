@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Smooth slow motion using bundled RIFE NCNN Vulkan with FFmpeg fallback."""
-import json, os, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
+import json, os, queue, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
 from pathlib import Path
 
 RIFE_RELEASE_URL = "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-windows.zip"
@@ -204,6 +204,114 @@ def _video_dimensions(ffmpeg, path):
     return int(match.group(1)), int(match.group(2))
 
 
+def _video_duration_seconds(ffmpeg, path):
+    result = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True,
+                            timeout=30, encoding="utf-8", errors="replace")
+    text = (result.stderr or "") + "\n" + (result.stdout or "")
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _run_video_process_with_progress(command, duration, backend, say, progress=None, timeout=3 * 3600, env=None):
+    """Run FFmpeg/Topaz and report only percentages from its actual -progress timestamps."""
+    import collections
+
+    command = list(command)
+    if not command:
+        raise RuntimeError("คำสั่งประมวลผลวิดีโอว่าง")
+    output_path = command.pop()
+    command.extend(["-progress", "pipe:1", "-nostats", output_path])
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", bufsize=1, env=env)
+    lines = queue.Queue()
+    errors = collections.deque(maxlen=100)
+
+    def read_stdout():
+        try:
+            for line in proc.stdout:
+                lines.put(line.rstrip("\r\n"))
+        finally:
+            lines.put(None)
+
+    def read_stderr():
+        try:
+            for line in proc.stderr:
+                errors.append(line.rstrip())
+        except Exception:
+            pass
+
+    readers = [threading.Thread(target=read_stdout, daemon=True),
+               threading.Thread(target=read_stderr, daemon=True)]
+    for reader in readers:
+        reader.start()
+    started = time.monotonic()
+    last_percent = -1
+    output_time = None
+    eof = False
+    while not eof:
+        if time.monotonic() - started > timeout:
+            proc.kill()
+            proc.wait()
+            raise RuntimeError(f"{backend} ใช้เวลาเกิน {timeout // 60} นาที")
+        try:
+            line = lines.get(timeout=1)
+        except queue.Empty:
+            if proc.poll() is not None and lines.empty():
+                break
+            continue
+        if line is None:
+            eof = True
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if key == "out_time":
+            try:
+                hh, mm, ss = value.split(":")
+                output_time = int(hh) * 3600 + int(mm) * 60 + float(ss)
+            except (TypeError, ValueError):
+                pass
+        elif key in ("out_time_us", "out_time_ms"):
+            try:
+                output_time = int(value) / 1_000_000
+            except (TypeError, ValueError):
+                pass
+        elif key == "progress" and value == "end":
+            output_time = duration if duration and duration > 0 else output_time
+        if duration and duration > 0 and output_time is not None:
+            percent = min(99, max(0, int(output_time * 100 / duration)))
+            if percent > last_percent:
+                last_percent = percent
+                if callable(progress):
+                    try:
+                        progress(backend, percent)
+                    except Exception:
+                        pass
+                if percent == 0 or percent == 99 or percent % 5 == 0:
+                    say(f"[upscale] {backend}: {percent}%")
+    try:
+        return_code = proc.wait(timeout=max(1, timeout - (time.monotonic() - started)))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise RuntimeError(f"{backend} ใช้เวลาเกิน {timeout // 60} นาที")
+    for reader in readers:
+        reader.join(timeout=2)
+    if return_code:
+        detail = "\n".join(errors)[-1200:] or "ไม่ทราบสาเหตุ"
+        raise RuntimeError(f"{backend} exit code {return_code}: {detail}")
+    if callable(progress):
+        try:
+            progress(backend, 100)
+        except Exception:
+            pass
+    say(f"[upscale] {backend}: 100%")
+    return return_code
+
+
 def _video_2x_size(width, height):
     """Double dimensions without changing orientation; never upscale beyond UHD 4K."""
     if max(width, height) >= 3840:
@@ -212,8 +320,32 @@ def _video_2x_size(width, height):
     return tuple(max(2, int(round(value * factor / 2)) * 2) for value in (width, height))
 
 
-def upscale_video_2x(input_video, output_video=None, log=None):
-    """Use Topaz for aspect-preserving 2x video upscale; fall back to FFmpeg."""
+def _video_4k_size(width, height):
+    if max(width, height) >= 3840:
+        return width, height
+    return (2160, 3840) if height > width else (3840, 2160)
+
+
+def _fit_video_size(width, height, target_width, target_height):
+    factor = min(target_width / width, target_height / height)
+    return tuple(max(2, int(round(value * factor / 2)) * 2) for value in (width, height))
+
+
+def upscale_video_4k(input_video, output_video=None, log=None, progress=None):
+    src = Path(input_video)
+    result = upscale_video_2x(input_video, output_video, log, target_4k=True, progress=progress)
+    if _video_ok(src) and _video_ok(result):
+        ffmpeg = ensure_ffmpeg_tool(log=log)
+        before = _video_dimensions(ffmpeg, src)
+        after = _video_dimensions(ffmpeg, result)
+        target = _video_4k_size(*before)
+        if max(before) < 3840 and after != target:
+            raise RuntimeError(f"อัปสเกล 4K ไม่ผ่านการตรวจ: ได้ {after[0]}x{after[1]}, ต้องได้ {target[0]}x{target[1]}")
+    return result
+
+
+def upscale_video_2x(input_video, output_video=None, log=None, target_4k=False, progress=None):
+    """Use Topaz for 2x or a fitted UHD 4K canvas; preserve duration/audio and fall back to FFmpeg."""
     say = log if callable(log) else (lambda _msg: None)
     src = Path(input_video)
     if not _video_ok(src):
@@ -221,12 +353,18 @@ def upscale_video_2x(input_video, output_video=None, log=None):
     ffmpeg = ensure_ffmpeg_tool(log=say)
     try:
         width, height = _video_dimensions(ffmpeg, src)
-        target_width, target_height = _video_2x_size(width, height)
+        duration = _video_duration_seconds(ffmpeg, src)
+        target_width, target_height = (_video_4k_size(width, height) if target_4k else _video_2x_size(width, height))
+        label = "4K" if target_4k else "2x"
+        content_width, content_height = (_fit_video_size(width, height, target_width, target_height)
+                                         if target_4k else (target_width, target_height))
+        fit = (f"scale={content_width}:{content_height}:flags=lanczos,"
+               f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1")
         if (target_width, target_height) == (width, height):
             say(f"[upscale] ข้าม — ต้นฉบับถึง 4K หรือสูงกว่าแล้ว {width}x{height}")
             return str(src)
         if output_video is None:
-            output_video = src.with_name(src.stem + "_2x.mp4")
+            output_video = src.with_name(src.stem + f"_{label}.mp4")
         out = Path(output_video)
         out.parent.mkdir(parents=True, exist_ok=True)
         found = _topaz_dirs()
@@ -236,8 +374,8 @@ def upscale_video_2x(input_video, output_video=None, log=None):
             probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(src)], capture_output=True, text=True,
                                    timeout=30, encoding="utf-8", errors="replace")
             has_audio = any("Audio:" in item for item in ((probe.stderr or "") + "\n" + (probe.stdout or "")).splitlines())
-            vf = (f"tvai_up=model=prob-4:scale=0:w={target_width}:h={target_height}:blend=0:device=0:vram=1:instances=1,"
-                  f"scale={target_width}:{target_height}:flags=lanczos,format=yuv420p")
+            vf = (f"tvai_up=model=prob-4:scale=0:w={content_width}:h={content_height}:blend=0:device=0:vram=1:instances=1,"
+                  f"{fit},format=yuv420p")
             cmd = [str(exe), "-hide_banner", "-y", "-i", str(src), "-vf", vf,
                    "-c:v", "hevc_nvenc", "-preset", "p5", "-b:v", "60M", "-pix_fmt", "yuv420p",
                    "-tag:v", "hvc1", "-movflags", "+faststart"]
@@ -245,17 +383,17 @@ def upscale_video_2x(input_video, output_video=None, log=None):
             cmd.append(str(out))
             try:
                 with _enhance_lock:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3 * 3600,
-                                            encoding="utf-8", errors="replace", env=env)
-                if result.returncode == 0 and _video_ok(out):
+                    _run_video_process_with_progress(cmd, duration, "Topaz Video AI", say, progress,
+                                                     timeout=3 * 3600, env=env)
+                if _video_ok(out) and _video_dimensions(ffmpeg, out) == (target_width, target_height):
                     say(f"[upscale] Topaz Video AI ✓ {width}x{height} → {target_width}x{target_height}")
                     return str(out)
-                say("[upscale] Topaz ทำไม่สำเร็จ — ใช้ FFmpeg 2x แทน")
+                say(f"[upscale] Topaz output ไม่ผ่านการตรวจขนาด {target_width}x{target_height} — ใช้ FFmpeg {label} แทน")
             except Exception as exc:
-                say(f"[upscale] Topaz error — ใช้ FFmpeg 2x แทน: {exc}")
+                say(f"[upscale] Topaz error — ใช้ FFmpeg {label} แทน: {exc}")
             out.unlink(missing_ok=True)
 
-        vf = (f"scale={target_width}:{target_height}:flags=lanczos,"
+        vf = (f"{fit},"
               "unsharp=lx=5:ly=5:la=0.25:cx=5:cy=5:ca=0.0")
         probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(src)], capture_output=True, text=True,
                                timeout=30, encoding="utf-8", errors="replace")
@@ -264,14 +402,13 @@ def upscale_video_2x(input_video, output_video=None, log=None):
         cmd += ["-c:a", "aac", "-b:a", "192k"] if has_audio else ["-an"]
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", str(out)]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
-                                encoding="utf-8", errors="replace")
-        if result.returncode or not _video_ok(out):
-            raise RuntimeError((result.stderr or "FFmpeg upscale failed")[-500:])
-        say(f"[upscale] FFmpeg 2x ✓ {width}x{height} → {target_width}x{target_height}")
+        _run_video_process_with_progress(cmd, duration, "FFmpeg", say, progress, timeout=1800)
+        if not _video_ok(out) or _video_dimensions(ffmpeg, out) != (target_width, target_height):
+            raise RuntimeError(f"FFmpeg output ไม่ผ่านการตรวจขนาด {target_width}x{target_height}")
+        say(f"[upscale] FFmpeg {label} ✓ {width}x{height} → {target_width}x{target_height}")
         return str(out)
     except Exception as exc:
-        say(f"[upscale] ทำ 2x ไม่สำเร็จ — ใช้ต้นฉบับ: {exc}")
+        say(f"[upscale] ทำ {'4K' if target_4k else '2x'} ไม่สำเร็จ — ใช้ต้นฉบับ: {exc}")
         return str(src)
 
 
@@ -360,8 +497,8 @@ def enhance_image(path, log=None, model="rhea-1", scale=2):
 
 
 def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4", fi_model="apo-8",
-                upscale_2x=False):
-    """Slow-mo + upscale; Auto may request 2x while other callers retain 4K."""
+                upscale_2x=False, upscale_4k=False, progress=None):
+    """Slow-mo plus spatial upscale; Auto 4K preserves orientation and content aspect."""
     found = _topaz_dirs()
     if not found:
         return None
@@ -371,14 +508,18 @@ def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4",
     line = next((l for l in ((probe.stderr or "") + (probe.stdout or "")).splitlines() if "Video:" in l), "")
     m = re.search(r"(?:,|\s)(\d{2,5})x(\d{2,5})(?:,|\s|\[)", line)
     w, h = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
-    tw, th = (_video_2x_size(w, h) if upscale_2x
+    duration = _video_duration_seconds(str(exe), inp)
+    if duration:
+        duration *= int(factor)
+    tw, th = (_video_4k_size(w, h) if upscale_4k else _video_2x_size(w, h) if upscale_2x
               else ((2160, 3840) if h > w else (3840, 2160)))
+    cw, ch = _fit_video_size(w, h, tw, th) if upscale_4k else (tw, th)
     env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
     # Interpolate first (cheaper at the source size), then upscale.
     vf = f"tvai_fi=model={fi_model}:slowmo={int(factor)}:fps={source_fps:g}:device=0:vram=1:instances=1"
     if (tw, th) != (w, h):
-        vf += (f",tvai_up=model={up_model}:scale=0:w={tw}:h={th}:blend=0:device=0:vram=1:instances=1")
-    vf += f",scale={tw}:{th}:flags=lanczos,format=yuv420p"   # Topaz rounds sizes; pin the exact output frame
+        vf += (f",tvai_up=model={up_model}:scale=0:w={cw}:h={ch}:blend=0:device=0:vram=1:instances=1")
+    vf += f",scale={cw}:{ch}:flags=lanczos,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
     cmd =[str(exe), "-hide_banner", "-y", "-i", str(inp)]
     if has_audio:
         cmd += ["-af", ",".join(["atempo=0.5"] * (2 if int(factor) >= 4 else 1)), "-c:a", "aac", "-b:a", "192k"]
@@ -390,9 +531,10 @@ def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4",
     started = time.time()
     with _enhance_lock:   # several video slots finishing together must not fight over the GPU
         started = time.time()
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3 * 3600, encoding="utf-8", errors="replace", env=env)
-    if r.returncode or not _video_ok(out):
-        say("[slow2x] Topaz ทำไม่สำเร็จ — ใช้ RIFE แทน: " + ((r.stderr or "")[-300:].strip() or "unknown"))
+        _run_video_process_with_progress(cmd, duration, "Topaz Video AI (Slow + 4K)", say, progress,
+                                         timeout=3 * 3600, env=env)
+    if not _video_ok(out) or _video_dimensions(str(exe), out) != (tw, th):
+        say("[slow2x] Topaz output ไม่ผ่านการตรวจขนาด — ใช้ RIFE แทน")
         return None
     say(f"[slow2x] Topaz ✓ {Path(out).name} ({time.time() - started:.0f} วินาที)")
     return str(out)
@@ -544,6 +686,8 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
 
     mute_audio = bool(_kwargs.get("mute", False))
     upscale_2x = bool(_kwargs.get("upscale_2x", False))
+    upscale_4k = bool(_kwargs.get("upscale_4k", False))
+    progress_fn = _kwargs.get("progress")
 
     inp = Path(input_video)
     if not _video_ok(inp):
@@ -567,11 +711,12 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
         if mute_audio:
             has_audio = False
         if int(factor) in (2, 4) and _topaz_dirs():
-            topaz_out = (out.with_name(out.stem + "_Topaz2x" + out.suffix)
-                         if upscale_2x else out)
+            topaz_out = (out.with_name(out.stem + "_Topaz4K" + out.suffix) if upscale_4k else
+                         out.with_name(out.stem + "_Topaz2x" + out.suffix) if upscale_2x else out)
             try:
                 done = _topaz_slow(inp, topaz_out, factor, source_fps, has_audio, say,
-                                   upscale_2x=upscale_2x)
+                                   upscale_2x=upscale_2x, upscale_4k=upscale_4k,
+                                   progress=progress_fn)
             except Exception as e:
                 say(f"[slow2x] Topaz error — ใช้ RIFE แทน: {e}")
                 done = None
@@ -610,6 +755,11 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
                     if _pct > _last_pct:
                         _last_pct = _pct
                         say(f"[slow2x] RIFE: {_done}/{target_count} ({_pct}%)")
+                        if callable(progress_fn):
+                            try:
+                                progress_fn("RIFE", _pct)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             def _ffmpeg_slow():

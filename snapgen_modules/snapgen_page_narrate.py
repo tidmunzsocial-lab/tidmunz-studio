@@ -64,6 +64,7 @@ except ImportError:
 
 MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
+AUTO_VIDEO_SIZES = {"16:9": (3840, 2160), "9:16": (2160, 3840)}
 SIZES_2K = {"16:9": (2560, 1440), "9:16": (1440, 2560)}
 
 
@@ -5855,8 +5856,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         # Merging consumes the completed clips; image review can regenerate paid assets.
         project, folder = state["project"], Path(state["folder"])
+        finish_postprocess = state.get("_auto_video_postprocess_finalizer")
+        if callable(finish_postprocess):
+            finish_postprocess()
         ffmpeg = ffmpeg_path()
-        width, height = (SIZES.get(project["aspect"], SIZES["16:9"]) if video_mode
+        width, height = (AUTO_VIDEO_SIZES.get(project["aspect"], AUTO_VIDEO_SIZES["16:9"]) if video_mode
                          else narrate_video_size(project))
         log(f"ส่งออกวิดีโอ {width}×{height}")
         scenes = project["scenes"]
@@ -5916,7 +5920,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         # The zoom/pan filter uses one core per scene: render a few scenes at
         # once (about a third of the cores, low priority) instead of one.
         from concurrent.futures import ThreadPoolExecutor
-        workers = max(1, (os.cpu_count() or 4) // 3)
+        workers = min(2, max(1, (os.cpu_count() or 4) // 3))
         done_count = [0]
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(render_one, i, scene, length) for i, (scene, length) in enumerate(zip(scenes, lengths))]
@@ -6678,6 +6682,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 prompt += "\nNegative" + thai.rsplit("\nNegative", 1)[1]
             log(f"ช็อต {index + 1}: ส่งคำสั่งภาษาอังกฤษให้โมเดลวิดีโอ (ฉบับไทยดูได้ในตาราง)")
 
+        runtime.setdefault("_auto_video_scene_number_by_slot", {})[slot_index] = index + 1
+        runtime.setdefault("_auto_video_downloaded_by_slot", {}).pop(slot_index, None)
+
         def submit():
             state["show_error_backup"] = runtime.get("show_error")
             runtime["show_error"] = lambda title, msg="", *a, **k: errors.append(f"{title}: {msg}")
@@ -6690,7 +6697,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                             (state["project"].get("video_resolution") or "720p")
                             if clip_model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else None)
             runtime["_ai_slow2x_override"] = bool(scene.get("clip_slow"))
-            runtime["_auto_video_upscale_2x_override"] = True
+            runtime["_auto_video_upscale_4k_override"] = True
             dialogue_var = cfg.get("dialogue")
             if hasattr(dialogue_var, "set"):
                 # The Slot appends dialogue direction after the reviewed prompt.
@@ -6706,7 +6713,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def restore():
             runtime.get("_seedance_reference_overrides", {}).pop(slot_index, None)
             runtime["_ai_slow2x_override"] = None  # back to the Slow 2x checkbox
-            runtime["_auto_video_upscale_2x_override"] = False
+            runtime["_auto_video_upscale_4k_override"] = False
+            if (runtime.get("_auto_video_scene_number_by_slot") or {}).get(slot_index) == index + 1:
+                runtime["_auto_video_scene_number_by_slot"].pop(slot_index, None)
             if "show_error_backup" in state:
                 runtime["show_error"] = state.pop("show_error_backup")
         try:
@@ -6724,8 +6733,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             run_on_ui(restore)
         if errors:
             raise RuntimeError("; ".join(errors)[:400])
-        new_files = [f for f in out_dir.glob("*.mp4")
-                     if f.stat().st_mtime >= started - 1 and before.get(str(f)) != f.stat().st_mtime]
+        downloaded_by_slot = runtime.get("_auto_video_downloaded_by_slot") or {}
+        downloaded = Path(downloaded_by_slot.pop(slot_index)) if downloaded_by_slot.get(slot_index) else None
+        if downloaded and downloaded.is_file():
+            # Concurrent post-processing for the previous shot can also create
+            # newer files in export/video; bind this slot to its actual download.
+            new_files = [downloaded]
+        else:
+            new_files = [f for f in out_dir.glob("*.mp4")
+                         if f.stat().st_mtime >= started - 1 and before.get(str(f)) != f.stat().st_mtime]
         if not new_files:
             raise RuntimeError("Slot ทำงานเสร็จแต่ไม่พบไฟล์วิดีโอใหม่")
         newest = max(new_files, key=lambda f: f.stat().st_mtime)  # post-processed version is written last
@@ -6736,6 +6752,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         # shot numbers, and moving "clip_003*" once took the next shot's clip away (it was then made again).
         def norm(path):
             return os.path.normcase(os.path.abspath(str(path)))
+        postprocess_jobs = runtime.get("_auto_video_postprocess_jobs") or {}
+        postprocess = postprocess_jobs.pop(str(newest.resolve()), None)
+
+        def remember_postprocess(target_path, normal_path=None):
+            if not postprocess:
+                return
+            scene["clip_upscale_status"] = "queued"
+            scene["clip_postprocess_source"] = str(newest)
+            scene["clip_postprocess_slow"] = bool(postprocess.get("slow"))
+            scene["clip_postprocess_target_4k"] = bool(postprocess.get("target_4k"))
+            scene["clip_postprocess_upscale_enabled"] = bool(postprocess.get("upscale_enabled"))
+            scene["clip_postprocess_mute"] = bool(postprocess.get("mute"))
+            state.setdefault("auto_video_postprocess_pending", []).append({
+                "scene": scene, "index": index, "target": str(target_path),
+                "normal_target": str(normal_path) if normal_path else None,
+                "source": str(newest), "job": postprocess,
+            })
         others = {norm(sc.get(key)) for j, sc in enumerate(state["project"]["scenes"]) if j != index
                   for key in ("clip", "clip_normal") if sc.get(key)}
         own = [Path(scene[key]) for key in ("clip", "clip_normal")
@@ -6752,18 +6785,29 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             for path in old:
                 shutil.move(str(path), str(backup_dir / f"{path.stem}_เก่า_{stamp}{path.suffix}"))
             log(f"เก็บคลิปเดิมของช็อต {index + 1} ไว้ที่ clips/_สำรอง ({len(old)} ไฟล์)")
+        scene.pop("clip_upscale_status", None)
+        scene.pop("clip_upscale_backend", None)
+        scene.pop("clip_postprocess_source", None)
         if not scene.get("clip_slow"):
             target = clips_dir / f"{base}.mp4"
             shutil.copy2(newest, target)
+            remember_postprocess(target)
             return str(target)
         # Slow 2x shot: keep both speeds for hand editing; the slow one goes in the video.
         target = clips_dir / f"{base}_สโลว์.mp4"
         shutil.copy2(newest, target)
         oldest = min(new_files, key=lambda f: f.stat().st_mtime)  # the download, before Slow 2x
+        normal = None
         if oldest != newest:
             normal = clips_dir / f"{base}_ปกติ.mp4"
             shutil.copy2(oldest, normal)
             scene["clip_normal"] = str(normal)
+        elif postprocess:
+            # Keep the downloaded normal-speed source while the slow/upscale job runs.
+            normal = clips_dir / f"{base}_ปกติ.mp4"
+            shutil.copy2(oldest, normal)
+            scene["clip_normal"] = str(normal)
+        remember_postprocess(target, normal)
         return str(target)
 
     def stage_clips(indices=None):
@@ -6777,16 +6821,37 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         apply_selected_video_model(project)
         cfg = runtime["slot_cfg_vars"][slot_index]
         saved_slot = run_on_ui(lambda: (cfg["model"].get(), cfg["duration"].get(), cfg["aspect"].get(), cfg["resolution"].get()))
+        old_async = runtime.get("_auto_video_pipeline_async")
+        old_progress = runtime.get("_auto_video_progress")
+
+        def show_auto_upscale_progress(slot, scene_number, backend, percent):
+            def update():
+                base = str(state.get("clip_label") or f"สร้างคลิป · Slot {slot + 1}")
+                shot = f"ฉาก {scene_number}" if scene_number else f"Slot {slot + 1}"
+                set_progress("clips", state.get("clip_fraction", 0),
+                             f"{base} · อัปสเกล 4K {shot}: {backend} {percent}%")
+            ui(update)
+
+        runtime["_auto_video_pipeline_async"] = True
+        runtime["_auto_video_progress"] = show_auto_upscale_progress
         try:
             run_clips(project, scenes, todo)
         finally:
-            def put_back():
-                set_slot_config(cfg, *saved_slot[:3])
-                cfg["resolution"].set(saved_slot[3])
-                save_slots = runtime.get("save_slot_configs")
-                if callable(save_slots):
-                    save_slots()
-            run_on_ui(put_back)
+            try:
+                finalize_auto_video_postprocesses()
+            finally:
+                runtime["_auto_video_pipeline_async"] = old_async
+                if old_progress is None:
+                    runtime.pop("_auto_video_progress", None)
+                else:
+                    runtime["_auto_video_progress"] = old_progress
+                def put_back():
+                    set_slot_config(cfg, *saved_slot[:3])
+                    cfg["resolution"].set(saved_slot[3])
+                    save_slots = runtime.get("save_slot_configs")
+                    if callable(save_slots):
+                        save_slots()
+                run_on_ui(put_back)
         # Remaking chosen shots only reports those shots; the whole story is checked by its own run.
         wanted = indices if indices is not None else range(len(scenes))
         missing = [i + 1 for i in wanted if not (scenes[i].get("clip") and os.path.isfile(scenes[i]["clip"]))]
@@ -6852,6 +6917,70 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     raise RuntimeError("สร้างคลิปล้มเหลว 3 ฉากติดกัน (เครดิตวิดีโอหมดหรือโมเดลมีปัญหา) — แก้แล้วกดเริ่มเพื่อทำต่อ")
             save_project()
             ui(refresh_table)
+
+    def finalize_auto_video_postprocesses():
+        """Wait for queued local work and link only its verified output before merging."""
+        pending = state.setdefault("auto_video_postprocess_pending", [])
+        queued_scenes = {id(item["scene"]) for item in pending}
+        for index, scene in enumerate((state.get("project") or {}).get("scenes") or []):
+            if scene.get("clip_upscale_status") not in ("queued", "failed") or id(scene) in queued_scenes:
+                continue
+            source = Path(scene.get("clip_postprocess_source") or scene.get("clip") or "")
+            target_value = scene.get("clip")
+            target = Path(target_value) if target_value else None
+            queue_job = runtime.get("_queue_auto_video_postprocess")
+            if not source.is_file() or target is None or not target.is_file():
+                raise RuntimeError(f"ฉาก {index + 1} มีสถานะอัปสเกลค้าง แต่ไม่พบไฟล์ต้นฉบับสำหรับทำต่อ")
+            if not callable(queue_job):
+                raise RuntimeError("ตัวจัดคิว Upscale ไม่พร้อม จึงยังไม่รวมวิดีโอ")
+            queue_job(str(source), slot_index, index + 1,
+                      bool(scene.get("clip_postprocess_slow")),
+                      bool(scene.get("clip_postprocess_target_4k")),
+                      bool(scene.get("clip_postprocess_upscale_enabled")),
+                      bool(scene.get("clip_postprocess_mute")),
+                      log_fn=lambda message, shot=index + 1: log(f"ฉาก {shot}: {message}"))
+            jobs = runtime.get("_auto_video_postprocess_jobs") or {}
+            job = jobs.pop(str(source.resolve()), None)
+            if not job:
+                raise RuntimeError(f"ฉาก {index + 1} ส่งงาน Upscale กลับมาไม่ครบ")
+            pending.append({"scene": scene, "index": index, "target": str(target),
+                            "source": str(source), "job": job})
+            queued_scenes.add(id(scene))
+        while pending:
+            item = pending[0]
+            scene, index, job = item["scene"], item["index"], item["job"]
+            try:
+                result = job["future"].result()
+                output = Path(result.get("path") if isinstance(result, dict) else result)
+                if not output.is_file() or output.stat().st_size <= 0:
+                    raise RuntimeError("งานเบื้องหลังไม่คืนไฟล์วิดีโอที่ใช้ได้")
+                target = Path(item["target"])
+                if output.resolve() != target.resolve():
+                    shutil.copy2(output, target)
+                scene["clip"] = str(target)
+                scene["clip_upscale_status"] = "complete"
+                scene["clip_upscale_backend"] = str(result.get("backend") or "ตรวจขนาดแล้ว") if isinstance(result, dict) else "ตรวจขนาดแล้ว"
+                scene.pop("clip_postprocess_source", None)
+                for key in ("clip_postprocess_slow", "clip_postprocess_target_4k",
+                            "clip_postprocess_upscale_enabled", "clip_postprocess_mute", "clip_upscale_error"):
+                    scene.pop(key, None)
+                try:
+                    import ai_slow2x as _video_info
+                    dims = _video_info._video_dimensions(_video_info.ensure_ffmpeg_tool(log=log), target)
+                    log(f"✓ ฉาก {index + 1}: อัปสเกลเสร็จด้วย {scene['clip_upscale_backend']} · {dims[0]}×{dims[1]}")
+                except Exception:
+                    log(f"✓ ฉาก {index + 1}: ประมวลผลวิดีโอเบื้องหลังเสร็จด้วย {scene['clip_upscale_backend']}")
+                pending.pop(0)
+                save_project()
+                ui(refresh_table)
+            except Exception as exc:
+                scene["clip_upscale_status"] = "failed"
+                scene["clip_upscale_error"] = str(exc)[:300]
+                pending.pop(0)
+                save_project()
+                raise RuntimeError(f"ฉาก {index + 1} อัปสเกลไม่ผ่าน จึงยังไม่รวมวิดีโอ: {exc}") from exc
+
+    state["_auto_video_postprocess_finalizer"] = finalize_auto_video_postprocesses
 
     STAGE_FUNCS = {"context": stage_context, "transcribe": stage_transcribe, "characters": stage_characters,
                    "plan": stage_plan, "storyboard": stage_storyboard, "images": stage_images,

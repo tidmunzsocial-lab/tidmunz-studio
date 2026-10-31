@@ -100,10 +100,11 @@ def launcher_tree():
     return ast.parse((ROOT / "snapgen_gui_v2.py").read_text(encoding="utf-8-sig"))
 
 
-def test_slow2x_wrapper_honors_auto_scene_override_even_if_global_checkbox_is_on(tmp_path):
+@pytest.mark.parametrize("upscale_flag", ["_auto_video_upscale_2x_override", "_auto_video_upscale_4k_override"])
+def test_slow2x_wrapper_honors_auto_scene_override_even_if_global_checkbox_is_on(tmp_path, upscale_flag):
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"video")
-    g = {"_ai_slow2x_override": False, "_auto_video_upscale_2x_override": True}
+    g = {"_ai_slow2x_override": False, upscale_flag: True}
     calls, logs = [], []
     global_slow2x = True
     node = next(n for n in ast.walk(launcher_tree()) if isinstance(n, ast.FunctionDef)
@@ -128,7 +129,7 @@ def test_slow2x_wrapper_honors_auto_scene_override_even_if_global_checkbox_is_on
     g["_ai_slow2x_override"] = True
     ns[node.name](str(source), log=logs.append)
     assert len(calls) == 1
-    assert calls[0][1]["upscale_2x"] is True
+    assert calls[0][1]["upscale_4k" if "4k" in upscale_flag else "upscale_2x"] is True
 
 
 def test_saved_slot_restores_seedance_instead_of_recovered_default():

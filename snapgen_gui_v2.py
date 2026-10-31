@@ -1891,7 +1891,9 @@ try:
         except Exception:
             output_video = None
         kwargs.setdefault("mute", _mute_download_enabled())
-        if g.get("_auto_video_upscale_2x_override"):
+        if g.get("_auto_video_upscale_4k_override"):
+            kwargs["upscale_4k"] = True
+        elif g.get("_auto_video_upscale_2x_override"):
             kwargs["upscale_2x"] = True
         _slow_result = _slow2x_mod.make_ai_slow2x(
             input_video,
@@ -1930,10 +1932,10 @@ try:
         except Exception:
             return False
 
-    def _mute_video_stream_copy(path, log_fn=None):
+    def _mute_video_stream_copy(path, log_fn=None, enabled=None):
         """Remove audio while copying video bytes unchanged (no re-encode)."""
         src = Path(path)
-        if not _mute_download_enabled() or not src.is_file():
+        if (not (_mute_download_enabled() if enabled is None else bool(enabled))) or not src.is_file():
             return str(src)
         tmp = src.with_name(src.stem + ".mute_tmp" + src.suffix)
         try:
@@ -1959,17 +1961,23 @@ try:
                 log_fn(f"ปิดเสียงไม่สำเร็จ — เก็บไฟล์ต้นฉบับไว้: {e}")
         return str(src)
 
-    def _auto_upscale_video_1080p(path, log_fn=None, _ai_only=False):
-        """Apply Auto's 2x upscale override or the existing 1080p slot upscale."""
+    def _auto_upscale_video_1080p(path, log_fn=None, _ai_only=False, target_4k=None,
+                                  upscale_enabled=None, progress=None):
+        """Apply Auto's 4K target (legacy 2x supported), or the normal Slot 1080p target."""
         src = Path(path)
-        if g.get("_auto_video_upscale_2x_override"):
-            if not _upscale_1080_enabled() or not src.is_file():
+        explicit_target = target_4k is not None
+        target_4k = bool(g.get("_auto_video_upscale_4k_override")) if target_4k is None else bool(target_4k)
+        target_2x = bool(g.get("_auto_video_upscale_2x_override")) if not explicit_target else False
+        if target_4k or target_2x:
+            label = "4K" if target_4k else "2x"
+            enabled = _upscale_1080_enabled() if upscale_enabled is None else bool(upscale_enabled)
+            if not enabled or not src.is_file():
                 return str(src)
-            if "_topaz2x" in src.stem.lower():
+            if ("_topaz4k" if target_4k else "_topaz2x") in src.stem.lower():
                 if callable(log_fn):
-                    log_fn("Upscale 2x: ข้าม — Topaz ทำ Slow 2x และ upscale 2x ในรอบเดียวแล้ว")
+                    log_fn(f"Upscale {label}: ข้าม — Topaz ทำ Slow และ upscale ในรอบเดียวแล้ว")
                 return str(src)
-            out_stem = src.stem + "_2x"
+            out_stem = src.stem + f"_{label}"
             out = EXPORT_VIDEO / f"{out_stem}.mp4"
             if out.is_file() and out.stat().st_size > 0:
                 number = 2
@@ -1981,14 +1989,15 @@ try:
                     number += 1
             try:
                 import ai_slow2x as _ai_slow_mod
-                result = _ai_slow_mod.upscale_video_2x(str(src), output_video=str(out), log=log_fn)
+                upscale = _ai_slow_mod.upscale_video_4k if target_4k else _ai_slow_mod.upscale_video_2x
+                result = upscale(str(src), output_video=str(out), log=log_fn, progress=progress)
                 result_path = Path(result)
                 if result_path.is_file() and result_path.stat().st_size > 0:
                     return str(result_path)
                 raise RuntimeError("upscale ไม่มี output")
             except Exception as exc:
                 if callable(log_fn):
-                    log_fn(f"Upscale 2x ไม่สำเร็จ — ใช้วิดีโอต้นฉบับ: {exc}")
+                    log_fn(f"Upscale {label} ไม่สำเร็จ — ใช้วิดีโอต้นฉบับ: {exc}")
                 return str(src)
         if not _upscale_1080_enabled() or not src.is_file():
             return str(src)
@@ -2260,6 +2269,77 @@ try:
                 log_fn(f"AI Slow 2x: ข้าม เพราะแปลงไม่สำเร็จ: {e}")
             return str(path)
 
+    def _queue_auto_video_postprocess(path, slot_index, scene_number, slow_enabled, target_4k,
+                                      upscale_enabled, mute_enabled, log_fn=None):
+        from concurrent.futures import ThreadPoolExecutor
+
+        jobs = g.setdefault("_auto_video_postprocess_jobs", {})
+        lock = g.setdefault("_auto_video_postprocess_lock", threading.Lock())
+        pool = g.get("_auto_video_postprocess_pool")
+        if pool is None:
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="auto-video-upscale")
+            g["_auto_video_postprocess_pool"] = pool
+        src = Path(path)
+        key = str(src.resolve())
+        actual_backend = ["ไม่ต้องประมวลผล"]
+
+        def report(backend, percent):
+            actual_backend[0] = str(backend)
+            callback = g.get("_auto_video_progress")
+            if callable(callback):
+                try:
+                    callback(slot_index, scene_number, str(backend), int(percent))
+                except Exception:
+                    pass
+
+        def process():
+            current = str(src)
+            if mute_enabled:
+                current = _mute_video_stream_copy(current, log_fn=log_fn, enabled=True)
+                actual_backend[0] = "FFmpeg (ปิดเสียง)"
+            if slow_enabled:
+                slow_out = src.with_name(src.stem + "_Slow2x" + src.suffix)
+                if slow_out.exists():
+                    number = 2
+                    while src.with_name(f"{src.stem}_Slow2x_{number}{src.suffix}").exists():
+                        number += 1
+                    slow_out = src.with_name(f"{src.stem}_Slow2x_{number}{src.suffix}")
+                slow_log = log_fn if callable(log_fn) else (lambda _message: None)
+                if callable(slow_log):
+                    slow_log("AI Slow 2x: เริ่มแปลงในคิวเบื้องหลัง (สร้างคลิปถัดไประหว่างนี้)")
+                current = _slow2x_mod.make_ai_slow2x(
+                    current, output_video=str(slow_out), factor=2, log=slow_log,
+                    mute=mute_enabled, upscale_4k=bool(target_4k and upscale_enabled), progress=report,
+                )
+            if target_4k and upscale_enabled:
+                current_path = Path(current)
+                try:
+                    before = _slow2x_mod._video_dimensions(_slow2x_mod.ensure_ffmpeg_tool(log=log_fn), current_path)
+                except Exception as exc:
+                    raise RuntimeError(f"อ่านความละเอียดก่อนอัปสเกลไม่ได้: {exc}") from exc
+                if max(before) >= 3840 and not slow_enabled:
+                    actual_backend[0] = "ข้าม (ไฟล์ต้นฉบับ 4K แล้ว)"
+                current = _auto_upscale_video_1080p(
+                    current, log_fn=log_fn, target_4k=True, upscale_enabled=True, progress=report,
+                )
+                if max(before) < 3840:
+                    after = _slow2x_mod._video_dimensions(_slow2x_mod.ensure_ffmpeg_tool(log=log_fn), current)
+                    expected = _slow2x_mod._video_4k_size(*before)
+                    if after != expected:
+                        raise RuntimeError(f"คลิปยังไม่ผ่าน 4K: ได้ {after[0]}x{after[1]} ต้องได้ {expected[0]}x{expected[1]}")
+            return {"path": str(current), "backend": actual_backend[0]}
+
+        if callable(log_fn):
+            log_fn("ดาวน์โหลดครบ — ส่งงาน Slow/Upscale เข้าเครื่องเรนเดอร์เบื้องหลัง; คิวสร้างคลิปทำต่อได้")
+        future = pool.submit(process)
+        with lock:
+            jobs[key] = {"future": future, "source": str(src), "slot": slot_index,
+                         "slow": bool(slow_enabled), "target_4k": bool(target_4k),
+                         "upscale_enabled": bool(upscale_enabled), "mute": bool(mute_enabled),
+                         "upscale_4k": bool(target_4k and upscale_enabled)}
+        return str(src)
+    g["_queue_auto_video_postprocess"] = _queue_auto_video_postprocess
+
     def _snapgen_download_video_to_export(url, uuid, _slot_index=None):
         if _slot_index is None:
             _slot_index = _current_video_slot[0]
@@ -2316,7 +2396,6 @@ try:
                 pass
             raise _VideoDownloadError("ไฟล์ที่ดาวน์โหลดไม่ใช่วิดีโอ: " + str(path))
         _video_prompt_names.pop(str(uuid), None)
-        _mute_video_stream_copy(str(path))
         # Slow 2x ก่อน (ที่ resolution เดิม = เร็วขึ้น)
         _raw_log = g.get("append_log")
         def _log_fn(msg):
@@ -2327,6 +2406,20 @@ try:
                     print(f"[slot {_slot_index+1}] {msg}")
             else:
                 print(f"[video] {msg}")
+        slow_enabled = _ai_slow2x_enabled()
+        target_4k = bool(g.get("_auto_video_upscale_4k_override"))
+        upscale_enabled = _upscale_1080_enabled()
+        mute_enabled = _mute_download_enabled()
+        scene_number = (g.get("_auto_video_scene_number_by_slot") or {}).get(_slot_index)
+        if g.get("_auto_video_pipeline_async") and _slot_index is not None:
+            g.setdefault("_auto_video_downloaded_by_slot", {})[_slot_index] = str(path)
+        if (g.get("_auto_video_pipeline_async") and
+                (slow_enabled or (target_4k and upscale_enabled) or mute_enabled)):
+            return _queue_auto_video_postprocess(
+                str(path), _slot_index, scene_number, slow_enabled, target_4k, upscale_enabled, mute_enabled,
+                log_fn=_log_fn,
+            )
+        _mute_video_stream_copy(str(path), log_fn=_log_fn, enabled=mute_enabled)
         if _slot_index is not None:
             _log_fn("วิดีโอโหลดเสร็จ — เริ่มประมวลผลต่อ...")
         try:
@@ -4387,6 +4480,7 @@ def _install_actual_video_credit():
         if g["slot_busy"][i]:
             g["append_log"](i, "generate ignored: slot busy")
             return
+        auto_pipeline = bool(g.get("_auto_video_pipeline_async"))
         img = g["slot_images"][i].get().strip()
         prompt = g["slot_prompts"][i].get("1.0", tk.END).strip()
         voice_cfg = (g.get("_veo3_voice_state") or {}).get(i, {})
@@ -4452,6 +4546,8 @@ def _install_actual_video_credit():
                 cfg,
                 log_fn=lambda message: g["append_log"](i, message),
             ))
+        slot_job_token = object()
+        g.setdefault("_slot_job_tokens", {})[i] = slot_job_token
         g["slot_busy"][i] = True
         g["set_generate_enabled"](i, False)
         if model_for_job == LTX23_CLOUD_MODEL:
@@ -4504,12 +4600,24 @@ def _install_actual_video_credit():
                             progress_fn=update_ltx25_progress,
                         )
                         saved_text = "LTX-2.5 100%"
-                    if callable(g.get("_auto_slow2x_downloaded_video")):
-                        local_result = g["_auto_slow2x_downloaded_video"](str(local_result), log_fn=lambda m: g["append_log"](i, m))
-                    if callable(g.get("_auto_upscale_video_1080p")):
-                        local_result = g["_auto_upscale_video_1080p"](str(local_result), log_fn=lambda m: g["append_log"](i, m))
-                    _snapgen_after(0, lambda text=saved_text: g["set_slot_state"](i, "ok", text))
-                    _snapgen_after(0, g.get("play_download_complete_sound", lambda: None))
+                    if auto_pipeline:
+                        scene_number = (g.get("_auto_video_scene_number_by_slot") or {}).get(i)
+                        g.setdefault("_auto_video_downloaded_by_slot", {})[i] = str(local_result)
+                        _queue_auto_video_postprocess(
+                            str(local_result), i, scene_number, _ai_slow2x_enabled(),
+                            bool(g.get("_auto_video_upscale_4k_override")), _upscale_1080_enabled(),
+                            _mute_download_enabled(), log_fn=lambda m: g["append_log"](i, m),
+                        )
+                        g["slot_busy"][i] = False
+                        _snapgen_after(0, lambda text="ดาวน์โหลดครบ · กำลังอัปสเกลเบื้องหลัง": g["set_slot_state"](i, "ok", text))
+                        _snapgen_after(0, lambda: g["set_generate_enabled"](i, True))
+                    else:
+                        if callable(g.get("_auto_slow2x_downloaded_video")):
+                            local_result = g["_auto_slow2x_downloaded_video"](str(local_result), log_fn=lambda m: g["append_log"](i, m))
+                        if callable(g.get("_auto_upscale_video_1080p")):
+                            local_result = g["_auto_upscale_video_1080p"](str(local_result), log_fn=lambda m: g["append_log"](i, m))
+                        _snapgen_after(0, lambda text=saved_text: g["set_slot_state"](i, "ok", text))
+                        _snapgen_after(0, g.get("play_download_complete_sound", lambda: None))
                     return
                 # Credit deltas are only reliable when one video job is measured at a time.
                 with _video_credit_measure_lock:
@@ -4545,6 +4653,10 @@ def _install_actual_video_credit():
                 g["poll_and_download"](i, str(uuid), model_for_job)
                 if veo3_voice_dialogue:
                     _extract_veo3_voice_audio(i, voice_files_before)
+                if auto_pipeline:
+                    g["slot_busy"][i] = False
+                    _snapgen_after(0, lambda: g["set_slot_state"](i, "ok", "ดาวน์โหลดครบ · อัปสเกลทำงานเบื้องหลัง"))
+                    _snapgen_after(0, lambda: g["set_generate_enabled"](i, True))
 
                 # Measure every hosted video after the provider finishes,
                 # including non-voice Veo, Grok Lower and Vela jobs.
@@ -4552,8 +4664,8 @@ def _install_actual_video_credit():
                     after = _fetch_credit_after_deduction(
                         before,
                         log_fn=lambda msg: g["append_log"](i, msg),
-                        attempts=12,
-                        delay=5,
+                        attempts=1 if auto_pipeline else 12,
+                        delay=0 if auto_pipeline else 5,
                     )
                     if before is not None and after is not None:
                         actual = max(0, before - after)
@@ -4572,8 +4684,9 @@ def _install_actual_video_credit():
                 except Exception as e:
                     g["append_log"](i, f"อ่านเครดิตหลังสร้างไม่ได้: {e}")
 
-                _snapgen_after(0, lambda: (g["set_slot_state"](i, "ok", "Saved"), _refresh_all_actual_slot_cfg_labels()))
-                _snapgen_after(0, g.get("play_download_complete_sound", lambda: None))
+                if not auto_pipeline:
+                    _snapgen_after(0, lambda: (g["set_slot_state"](i, "ok", "Saved"), _refresh_all_actual_slot_cfg_labels()))
+                    _snapgen_after(0, g.get("play_download_complete_sound", lambda: None))
                 _snapgen_after(0, g.get("refresh_credit_balance", lambda: None))
             except _VideoDownloadError as e:
                 # Submission/polling already completed.  Do not misreport this
@@ -4593,8 +4706,9 @@ def _install_actual_video_credit():
                 _snapgen_after(0, lambda: g["set_slot_state"](i, "error", "Video failed"))
                 _snapgen_after(0, lambda msg=str(e): g["show_error"]("สร้างวิดีโอไม่สำเร็จ", msg))
             finally:
-                g["slot_busy"][i] = False
-                _snapgen_after(0, lambda: g["set_generate_enabled"](i, True))
+                if g.get("_slot_job_tokens", {}).get(i) is slot_job_token:
+                    g["slot_busy"][i] = False
+                    _snapgen_after(0, lambda: g["set_generate_enabled"](i, True))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -7282,9 +7396,9 @@ def _install_mute_video_checkbox():
             mute_box = add_checkbox("ปิดเสียงวิดีโอ", mute_downloaded_video_var, slow_box, 1)
         upscale_box = next((w for w in found if str(w.cget("text")).startswith("Upscale 1080p")), None)
         if upscale_box is None:
-            upscale_box = add_checkbox("Upscale 1080p (Auto: 2×)", upscale_1080p_var, mute_box, 2)
+            upscale_box = add_checkbox("Upscale 1080p (Auto: 4K)", upscale_1080p_var, mute_box, 2)
         else:
-            upscale_box.configure(text="Upscale 1080p (Auto: 2×)")
+            upscale_box.configure(text="Upscale 1080p (Auto: 4K)")
         _save_video_checkbox_options()
         return bool(mute_box and upscale_box)
     except Exception as e:
