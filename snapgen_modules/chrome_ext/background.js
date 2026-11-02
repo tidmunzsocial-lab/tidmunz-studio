@@ -282,7 +282,7 @@ async function runJob(job) {
   // gained messages shows the job went out.
   let known = null;
   if (job.conversation_id) {
-    try { known = await inPage(tabId, pageNodes, [job.conversation_id]); } catch (e) { known = null; }
+    try { known = await inPage(tabId, pageNodes, [job.conversation_id, job.type]); } catch (e) { known = null; }
   }
   let started = null;
   try {
@@ -305,7 +305,7 @@ async function runJob(job) {
     for (let i = 0; i < 10 && !started; i++) {
       await sleep(1500);
       try {
-        const now = await inPage(tabId, pageNodes, [job.conversation_id]);
+        const now = await inPage(tabId, pageNodes, [job.conversation_id, job.type]);
         if (Array.isArray(now) && now.length > known.length) started = {ok: true, before: known, oldPointers: []};
       } catch (e) {}
     }
@@ -313,7 +313,9 @@ async function runJob(job) {
   if (!started || started.error) return started || {error: "ChatGPT page did not answer (no message reached the chat)"};
   // The job's state lives here, not in the page: a reloaded tab keeps going from the conversation itself.
   const state = {before: started.before, oldPointers: started.oldPointers, sentAt: Date.now(),
-                 cid: job.conversation_id || null, idle: 0};
+                 cid: job.conversation_id || null, idle: 0,
+                 dom_before: started.dom_before || [], dom_mode: Boolean(started.dom_mode),
+                 user_message_id: started.user_message_id || null};
   let deadline = Date.now() + JOB_LIMIT_MS;
   let throttles = 0;
   while (Date.now() < deadline) {
@@ -329,6 +331,10 @@ async function runJob(job) {
     if (!result) continue;
     if (result.cid) state.cid = result.cid;
     if (result.idle != null) state.idle = result.idle;
+    if (result.dom_reply_id != null) {
+      state.dom_reply_id = result.dom_reply_id;
+      state.dom_reply_text = result.dom_reply_text;
+    }
     if (result.rate_limited) {
       // A prompt already went out: wait and read this same conversation, never call pageSend again.
       const seconds = Math.max(Number(result.retry_after) || 0, Math.min(300, 30 * 2 ** Math.min(throttles++, 4)));
@@ -352,7 +358,12 @@ async function runJob(job) {
 }
 
 // ── functions below run inside the chatgpt.com page ──
-async function pageNodes(cid) {
+async function pageNodes(cid, kind) {
+  if (kind === "chat" && location.pathname === `/c/${cid}`) {
+    const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
+    if (["user", "assistant"].every(role => nodes.some(n => n.getAttribute("data-message-author-role") === role)))
+      return nodes.map(n => n.getAttribute("data-message-id"));
+  }
   const session = await (await fetch("/api/auth/session")).json();
   const r = await fetch(`/backend-api/conversation/${cid}`, {headers: {Authorization: "Bearer " + session.accessToken}});
   if (!r.ok) return null;
@@ -367,11 +378,21 @@ async function pageSend(job) {
   }
   async function pageSendInner(job) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const session = await (await fetch("/api/auth/session")).json();
-  if (!session || !session.accessToken) return {error: "ChatGPT is logged out in Chrome — log in, then try again"};
+  let session = null;
   let before = [];  // messages already in the chat: everything else is this job's answer
   const oldPointers = [];  // pictures already in the chat (earlier pictures, references): never the answer
-  if (job.conversation_id) {
+  const domNodes = typeof document.querySelectorAll === "function"
+    ? [...document.querySelectorAll('[data-message-id][data-message-author-role]')] : [];
+  const domBefore = domNodes.map(n => n.getAttribute("data-message-id"));
+  const domReady = job.type === "chat" && (!job.conversation_id || (
+    location.pathname === `/c/${job.conversation_id}` &&
+    ["user", "assistant"].every(role => domNodes.some(n => n.getAttribute("data-message-author-role") === role))));
+  if (!domReady || !job.conversation_id) {
+    session = await (await fetch("/api/auth/session")).json();
+    if (!session || !session.accessToken) return {error: "ChatGPT is logged out in Chrome — log in, then try again"};
+  }
+  if (domReady) before = domBefore;
+  if (job.conversation_id && !domReady) {
     // A just-created chat may not yet be readable after navigation. Retry GET
     // only, never send the prompt twice or silently start another chat.
     let check;
@@ -448,7 +469,26 @@ async function pageSend(job) {
     return {error: `ChatGPT did not take the attached pictures (${attached}/${images.length} attached) — not sent`};
   if (!send || send.disabled) return {error: "ChatGPT did not accept the attachments / prompt in time"};
   send.click();
-  return {ok: true, before, oldPointers};
+  let userMessageId = null;
+  if (job.type === "chat") {
+    const previous = new Set([...before, ...domBefore]);
+    const normalized = str => str.replace(/\s+/g, " ").trim();
+    const expected = normalized(String(job.prompt || ""));
+    for (let attempt = 0; attempt < 60 && !userMessageId; attempt++) {
+      await sleep(250);
+      const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
+      const anchor = domBefore.length ? nodes.findIndex(n => n.getAttribute("data-message-id") === domBefore[domBefore.length - 1]) : -1;
+      if (domReady && domBefore.length && anchor < 0) continue;
+      for (const node of nodes.slice(anchor + 1)) {
+        const id = node.getAttribute("data-message-id");
+        if (!id || previous.has(id) || node.getAttribute("data-message-author-role") !== "user") continue;
+        if (!expected || !normalized(node.textContent || "").includes(expected)) continue;
+        userMessageId = id;
+      }
+    }
+  }
+  return {ok: true, before, oldPointers, dom_before: domBefore,
+          dom_mode: domReady && Boolean(userMessageId), user_message_id: userMessageId};
   }
 }
 
@@ -461,6 +501,29 @@ async function pagePoll(kind, state) {
   const idle = busy ? 0 : (state.idle || 0) + 1;
   const elapsed = (Date.now() - state.sentAt) / 1000;
   if (!cid || idle < 2 || elapsed < 6) return {done: false, cid, idle};
+
+  if (kind === "chat" && state.user_message_id) {
+    const previous = new Set([...(state.before || []), ...(state.dom_before || [])]);
+    const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
+    const userIndex = nodes.findIndex(n => n.getAttribute("data-message-id") === state.user_message_id &&
+      n.getAttribute("data-message-author-role") === "user");
+    for (const node of (userIndex < 0 ? [] : nodes.slice(userIndex + 1)).reverse()) {
+      const id = node.getAttribute("data-message-id");
+      if (!id || previous.has(id) || node.getAttribute("data-message-author-role") !== "assistant") continue;
+      const blocks = [...node.querySelectorAll(".markdown")];
+      const block = blocks[blocks.length - 1];
+      if (!block) continue;
+      const codes = [...block.querySelectorAll("pre code")];
+      const code = codes.length ? (codes[codes.length - 1].textContent || "").trim() : "";
+      const text = (/^[{\[]/.test(code) ? code : (block.innerText || "")).trim();
+      if (!text) continue;
+      if (state.dom_reply_id !== id || state.dom_reply_text !== text)
+        return {done: false, cid, idle, dom_reply_id: id, dom_reply_text: text};
+      return {done: true, text, images: [], conversation_id: cid, message_id: id, source: "chatgpt_page"};
+    }
+    // The normal UI owns text generation. Do not hammer a separately throttled conversation API.
+    if (state.dom_mode) return {done: false, cid, idle};
+  }
 
   const token = (await (await fetch("/api/auth/session")).json()).accessToken;
   const auth = {headers: {Authorization: "Bearer " + token}};

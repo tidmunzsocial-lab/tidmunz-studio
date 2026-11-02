@@ -161,3 +161,66 @@ def test_lost_heartbeat_never_reports_the_submitted_prompt_as_unsent(monkeypatch
     worker.join()
     assert result["provider_status"] == 429 and result["send_state"] == "sent"
     assert not relay.pending and not relay.waiting
+
+
+def test_loaded_chat_can_send_text_without_private_conversation_reads():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    functions = source[source.index("async function pageNodes("):source.index("async function pagePoll(")]
+    harness = r'''
+let clicks=0, apiReads=0;
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+const messages=['user','assistant'].map((role,i)=>({getAttribute:k=>k==='data-message-id'?'old-'+i:role}));
+const send={disabled:false,click:()=>{clicks++;messages.push({textContent:'write video JSON',getAttribute:k=>k==='data-message-id'?'sent-user':'user'});}};
+const form={isConnected:true,querySelectorAll:()=>[],querySelector:s=>s==='button[type="submit"]'?send:null};
+const editor={isConnected:true,closest:()=>form,focus:()=>{}};
+global.document={querySelectorAll:()=>messages,querySelector:()=>editor,execCommand:()=>{}};
+global.fetch=async url=>{
+ apiReads++;throw Error('UI text jobs should not need any private fetch for a loaded existing chat');
+};
+(async()=>{
+ const known=await pageNodes('existing','chat');
+ const result=await pageSend({type:'chat',conversation_id:'existing',prompt:'write video JSON',images:[]});
+ console.log(JSON.stringify({known,result,clicks,apiReads}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["clicks"] == 1 and data["apiReads"] == 0
+    assert data["result"]["dom_mode"] is True
+    assert data["result"]["user_message_id"] == "sent-user"
+    assert data["result"]["dom_before"] == data["known"] == ["old-0", "old-1"]
+
+
+def test_text_reply_requires_new_id_and_stable_json_without_api_polling():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    function = source[source.index("async function pagePoll("):source.index("chrome.alarms.create")]
+    harness = r'''
+let text='{"shots":[{"video_prompt":"new"}]}', showNew=false;
+const block={innerText:'json Copy '+text,querySelectorAll:()=>[{textContent:text}]};
+const message=(id,role='assistant')=>({getAttribute:k=>k==='data-message-id'?id:role,querySelectorAll:()=>[block]});
+global.location={pathname:'/c/existing'};
+global.document={querySelectorAll:s=>s.includes('data-message-id')?
+ [message('old'),message('sent-user','user'),...(showNew?[message('new')]:[])]:[]};
+global.fetch=async()=>{throw Error('must not read the throttled API');};
+(async()=>{
+ const state={cid:'existing',idle:2,sentAt:Date.now()-10000,before:['old'],dom_before:['old'],dom_mode:true,user_message_id:'sent-user'};
+ const old=await pagePoll('chat',state);
+ showNew=true;
+ const fresh=await pagePoll('chat',state);
+ Object.assign(state,{dom_reply_id:fresh.dom_reply_id,dom_reply_text:fresh.dom_reply_text});
+ const done=await pagePoll('chat',state);
+ console.log(JSON.stringify({old,fresh,done}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", function + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["old"]["done"] is False and data["fresh"]["done"] is False
+    assert data["done"]["done"] is True and data["done"]["message_id"] == "new"
+    assert json.loads(data["done"]["text"])["shots"][0]["video_prompt"] == "new"

@@ -83,3 +83,14 @@ def test_failed_repairs_keep_files_and_budget_survives_project_reload(tmp_path):
         verify()
     assert calls == [[1]] * 3 and restored["scenes"][1]["auto_image_repair_count"] == 3
     assert Path(scenes[1]["image"]).is_file()
+
+
+def test_reference_matching_ignores_characters_mentioned_only_in_global_style(tmp_path):
+    matched = []
+    scope = dict(vars(N), runtime={"img_match_refs_for_text": lambda text: matched.append(text) or []},
+                 scene_prompt=lambda scene: scene["prompt"] + " era: princesses and ทหาร",
+                 attachment_folder=lambda: tmp_path)
+    attachments = load(scope, "attachments_for", parent="_build")
+    assert attachments({"prompt": "empty seaside", "characters": [], "location": "beach"}) == []
+    assert len(matched) == 1 and "ทหาร" not in matched[0]
+    assert "empty seaside" in matched[0] and "beach" in matched[0]

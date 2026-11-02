@@ -3157,7 +3157,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def attachments_for(scene, limit=6):
         """Video flow: the Image page's attachments, matched by name like Image AI does."""
-        text = " ".join([scene_prompt(scene), " ".join(scene.get("characters") or []), str(scene.get("location") or ""),
+        text = " ".join([str(scene.get("prompt") or ""), " ".join(scene.get("characters") or []), str(scene.get("location") or ""),
                          str(scene.get("text") or "")])
         matcher = runtime.get("img_match_refs_for_text")
         if callable(matcher):
@@ -3603,8 +3603,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     preview = tk.Label(preview_box, bg="#F1F5F9", text="เลือกฉากเพื่อดูรูป")
     preview.pack(fill="both", expand=True)
     columns = ("no", "time", "chars", "prompt", "status")
+    from snapgen_fonts import font_family
+    import tkinter.font as tkfont
+    table_family = font_family()
+    table_font = tkfont.Font(root=table_frame, family=table_family, size=10)
+    table_style = ttk.Style(table_frame)
+    table_style.configure("Auto.Treeview", font=(table_family, 10),
+                          rowheight=max(28, table_font.metrics("linespace") + 8))
+    table_style.configure("Auto.Treeview.Heading", font=(table_family, 10, "bold"))
     table = ttk.Treeview(table_frame, columns=columns, show="headings", height=12,
-                         selectmode="extended")
+                         selectmode="extended", style="Auto.Treeview")
     table.tag_configure("bad", foreground="#DC2626")
     for key, title, width in (("no", "#", 44), ("time", "เวลา", 64),
                               ("chars", "ตัวละคร / สถานที่" if video_mode else "ตัวละคร", 160 if video_mode else 170),
@@ -3870,11 +3878,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     status += ": " + str((scene.get("clip_review") or {}).get("reason") or "")[:60]
             who = ", ".join(scene.get("characters") or [])
             if video_mode:
-                # What the picture of this shot is drawn with: the Image page attachments matched by name.
-                try:
-                    who = ", ".join(Path(p).stem for p in attachments_for(scene)) or "— ไม่มีไฟล์แนบ"
-                except Exception:
-                    pass
+                who = ", ".join(dict.fromkeys([*(scene.get("characters") or []),
+                                               *([str(scene["location"])] if scene.get("location") else [])])) or "—"
             redo = video_mode and (scene.get("clip_review") or {}).get("verdict") == "redo"
             table.insert("", "end", iid=str(i), tags=("bad",) if scene.get("bad") or scene.get("error") or redo else (), values=(
                 i + 1, fmt_time(scene.get("start")), who,
@@ -3956,7 +3961,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def cooldown(seconds, attempt):
             result["cooldown_until"] = time.monotonic() + seconds
-            log(f"⏳ ChatGPT ตอบ 429 ก่อนส่ง — รอ {int(seconds)} วินาทีแล้วทำต่ออัตโนมัติ (รอบ {attempt})")
+            log(f"⏳ Chrome ยังอ่านแชตเดิมไม่ได้ (429) — ยังไม่ส่งพรอมต์ รอ {int(seconds)} วินาทีแล้วลองต่อ (รอบ {attempt})")
 
         def worker():
             try:
@@ -3975,7 +3980,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if waited % 5 == 0:
                 left = max(0, int(result.get("cooldown_until", 0) - time.monotonic()))
                 if left:
-                    ui(detail_var.set, f"{base} · ChatGPT 429: รออีก {left} วินาที แล้วทำต่ออัตโนมัติ")
+                    ui(detail_var.set, f"{base} · ยังไม่ส่งพรอมต์: Chrome อ่านแชตไม่ได้ (429) รออีก {left} วินาที")
                 else:
                     ui(detail_var.set, f"{base} · รอ {what} ตอบ {fmt_time(waited)} — ทำต่ออัตโนมัติเมื่อได้คำตอบ")
             if waited >= 180 and not warned:

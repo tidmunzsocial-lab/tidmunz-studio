@@ -62,6 +62,13 @@ def apply_to_widget_tree(root) -> None:
     except Exception:
         return
     family = font_family()
+    # Named defaults and explicit ("TkDefaultFont", size) tuples are different in Tk:
+    # the latter asks for a nonexistent family and falls back differently on each PC.
+    for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkCaptionFont", "TkSmallCaptionFont"):
+        try:
+            tkfont.nametofont(name, root=root).configure(family=family)
+        except Exception:
+            pass
     widget_classes = {
         "Button", "Label", "Entry", "Text", "Listbox", "Checkbutton",
         "Radiobutton", "Menubutton", "Scale", "Spinbox", "Message",
@@ -77,10 +84,12 @@ def apply_to_widget_tree(root) -> None:
                 raw = widget.cget("font")
                 actual = tkfont.Font(widget, font=raw).actual() if raw else {}
                 old_family = str(actual.get("family") or "")
+                parts = root.tk.splitlist(raw) if raw else ()
+                invalid_default_tuple = len(parts) > 1 and str(parts[0]).casefold() == "tkdefaultfont"
                 # Only repair the old hardcoded family. Preserve Consolas,
                 # TkFixedFont, Segoe UI, emoji, and all other intentional
                 # choices. This is the key layout-safety boundary.
-                if old_family.casefold() in legacy_families:
+                if old_family.casefold() in legacy_families or invalid_default_tuple:
                     size = int(actual.get("size") or 10)
                     weight = str(actual.get("weight") or "normal")
                     slant = str(actual.get("slant") or "roman")
