@@ -276,6 +276,37 @@ pageSend({type:'chat',conversation_id:'existing',prompt:'new plan prompt',images
     assert data["result"]["user_message_id"] == "sent-user"
 
 
+def test_text_send_confirmation_survives_chatgpt_replacing_old_message_dom():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    functions = source[source.index("async function pageNodes("):source.index("async function pagePoll(")]
+    harness = r'''
+let clicks=0;
+const message=(id,role,text)=>({innerText:text,getAttribute:k=>k==='data-message-id'?id:role});
+let messages=[message('old-user','user','old'),message('old-assistant','assistant','old reply')];
+const editor={isConnected:true,innerText:'',textContent:'',closest:()=>form,focus(){}};
+const send={disabled:false,click(){
+ clicks++;
+ messages=[message('sent-user','user','new plan prompt')];
+ editor.innerText='';
+}};
+const form={isConnected:true,querySelectorAll:()=>[],querySelector:s=>s==='button[type="submit"]'?send:null};
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+global.document={querySelectorAll:s=>s.includes('data-message-id')?messages:[],querySelector:()=>editor,
+ execCommand:(cmd,_show,value)=>{if(cmd==='selectAll')editor.innerText='';if(cmd==='insertText')editor.innerText=value;}};
+global.fetch=async()=>{throw Error('loaded chat must use the DOM path');};
+pageSend({type:'chat',conversation_id:'existing',prompt:'new plan prompt',images:[]}).then(result=>
+ console.log(JSON.stringify({result,clicks}))).catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["clicks"] == 1
+    assert data["result"]["user_message_id"] == "sent-user"
+
+
 def test_run_job_does_not_poll_gpt_after_an_unconfirmed_send():
     node = shutil.which("node")
     if not node:

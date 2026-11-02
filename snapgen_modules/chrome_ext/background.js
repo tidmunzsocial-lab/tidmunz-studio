@@ -538,7 +538,6 @@ async function pageSend(job) {
     const findUserMessage = () => {
       const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
       const anchor = domBefore.length ? nodes.findIndex(n => n.getAttribute("data-message-id") === domBefore[domBefore.length - 1]) : -1;
-      if (domReady && domBefore.length && anchor < 0) return null;
       for (const node of nodes.slice(anchor + 1)) {
         const id = node.getAttribute("data-message-id");
         if (!id || previous.has(id) || node.getAttribute("data-message-author-role") !== "user") continue;
