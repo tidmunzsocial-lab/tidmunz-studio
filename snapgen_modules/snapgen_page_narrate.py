@@ -954,6 +954,8 @@ def relink_scene_images(project, folder):
     restored = []
     for i, scene in enumerate(project.get("scenes") or []):
         current = scene.get("image")
+        if project.get("relink_unassigned_images") is False and not current and not scene.get("image_file_stamp"):
+            continue  # A new plan must not adopt the old plan's scene_001 merely by filename.
         stem = f"scene_{i + 1:03d}"
         candidates = [p for p in (Path(folder) / "images").glob(stem + ".*")
                       if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp") and p.is_file()]
@@ -1226,8 +1228,9 @@ def _squash(text: str) -> str:
 def project_folder_for(base: Path, script: str, text: str) -> Path:
     """One folder (and one GPT history) per story.
 
-    The same file, or the same script content moved elsewhere, reopens its
-    project.  A different story whose file happens to have the same name
+    The same script content, including a copy moved elsewhere, reopens its
+    project. Changed content at the same path is a new revision, preserving
+    the previous project's assets and GPT history. A different story with the same name
     gets "<name> (2)", "<name> (3)" ... instead of sharing a history.
     """
     stem = safe_name(Path(script).stem)
@@ -1238,11 +1241,77 @@ def project_folder_for(base: Path, script: str, text: str) -> Path:
             existing = json.loads((folder / "project.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return folder
-        same_file = os.path.normcase(os.path.abspath(str(existing.get("script") or ""))) == \
-            os.path.normcase(os.path.abspath(str(script)))
-        if same_file or existing.get("script_hash") == digest:
+        if existing.get("script_hash") == digest:
             return folder
     raise RuntimeError("มีโปรเจกต์ชื่อซ้ำกันมากเกินไป")
+
+
+def context_matches_script(payload, script, text):
+    """Prove a Context belongs to this exact script or to a full story containing this part."""
+    import snapgen_shared_context as shared
+    if not payload or not _squash(text):
+        return False
+    expected = payload.get("story_sha256")
+    if expected and shared.matches_story(payload, text):
+        return True
+    source_name = Path(str(payload.get("source_name") or "")).name
+    if not source_name or not payload.get("path"):
+        return False
+    source = Path(payload["path"]).parent / source_name
+    try:
+        full = read_script(source)
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return False
+    if expected and not shared.matches_story(payload, full):
+        return False
+    if _squash(text) not in _squash(full):
+        return False
+    if not expected:
+        names = [str(c.get("name") or "").split("(")[0].strip()
+                 for c in (payload.get("context") or {}).get("characters", []) if isinstance(c, dict)]
+        names = [n for n in names if n and n not in ("ผู้เล่า", "narrator")]
+        if names and sum(n in full for n in names) * 2 < len(names):
+            return False
+    return True
+
+
+def bind_auto_context(project, payload, text, references=None):
+    """Bind source identity before a cached done flag can skip Context. Keep completed media."""
+    import hashlib
+    references = str(references) if references else None
+    context = json.loads(json.dumps(payload["context"], ensure_ascii=False))
+    canonical = {k: v for k, v in context.items() if k != "updated_at"}
+    binding = {"script_hash": script_hash(text),
+               "context_hash": hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}
+    changed = project.get("context_binding") != binding
+    previous_image_chat = project.get("image_chat") or {}
+    if project.get("reference_folder") != references:
+        project["image_chat"] = {}
+    project["reference_folder"] = references
+    project["context_file"] = str(payload["path"])
+    source = Path(payload["path"]).parent / Path(str(payload.get("source_name") or "")).name
+    if source.is_file():
+        project["full_script"] = str(source)
+    else:
+        project.pop("full_script", None)
+    if not changed:
+        return False
+    if project.get("conversation") or previous_image_chat:
+        project.setdefault("previous_context_histories", []).append({
+            "conversation": project.get("conversation") or {}, "image_chat": previous_image_chat})
+    project.update(context=context, context_binding=binding, conversation={}, image_chat={}, history_seeded=False)
+    for key in ("bodies", "base_looks", "same_person", "ghosts", "continuity_done", "continuity_v"):
+        project.pop(key, None)
+    names = [str(c.get("name") or "") for c in context.get("characters", []) if isinstance(c, dict) and c.get("name")]
+    for scene in project.get("scenes") or []:
+        kept = [n for n in scene.get("characters") or [] if n in names]
+        inferred = [n for n in names if n in str(scene.get("prompt") or "")]
+        scene["characters"] = list(dict.fromkeys([*kept, *inferred]))
+        if not (scene.get("clip") and Path(scene["clip"]).is_file()):
+            scene.pop("motion_image", None)
+    project.setdefault("done", {}).pop("context", None)
+    project["done"].pop("motion", None)
+    return True
 
 
 def match_reference_files(text: str, folder) -> list:
@@ -3130,7 +3199,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return model, max(2.0, seconds), aspect if aspect in SIZES else "16:9"
 
     def attachment_folder():
-        folder = (runtime.get("img_ref_folder") or [None])[0]
+        folder = ((state.get("project") or {}).get("reference_folder") if state["busy"] else None)
+        folder = folder or (runtime.get("img_ref_folder") or [None])[0]
         return folder if folder and os.path.isdir(str(folder)) else None
 
     def attachment_names() -> list:
@@ -3147,13 +3217,44 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         folder = attachment_folder()
         if not folder:
             return None
+        project = state["project"]
+        text = read_script(project["script"])
+        matches = []
         for place in (Path(folder), Path(folder).parent):
             for path in sorted(place.glob("*" + snapgen_shared_context.SUFFIX)):
                 payload = snapgen_shared_context.load(path.with_name(path.name[: -len(snapgen_shared_context.SUFFIX)] + ".docx"))
-                if payload:
-                    log(f"ใช้ Context จากโฟลเดอร์ไฟล์แนบ: {path.name}")
-                    return payload
-        return None
+                if payload and context_matches_script(payload, project["script"], text):
+                    matches.append(payload)
+        return max(matches, key=lambda p: str(p.get("saved_at") or "")) if matches else None
+
+    def current_team_context():
+        import snapgen_shared_context as shared
+        project = state["project"]
+        text = read_script(project["script"])
+        own = shared.load(project["script"])
+        if own and context_matches_script(own, project["script"], text):
+            return own
+        attached = context_beside_attachments()
+        if attached:
+            return attached
+        found = shared.find(project["script"], story_text=text)
+        return found if found and context_matches_script(found, project["script"], text) else None
+
+    def sync_auto_context():
+        project = state["project"]
+        text = read_script(project["script"])
+        if project.get("script_hash") and project["script_hash"] != script_hash(text):
+            raise RuntimeError("เนื้อหาบทเปลี่ยนหลังเปิดโปรเจกต์ — เลือกไฟล์บทนี้อีกครั้งเพื่อแยกเป็นงานใหม่ "
+                               "โปรเจกต์และภาพเดิมจะยังอยู่ ไม่ใช้แผน/ประวัติของบทเก่าปนกัน")
+        selected = current_team_context()
+        if not selected:
+            raise RuntimeError("ไม่พบ Context ที่ยืนยันว่าเป็นของบทที่เลือก — ตรวจไฟล์ Context ข้างบท/โฟลเดอร์เรฟ "
+                               "โปรแกรมจะไม่หยิบ Context ของเรื่องเก่ามาแทน")
+        if bind_auto_context(project, selected, text, attachment_folder()):
+            for key in ("bodies_failed", "history_renewed"):
+                state.pop(key, None)
+            log(f"ผูก Context กับบทปัจจุบัน: {Path(selected['path']).name} — ใช้ประวัติ GPT ใหม่ เก็บรูปและคลิปเดิมไว้")
+        save_project()
 
     def attachments_for(scene, limit=6):
         """Video flow: the Image page's attachments, matched by name like Image AI does."""
@@ -3813,9 +3914,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project = state["project"]
         if project.get("audio") and os.path.normcase(project["audio"]) != os.path.normcase(path):
             # A different narration invalidates timing-dependent stages.
-            for key in ("transcribe", "plan", "video"):
+            for key in ("transcribe", "plan", "storyboard", "images", "motion", "clips", "video"):
                 project["done"].pop(key, None)
             project["scenes"] = []
+            project["relink_unassigned_images"] = False
+            project["images_verified"] = False
         try:
             duration = media_duration(path)
         except Exception as exc:
@@ -4633,6 +4736,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def team_context_file():
         """The shared Context sidecar this story uses (next to the attachments, or found by story name)."""
         project = state["project"]
+        if video_mode:
+            selected = current_team_context()
+            return Path(selected["path"]) if selected else None
         if project.get("context_file") and os.path.isfile(project["context_file"]):
             return Path(project["context_file"])
         import snapgen_shared_context
@@ -4689,7 +4795,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             import snapgen_shared_context
             # "ทำใหม่ตั้งแต่วิเคราะห์บท" asks GPT again in เล่าภาพ; ออโต้ always takes Prompt-Ref's Context.
             if video_mode:
-                shared = context_beside_attachments() or snapgen_shared_context.find(project["script"])
+                shared = current_team_context()
             elif not project.pop("force_new_context", False):
                 shared = snapgen_shared_context.find(project["script"])
         except Exception:
@@ -5078,6 +5184,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def stage_plan():
         project, folder = state["project"], Path(state["folder"])
         check_script_matches_audio()
+        project["relink_unassigned_images"] = False
         ensure_story_in_history()
         segments = json.loads((folder / "transcript.json").read_text(encoding="utf-8"))
         segments, repaired = repair_transcript(segments, story_script())
@@ -7296,6 +7403,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not project.get("audio"):
             messagebox.showinfo("เล่าภาพ", "เลือกไฟล์เสียงบรรยายก่อน", parent=page)
             return
+        if video_mode:
+            try:
+                sync_auto_context()
+            except (RuntimeError, OSError, ValueError) as exc:
+                messagebox.showerror("Context ของ Auto", str(exc), parent=page)
+                return
         if only is None and not project.get("style_chosen") and not any(
                 s.get("image") for s in project.get("scenes") or []):
             # Before the style shapes the characters and pictures, ask once (people forget to switch it).

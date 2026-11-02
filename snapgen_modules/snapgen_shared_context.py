@@ -100,15 +100,17 @@ def load(story_path, suffix=SUFFIX) -> dict | None:
     return payload
 
 
-def find(story_path, suffix=SUFFIX) -> dict | None:
+def find(story_path, suffix=SUFFIX, *, story_text=None) -> dict | None:
     """The team Context for this story even when the story file was opened from another copy.
 
     Next to the file and a Context with the same story name in the usual places
-    (Downloads, Desktop, Documents, OneDrive, shared drives D-H). The oldest one wins: pictures
-    were made with it, and a later re-analysis must not rename the characters."""
+    (Downloads, Desktop, Documents, OneDrive, shared drives D-H). The selected story's own
+    sidecar wins; fallback copies use the latest revision, never the oldest cached Context."""
     if not story_path:
         return None
     own = load(story_path, suffix)
+    if own:
+        return own if story_text is None or matches_story(own, story_text) else None
     name = Path(str(story_path)).stem + suffix
     home = Path.home()
     roots = [home / "Downloads", home / "Desktop", home / "Documents", home / "OneDrive"]
@@ -122,14 +124,14 @@ def find(story_path, suffix=SUFFIX) -> dict | None:
                 candidates += [p for p in root.glob(depth + name) if p.is_file()]
             except OSError:
                 continue
-    payloads = [own] if own else []
+    payloads = []
     for path in dict.fromkeys(candidates):
         payload = load(path.with_name(path.name[: -len(suffix)] + ".docx"), suffix)
-        if payload:
+        if payload and (story_text is None or matches_story(payload, story_text)):
             payloads.append(payload)
     if not payloads:
         return None
-    return min(payloads, key=lambda p: str(p.get("saved_at") or "9999"))
+    return max(payloads, key=lambda p: str(p.get("saved_at") or ""))
 
 
 def matches_story(payload, story_text) -> bool:
