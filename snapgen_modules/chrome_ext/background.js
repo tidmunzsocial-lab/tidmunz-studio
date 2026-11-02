@@ -348,13 +348,19 @@ async function runJob(job) {
       } catch (e) {}
     }
   }
-  if (!started && job.conversation_id && Array.isArray(known)) {
-    for (let i = 0; i < 10 && !started; i++) {
+  if ((!started || started.error && started.send_state === "unknown") &&
+      job.conversation_id && Array.isArray(known)) {
+    for (let i = 0; i < 10 && (!started || started.send_state === "unknown"); i++) {
       if (cancelled) return {error: "ChatGPT operation cancelled"};
       await sleep(1500);
       try {
         const now = await inPage(tabId, pageNodes, [job.conversation_id, job.type]);
-        if (Array.isArray(now) && now.length > known.length) started = {ok: true, before: known, oldPointers: []};
+        if (Array.isArray(now) && now.length > known.length) {
+          // The page may accept the prompt but fail to expose its new message ID/text to pageSend.
+          // Conversation growth confirms this ambiguous send; continue polling without resubmitting.
+          started = {ok: true, before: known, oldPointers: [], send_state: "sent"};
+          break;
+        }
       } catch (e) {}
     }
   }

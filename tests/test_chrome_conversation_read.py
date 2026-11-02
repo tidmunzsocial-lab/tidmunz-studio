@@ -303,6 +303,35 @@ runJob({id:'job',type:'chat',conversation_id:'existing',prompt:'plan'}).then(res
     assert "not confirmed" in data["result"]["error"]
 
 
+def test_run_job_recovers_unknown_send_when_existing_chat_gains_messages():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    run = source[source.index("async function runJob("):source.index("// ── functions below")]
+    harness = r'''
+let sends=0, polls=0, reads=0;
+const JOB_LIMIT_MS=720000, sleep=async()=>{};
+const workerTab=async()=>7, openPage=async id=>id;
+global.chrome={tabs:{get:async()=>({status:'complete'})}};
+function pageNodes(){} function pageSend(){} function pagePoll(){}
+async function inPage(_id,fn){
+ if(fn.name==='pageNodes')return ++reads===1?['old-user','old-assistant']:['old-user','old-assistant','new-user'];
+ if(fn.name==='pageSend'){sends++;return {error:'prompt was not confirmed',send_state:'unknown'};}
+ if(fn.name==='pagePoll'){polls++;return {done:true,text:'recovered reply',conversation_id:'existing'};}
+}
+const relay=async()=>({active:true});
+runJob({id:'job',type:'chat',conversation_id:'existing',prompt:'plan'}).then(result=>
+ console.log(JSON.stringify({result,sends,polls,reads})))
+ .catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", run + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["sends"] == data["polls"] == 1
+    assert data["reads"] == 2
+    assert data["result"]["text"] == "recovered reply"
+
+
 def test_text_reply_requires_new_id_and_stable_json_without_api_polling():
     node = shutil.which("node")
     if not node:
