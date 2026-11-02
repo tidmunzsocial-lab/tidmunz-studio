@@ -5291,7 +5291,21 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 def request_plan():
                     set_progress("plan", planning_fraction,
                                  f"GPT วางแผนฉาก · คำขอที่ {planning_requests} · บันทึกแล้ว {len(scenes_so_far)} ฉาก")
-                    return parse_json_reply(chat(prompt))
+                    try:
+                        return parse_json_reply(chat(prompt))
+                    except RuntimeError as exc:
+                        if "ไม่ได้ตอบเป็น JSON" not in str(exc):
+                            raise
+                    check_stop()
+                    set_progress("plan", planning_fraction,
+                                 f"GPT จัดคำตอบเป็น JSON · คำขอที่ {planning_requests} · แผนที่บันทึกแล้ว {len(scenes_so_far)} ฉาก")
+                    log("GPT ตอบไม่เป็น JSON — ขอให้จัดคำตอบล่าสุดเป็น JSON ตามคำสั่งเดิมอัตโนมัติ")
+                    repaired = chat(
+                        "คำตอบก่อนหน้าของคุณสำหรับคำขอวางแผนล่าสุดยังไม่ใช่ JSON ที่ถูกต้อง "
+                        "โปรดดูคำสั่งและคำตอบล่าสุดในแชตนี้ แล้วแก้เฉพาะรูปแบบคำตอบเดิมให้เป็น JSON object "
+                        "ตาม schema และข้อกำหนดเดิมให้ครบ ห้ามตัดหรือแต่งเนื้อหาใหม่ "
+                        "ส่ง JSON อย่างเดียว ไม่ใส่ Markdown หรือคำอธิบาย")
+                    return parse_json_reply(repaired)
                 return with_retries("วางแผนคลิป", request_plan)
 
             def progress(done, total, start):
