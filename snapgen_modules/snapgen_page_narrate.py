@@ -5256,6 +5256,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         check_script_matches_audio()
         project["relink_unassigned_images"] = False
         ensure_story_in_history()
+        set_progress("plan", 0.0, "GPT รับบทและ Context แล้ว — เตรียมวางแผนฉาก")
         segments = json.loads((folder / "transcript.json").read_text(encoding="utf-8"))
         segments, repaired = repair_transcript(segments, story_script())
         if repaired:
@@ -5281,12 +5282,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         era = (context.get("story") or {}).get("era") or ""
         if video_mode:
             era += story_time_note()  # day / night of this part, the same on every PC of the team
+            planning_requests = 0
+            planning_fraction = 0.0
             def ask(prompt):
+                nonlocal planning_requests
                 check_stop()
-                return with_retries("วางแผนคลิป", lambda: parse_json_reply(chat(prompt)))
+                planning_requests += 1
+                def request_plan():
+                    set_progress("plan", planning_fraction,
+                                 f"GPT วางแผนฉาก · คำขอที่ {planning_requests} · บันทึกแล้ว {len(scenes_so_far)} ฉาก")
+                    return parse_json_reply(chat(prompt))
+                return with_retries("วางแผนคลิป", request_plan)
 
             def progress(done, total, start):
-                set_progress("plan", done / total, f"วางแผนคลิป {done}/{total} ({fmt_time(start)})")
+                nonlocal planning_fraction
+                planning_fraction = done / total
+                set_progress("plan", planning_fraction, f"วางแผนคลิป {done}/{total} ({fmt_time(start)})")
                 project["scenes"] = scenes_so_far
                 save_project()
                 ui(refresh_table)
