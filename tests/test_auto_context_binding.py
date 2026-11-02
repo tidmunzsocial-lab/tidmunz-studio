@@ -18,6 +18,15 @@ def payload(folder, name, text, title, characters=None, saved="2026-11-02 12:00:
     return source, shared.load(source)
 
 
+def test_identity_repair_offers_project_characters_when_shot_has_only_a_location():
+    context = {"characters": [{"name": "พระราชา"}, {"name": "มเหสี"}]}
+    contexts, names, matched = N.identity_repair_context_options(
+        {"characters": ["ท้องพระโรง"]}, context)
+    assert names == ["พระราชา", "มเหสี"] and not matched
+    assert contexts["พระราชา"] == {"name": "พระราชา"}
+    assert N.identity_repair_context_options({"characters": ["มเหสี"]}, context)[1:] == (["มเหสี"], True)
+
+
 def test_selected_story_sidecar_wins_without_searching_for_old_copies(tmp_path, monkeypatch):
     story, expected = payload(tmp_path, "selected", "นาคาพบชาวบ้าน", "นาคา")
     monkeypatch.setattr(shared.Path, "home", lambda: pytest.fail("must not replace the selected sidecar with a global copy"))

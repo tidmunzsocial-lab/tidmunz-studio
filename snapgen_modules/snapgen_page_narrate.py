@@ -1314,6 +1314,14 @@ def bind_auto_context(project, payload, text, references=None):
     return True
 
 
+def identity_repair_context_options(scene, context):
+    """Prefer characters named for this shot; allow a manual Context choice when none match."""
+    characters = {str(c.get("name") or ""): c for c in (context or {}).get("characters", [])
+                   if isinstance(c, dict) and c.get("name")}
+    matched = [name for name in (scene.get("characters") or []) if name in characters]
+    return characters, matched or list(characters), bool(matched)
+
+
 def match_reference_files(text: str, folder) -> list:
     """Fallback matcher: images in ``folder`` whose file name appears in ``text``."""
     if not folder or not os.path.isdir(str(folder)):
@@ -7723,24 +7731,34 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not project or state["busy"] or len(selected) != 1:
             messagebox.showinfo("แก้ให้ตรงเรฟ", "หยุดงานก่อน แล้วเลือกช็อตเดียวในตาราง", parent=page)
             return
+        if video_mode:
+            try:
+                sync_auto_context()
+            except (RuntimeError, OSError, ValueError) as exc:
+                messagebox.showerror("Context ของ Auto", str(exc), parent=page)
+                return
         index = int(selected[0])
         scene = project["scenes"][index]
         if not Path(scene.get("image") or "").is_file():
             messagebox.showinfo("แก้ให้ตรงเรฟ", "ช็อตนี้ยังไม่มีรูปให้แก้", parent=page)
             return
-        contexts = {c["name"]: c for c in (project.get("context") or {}).get("characters", []) if c.get("name")}
-        names = [name for name in scene.get("characters") or [] if name in contexts]
+        contexts, names, scene_has_character = identity_repair_context_options(scene, project.get("context"))
         if not names:
-            messagebox.showinfo("แก้ให้ตรงเรฟ", "ช็อตนี้ไม่มีตัวละครที่ตรงกับ Context ของโปรเจกต์ — ตรวจรายชื่อตัวละครก่อน", parent=page)
+            messagebox.showinfo("แก้ให้ตรงเรฟ", "Context ของโปรเจกต์ยังไม่มีรายชื่อตัวละคร", parent=page)
             return
         pending = (project.get("identity_repairs_pending") or {}).get(str(index)) or scene.get("identity_repair") or {}
         win = tk.Toplevel(page)
         win.title(f"แก้ให้ตรงเรฟ — ช็อต {index + 1}")
         win.geometry("720x470")
         win.transient(root)
-        character = tk.StringVar(value=pending.get("character") if pending.get("character") in names else names[0])
+        default_character = pending.get("character") if pending.get("character") in names else (
+            names[0] if scene_has_character else "เลือกตัวละคร")
+        character = tk.StringVar(value=default_character)
         reference = tk.StringVar(value="")
-        tk.Label(win, text="เลือกตัวละครและเรฟที่ถูกต้อง · คงฉากและตัวละครอื่นตามรูปเดิม", anchor="w").pack(fill="x", padx=12, pady=8)
+        hint = "เลือกตัวละครและเรฟที่ถูกต้อง · คงฉากและตัวละครอื่นตามรูปเดิม"
+        if not scene_has_character:
+            hint = "ช็อตนี้ไม่มีชื่อตัวละครตรงกับ Context — เลือกตัวละครจาก Context ด้วยตนเอง"
+        tk.Label(win, text=hint, anchor="w").pack(fill="x", padx=12, pady=8)
         menu = ttk.Combobox(win, textvariable=character, values=names, state="readonly")
         menu.pack(fill="x", padx=12)
         ref_row = tk.Frame(win); ref_row.pack(fill="x", padx=12, pady=8)
@@ -7757,6 +7775,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         context_box = tk.Text(win, height=9, wrap="word", font=("TkDefaultFont", 9))
         context_box.pack(fill="both", expand=True, padx=12, pady=4)
         def character_changed(_event=None):
+            if character.get() not in contexts:
+                context_box.config(state="normal"); context_box.delete("1.0", tk.END)
+                context_box.config(state="disabled")
+                reference.set("")
+                return
             context_box.config(state="normal"); context_box.delete("1.0", tk.END)
             context_box.insert("1.0", character_description(contexts[character.get()])
                                or json.dumps(contexts[character.get()], ensure_ascii=False, indent=2))
@@ -7770,6 +7793,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         notes = tk.Entry(win); notes.pack(fill="x", padx=12, pady=4)
         notes.insert(0, pending.get("notes") or "")
         def accept():
+            if character.get() not in contexts:
+                messagebox.showerror("แก้ให้ตรงเรฟ", "เลือกตัวละครจาก Context ของโปรเจกต์ก่อน", parent=win)
+                return
             path = Path(reference.get().strip())
             if not path.is_file() or path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
                 messagebox.showerror("แก้ให้ตรงเรฟ", "เลือกไฟล์รูปเรฟของตัวละครก่อน", parent=win)
