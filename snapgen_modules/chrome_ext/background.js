@@ -137,8 +137,10 @@ async function loop() {
         }
       }
       try { await relay("/result", {id: job.id, ...result}); } catch (e) {}
-      // Leave the (possibly very long) chat so the tab does not keep it in memory between jobs.
-      try { const saved = (await chrome.storage.local.get("workerTabId")).workerTabId; if (saved) await chrome.tabs.update(saved, {url: "https://chatgpt.com/"}); } catch (e) {}
+      // Keep a failed page and its draft available for inspection instead of erasing the evidence.
+      if (!result || !result.error) {
+        try { const saved = (await chrome.storage.local.get("workerTabId")).workerTabId; if (saved) await chrome.tabs.update(saved, {url: "https://chatgpt.com/"}); } catch (e) {}
+      }
       if (job.type === "image") account.checked = 0;  // read the quota again after a picture
       badge("ON", "#10A37F");
     }
@@ -336,15 +338,16 @@ async function runJob(job) {
     started = null;  // the page moved to the new chat right after sending: its answer was lost, not the job
   }
   if (cancelled) return {error: "ChatGPT operation cancelled"};
-  if (!started && !job.conversation_id) {
+  if ((!started || started.error && started.send_state === "unknown") && !job.conversation_id) {
     // A long message (a whole story) is sent, then ChatGPT navigates to /c/<id> before the result comes back.
     // If a new chat opened, the message went out: keep waiting for the reply in that chat.
-    for (let i = 0; i < 10 && !started; i++) {
+    for (let i = 0; i < 10 && (!started || started.send_state === "unknown"); i++) {
       if (cancelled) return {error: "ChatGPT operation cancelled"};
       await sleep(1500);
       try {
         const tab = await chrome.tabs.get(tabId);
-        if (/\/c\/[0-9a-f-]{20,}/.test(tab.url || "")) started = {ok: true, before: [], oldPointers: []};
+        const created = (tab.url || "").match(/^https:\/\/chatgpt\.com\/c\/([0-9a-f-]{20,})(?:[/?#]|$)/);
+        if (created) started = {ok: true, before: [], oldPointers: [], conversation_id: created[1], send_state: "sent"};
       } catch (e) {}
     }
   }
@@ -368,7 +371,7 @@ async function runJob(job) {
   await report("waiting");
   // The job's state lives here, not in the page: a reloaded tab keeps going from the conversation itself.
   const state = {before: started.before, oldPointers: started.oldPointers, sentAt: Date.now(),
-                 cid: job.conversation_id || null, idle: 0,
+                 cid: started.conversation_id || job.conversation_id || null, idle: 0,
                  dom_before: started.dom_before || [], dom_mode: Boolean(started.dom_mode),
                  user_message_id: started.user_message_id || null};
   let deadline = Date.now() + JOB_LIMIT_MS;
@@ -510,7 +513,7 @@ async function pageSend(job) {
   }
   editor.focus();
   document.execCommand("selectAll", false, null);
-  document.execCommand("insertText", false, job.prompt);
+  const insertAccepted = document.execCommand("insertText", false, job.prompt);
   // Wait until every picture sits in the composer and has finished uploading. The send button is
   // enabled by the text alone, so pressing it early sent the words without the picture (an image
   // check then answered "all fine" about a sheet it never saw).
@@ -530,6 +533,7 @@ async function pageSend(job) {
     return {error: `ChatGPT did not take the attached pictures (${attached}/${images.length} attached) — not sent`};
   if (!send || send.disabled) return {error: "ChatGPT did not accept the attachments / prompt in time"};
   send.click();
+  let sendClicks = 1;
   let userMessageId = null;
   if (job.type === "chat") {
     const previous = new Set([...before, ...domBefore]);
@@ -569,12 +573,34 @@ async function pageSend(job) {
       if (retryEditor && retryEditor.isConnected && retryForm && retryForm.isConnected && draft === expected &&
           retrySend && !retrySend.disabled && !busy && !uploading && attached >= images.length) {
         retrySend.click();
+        sendClicks++;
         await waitForUserMessage();
       }
     }
     if (!userMessageId) {
-      return {error: "ChatGPT page did not answer: the prompt was not confirmed in the conversation; no reply wait started",
-              send_state: "unknown"};
+      const currentEditor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
+        document.querySelector('form #prompt-textarea[contenteditable="true"]');
+      const currentForm = currentEditor && currentEditor.closest("form");
+      const currentSend = currentForm && currentForm.querySelector('button[type="submit"]');
+      const draft = String(currentEditor && (currentEditor.innerText || currentEditor.textContent || "") || "");
+      const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
+      const freshUsers = nodes.filter(n => n.getAttribute("data-message-author-role") === "user" &&
+        !previous.has(n.getAttribute("data-message-id")));
+      const deliveryDebug = {
+                prompt_chars: String(job.prompt || "").length, draft_chars: draft.length,
+                draft_matches: normalized(draft) === expected, insert_accepted: insertAccepted === true,
+                send_clicks: sendClicks, document_focused: typeof document.hasFocus === "function" && document.hasFocus(),
+                editor_focused: document.activeElement === currentEditor, page_visible: document.visibilityState === "visible",
+                existing_chat: Boolean(job.conversation_id), chat_route: /^\/c\//.test(location.pathname),
+                before_nodes: domBefore.length, current_nodes: nodes.length, new_user_nodes: freshUsers.length,
+                role_only_users: document.querySelectorAll('[data-message-author-role="user"]').length,
+                text_content_matches: freshUsers.some(n => normalized(n.textContent || "").includes(expected)),
+                send_button_found: Boolean(currentSend), send_disabled: Boolean(currentSend && currentSend.disabled),
+                send_is_expected: Boolean(currentSend && (currentSend.id === "composer-submit-button" ||
+                  typeof currentSend.getAttribute === "function" && currentSend.getAttribute("data-testid") === "send-button")),
+              };
+      return {error: "ChatGPT page did not answer: the prompt was not confirmed in the conversation; no reply wait started; delivery=" + JSON.stringify(deliveryDebug),
+              send_state: "unknown", delivery_debug: deliveryDebug};
     }
   }
   return {ok: true, before, oldPointers, dom_before: domBefore,

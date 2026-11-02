@@ -54,6 +54,23 @@ accountJSON('https://example.invalid').then(()=>{throw Error('should abort');})
     assert data == {"message": "aborted", "cleared": True}
 
 
+@pytest.mark.parametrize("failed,expected_resets", [(True, 0), (False, 1)])
+def test_failed_job_keeps_its_page_and_draft_for_inspection(failed, expected_resets):
+    code = SOURCE[SOURCE.index("let account ="):SOURCE.index("// ── the ChatGPT tab")]
+    data = run_node(code + r'''
+let running=false, taken=0, resets=0;
+const sleep=async()=>{}, badge=()=>{}, isWorkerTab=()=>false, workerTab=async()=>7;
+global.setTimeout=()=>1; global.clearTimeout=()=>{};
+global.fetch=()=>new Promise(()=>{});
+global.chrome={storage:{local:{get:async()=>({workerTabId:7})}},tabs:{query:async()=>[],update:async()=>{resets++;}},runtime:{
+ getManifest:()=>({version:'1.0.27'}),reload:()=>{}}};
+const relay=async path=>path.startsWith('/next')?(++taken===1?{id:'job',type:'chat'}:{reload:true}):{ok:true};
+const runJob=async()=>FAILED?{error:'unconfirmed'}:{text:'OK'};
+loop().then(()=>console.log(JSON.stringify({resets}))).catch(e=>{console.error(e);process.exitCode=1});
+'''.replace("FAILED", str(failed).lower()))
+    assert data["resets"] == expected_resets
+
+
 def test_cancel_aborts_the_dedicated_in_page_wait_without_replaying_send():
     code = SOURCE[SOURCE.index("async function runJob("):SOURCE.index("// ── functions below")]
     data = run_node(code + r'''

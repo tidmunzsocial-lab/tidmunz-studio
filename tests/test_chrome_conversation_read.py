@@ -239,6 +239,11 @@ pageSend({type:'chat',conversation_id:'existing',prompt:'new plan prompt',images
     else:
         assert "no reply wait started" in data["result"]["error"]
         assert data["result"]["send_state"] == "unknown"
+        diagnostics = data["result"]["delivery_debug"]
+        assert diagnostics["send_clicks"] == 1
+        assert diagnostics["draft_chars"] == diagnostics["new_user_nodes"] == 0
+        assert all(type(value) in (int, bool) for value in diagnostics.values())
+        assert "new plan prompt" not in data["result"]["error"]
 
 
 def test_text_send_confirmation_ignores_rendered_whitespace_and_invisible_unicode():
@@ -361,6 +366,41 @@ runJob({id:'job',type:'chat',conversation_id:'existing',prompt:'plan'}).then(res
     assert data["sends"] == data["polls"] == 1
     assert data["reads"] == 2
     assert data["result"]["text"] == "recovered reply"
+
+
+@pytest.mark.parametrize("location,expected_polls", [
+    ("https://chatgpt.com/c/12345678-1234-1234-1234-123456789abc", 1),
+    ("https://chatgpt.com/", 0),
+    ("https://example.invalid/c/12345678-1234-1234-1234-123456789abc", 0),
+])
+def test_unknown_new_chat_recovers_created_conversation_without_resending(location, expected_polls):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    run = source[source.index("async function runJob("):source.index("// ── functions below")]
+    harness = r'''
+let sends=0, polls=0, polledCid=null;
+const JOB_LIMIT_MS=720000, sleep=async()=>{}, workerTab=async()=>7, openPage=async id=>id;
+global.chrome={tabs:{get:async()=>({status:'complete',url:LOCATION})}};
+function pageNodes(){} function pageSend(){} function pagePoll(){}
+async function inPage(_id,fn,args){
+ if(fn.name==='pageSend'){sends++;return {error:'prompt was not confirmed',send_state:'unknown'};}
+ if(fn.name==='pagePoll'){polls++;polledCid=args[1].cid;return {done:true,text:'new reply'};}
+ throw Error('unexpected read');
+}
+const relay=async()=>({active:true});
+runJob({id:'job',type:'chat',prompt:'whole story',conversation_id:null}).then(result=>
+ console.log(JSON.stringify({result,sends,polls,polledCid}))).catch(e=>{console.error(e);process.exitCode=1});
+'''.replace("LOCATION", json.dumps(location))
+    result = subprocess.run([node, "-e", run + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["sends"] == 1 and data["polls"] == expected_polls
+    if expected_polls:
+        assert data["polledCid"] == "12345678-1234-1234-1234-123456789abc"
+        assert data["result"]["text"] == "new reply"
+    else:
+        assert data["result"]["send_state"] == "unknown"
 
 
 def test_text_reply_requires_new_id_and_stable_json_without_api_polling():
