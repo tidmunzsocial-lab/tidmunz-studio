@@ -224,47 +224,53 @@ class _Relay:
                 "images_full": self.images_full}
 
 
+_usage_lock = threading.RLock()
+
+
 def _usage_file() -> Path:
     return data_dir() / "chrome_picture_usage.json"
 
 
 def _read_usage() -> dict:
-    try:
-        return json.loads(_usage_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    with _usage_lock:
+        try:
+            return json.loads(_usage_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
 
 
 def count_pictures(email: str, reset: str, made: int) -> None:
     """Remember when this PC made pictures for an account (ChatGPT's own number lags behind)."""
-    if not email:
-        return
-    usage = _read_usage()
-    now = time.time()
-    stamps = [t for t in (usage.get(email) or {}).get("made", []) if now - t < 86400]
-    stamps += [now] * int(made)
-    usage[email] = {"made": stamps, "limit": (usage.get(email) or {}).get("limit")}
-    try:
-        _usage_file().write_text(json.dumps(usage), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def estimate_left(email: str, reset: str, reported: str) -> str:
-    """Pictures left: ChatGPT's number, or less when it has not counted the last 24 hours' pictures yet."""
-    if not reported or not str(reported).lstrip("-").isdigit():
-        return str(reported or "")
-    entry = _read_usage().get(email) or {}
-    made_today = sum(1 for t in entry.get("made", []) if time.time() - t < 86400)
-    limit = max(int(reported), int(entry.get("limit") or 0))  # the daily limit = highest number ChatGPT shows
-    if limit != entry.get("limit"):
+    with _usage_lock:
+        if not email:
+            return
         usage = _read_usage()
-        usage[email] = {"made": entry.get("made", []), "limit": limit}
+        now = time.time()
+        stamps = [t for t in (usage.get(email) or {}).get("made", []) if now - t < 86400]
+        stamps += [now] * int(made)
+        usage[email] = {"made": stamps, "limit": (usage.get(email) or {}).get("limit")}
         try:
             _usage_file().write_text(json.dumps(usage), encoding="utf-8")
         except OSError:
             pass
-    return str(max(0, min(int(reported), limit - made_today)))
+
+
+def estimate_left(email: str, reset: str, reported: str) -> str:
+    """Pictures left: ChatGPT's number, or less when it has not counted the last 24 hours' pictures yet."""
+    with _usage_lock:
+        if not reported or not str(reported).lstrip("-").isdigit():
+            return str(reported or "")
+        entry = _read_usage().get(email) or {}
+        made_today = sum(1 for t in entry.get("made", []) if time.time() - t < 86400)
+        limit = max(int(reported), int(entry.get("limit") or 0))  # the daily limit = highest number ChatGPT shows
+        if limit != entry.get("limit"):
+            usage = _read_usage()
+            usage[email] = {"made": entry.get("made", []), "limit": limit}
+            try:
+                _usage_file().write_text(json.dumps(usage), encoding="utf-8")
+            except OSError:
+                pass
+        return str(max(0, min(int(reported), limit - made_today)))
 
 
 RELAY = _Relay()

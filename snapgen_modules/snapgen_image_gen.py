@@ -41,6 +41,7 @@ def _is_conversation_lost(text):
 
 # ── State ─────────────────────────────────────────────────────────
 _queue_lock = threading.Lock()
+_image_request_slots = threading.BoundedSemaphore(2)
 _active_count = 0
 _active_lock = threading.Lock()
 _log_fn = None  # callable(msg: str)
@@ -1267,7 +1268,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                    save_sidecar=True, log_fn=None, use_story_history=False,
                    use_ref_story_history=False, use_story_face_history=False,
                    use_prop_history=False, conversation_state=None,
-                   conversation_save_fn=None, temporary_chat=False):
+                   conversation_save_fn=None, temporary_chat=False, parallel_images=False):
     """Generate one image via chatgpt-api bridge.
 
     Returns local path to downloaded image, or raises RuntimeError.
@@ -1285,6 +1286,8 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
             Keep False for Ref, Prop, Story Face, video slots, and other pages.
     """
     log = log_fn or _log
+    if parallel_images and (use_story_history or use_ref_story_history or use_story_face_history or use_prop_history):
+        raise ValueError("Parallel images require an isolated conversation_state")
 
     # Register a changed storyboard only in the existing Image AI history.
     if use_story_history:
@@ -1443,7 +1446,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
         attempt += 1
         if retry_fresh_chat:
             retry_fresh_chat = False
-        elif attempt > RETRY_COUNT + (1 if lost_history_reset else 0):
+        elif attempt > (0 if parallel_images else RETRY_COUNT) + (1 if lost_history_reset else 0):
             break
         elif attempt > 0:
             log(f"[image-gen] retry {attempt}/{RETRY_COUNT} in {RETRY_DELAY}s...")
@@ -1453,7 +1456,8 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
             # Hold the lock for the complete HTTP operation.  Previously it
             # protected only Request construction, so another page could send
             # an image job while this request was still running.
-            with _queue_lock:
+            from contextlib import nullcontext
+            with _image_request_slots, (nullcontext() if parallel_images else _queue_lock):
                 # Read the newest cursor only when this request reaches the
                 # queue. Jobs started close together must continue from the
                 # immediately previous result, not branch from a stale parent.
@@ -1492,7 +1496,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                     payload.pop("metadata", None)
                     payload.pop("chatgpt_account", None)
                 request_started = time.time()
-                artifact_ids_before = _artifact_snapshot()
+                artifact_ids_before = set() if parallel_images else _artifact_snapshot()
                 data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 req = urllib.request.Request(
                     f"{BRIDGE_URL}{endpoint}",
@@ -1631,7 +1635,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
         except Exception as e:
             last_error = RuntimeError(f"Unexpected: {e}")
 
-        recovered = _recover_new_artifact(
+        recovered = None if parallel_images else _recover_new_artifact(
             artifact_ids_before, request_started, out_dir, name_hint, prompt, log,
         )
         if recovered:

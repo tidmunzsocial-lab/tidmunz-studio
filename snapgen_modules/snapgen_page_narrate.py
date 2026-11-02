@@ -135,19 +135,19 @@ class ImageProviderError(RuntimeError):
     """Stop paid image requests instead of automatically submitting another job."""
 
 
-def _run_image_jobs(jobs, work, completed, check_stop):
-    """Keep at most five requests in flight; drain submitted jobs before raising."""
+def _run_image_jobs(jobs, work, completed, check_stop, max_workers=5):
+    """Bound in-flight requests; drain submitted jobs before raising."""
     remaining = iter(jobs)
     pending = {}
     failure = None
-    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="snapgen-scene") as pool:
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="snapgen-scene") as pool:
         while True:
             if failure is None:
                 try:
                     check_stop()
                 except Exception as exc:
                     failure = exc
-            while failure is None and len(pending) < 5:
+            while failure is None and len(pending) < max_workers:
                 try:
                     check_stop()
                 except Exception as exc:
@@ -4503,7 +4503,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return image
 
     def make_image(prompt, refs, out_dir, name, aspect, board=None, identity=False, api_context=None,
-                   grid_template=False, identity_repair=None, fresh_chat=False):
+                   grid_template=False, identity_repair=None, fresh_chat=False, parallel_images=False):
         imgmod = runtime.get("_imgmod") or g.get("_imgmod")
         project = state["project"]
         provider = "snapgen" if api_context is not None else image_provider_for(state.get("active_image_stage", "images"))
@@ -4622,11 +4622,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             image = imgmod.generate_image(
                 prompt, output_dir=str(out_dir), name_hint=name, is_edit=bool(encoded),
                 ref_images=encoded or None, aspect_ratio=aspect, save_sidecar=False,
-                conversation_state=chat_state, conversation_save_fn=save_project,
+                conversation_state=chat_state, conversation_save_fn=None if parallel_images else save_project,
                 temporary_chat=bool(temporary or fresh_chat),
+                **({"parallel_images": True} if parallel_images else {}),
             )
             chat_state["count"] = int(chat_state.get("count") or 0) + 1
-            save_project()
+            if not parallel_images:
+                save_project()
             return image
 
         def maybe_qwen(image):
@@ -4658,6 +4660,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if provider in ("snapgen", "qwen"):
                 labels = VIDEO_AUTO_IMAGE_PROVIDER_LABELS if video_mode else IMAGE_PROVIDER_LABELS
                 raise ImageProviderError(f"{labels.get(provider, provider)} ส่งภาพซ้ำ — เก็บภาพไว้แล้ว ตรวจผลก่อนสั่งสร้างใหม่")
+            if parallel_images:
+                raise ImageProviderError("GPT ส่งภาพซ้ำ — เก็บไฟล์ไว้ ตรวจผลก่อนสร้างใหม่")
             # An old picture came back (GPT drew nothing new): ask once more in another fresh chat.
             log(f"{name}: ได้รูปเก่าซ้ำกลับมา — สร้างใหม่ในแชตใหม่")
             if Path(out).resolve() not in protected_images:
@@ -5768,6 +5772,49 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if measured is not None:
                 log(f"คิว API 5 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
 
+    def run_gpt_scenes(todo, scenes, images_dir):
+        """Two independent chats; stop feeding on error and save all submitted results."""
+        project = state["project"]
+        jobs = []
+        for i in dict.fromkeys(todo):
+            check_stop()
+            scene = scenes[i]
+            paths = attachments_for(scene, limit=None)
+            board = scene.get("board") if os.path.isfile(scene.get("board") or "") else None
+            repair = scene.get("identity_repair")
+            face = (repair or {}).get("face_reference")
+            if len(paths) + bool(board) + bool(face and Path(face).is_file()) > 6:
+                raise ImageProviderError(f"ช็อต {i + 1}: เรฟรวมเกิน 6 รูป — หยุดก่อนส่งเพื่อไม่ให้เรฟตกหล่น")
+            jobs.append((i, scene_prompt(scene), paths, board, repair))
+        finished = 0
+        log(f"GPT: สร้างรูปพร้อมกันสูงสุด 2 งาน · แยกแชตและเรฟแต่ละช็อต · รอ {len(jobs)} รูป")
+
+        def work(job):
+            check_stop()
+            i, prompt, paths, board, repair = job
+            return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}", project["aspect"],
+                              board=board, identity_repair=repair, fresh_chat=True, parallel_images=True)
+
+        def completed(job, image, error):
+            nonlocal finished
+            i = job[0]
+            with state["lock"]:
+                if error is None:
+                    scenes[i]["image"] = image
+                    scenes[i].pop("error", None)
+                    scenes[i].pop("bad", None)
+                else:
+                    scenes[i]["error"] = str(error)[:600]
+                save_project()
+            finished += 1
+            set_progress("images", finished / max(1, len(jobs)),
+                         f"GPT สูงสุด 2 งาน · เสร็จ {finished}/{len(jobs)} · ช็อต {i + 1}")
+            ui(refresh_table)
+            if error is None:
+                ui(follow_shot, i)
+
+        _run_image_jobs(jobs, work, completed, check_stop, max_workers=2)
+
     def stage_images(indices=None, selected_redraw=False):
         project = state["project"]
         check_script_matches_audio()
@@ -5803,6 +5850,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             log(f"✓ รูปครบ {len(scenes)} ฉาก")
             if indices is None:
                 verify_images()
+            return
+        if video_mode and image_provider_for("images") == "gpt_web" and not selected_redraw:
+            run_gpt_scenes(todo, scenes, images_dir)
+            log(f"✓ สร้างรูปที่ขอครบ {len(todo)} ฉาก")
             return
         started, failures_in_row = time.time(), 0
         for n, i in enumerate(todo, 1):
