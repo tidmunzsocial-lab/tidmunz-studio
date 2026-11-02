@@ -153,7 +153,7 @@ def test_lost_heartbeat_never_reports_the_submitted_prompt_as_unsent(monkeypatch
 
     def extension():
         job = relay.next_job(1)
-        relay.progress({"id": job["id"]})
+        relay.progress({"id": job["id"], "retry_after": 30})
 
     worker = threading.Thread(target=extension)
     worker.start()

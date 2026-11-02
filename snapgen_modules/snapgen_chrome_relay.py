@@ -93,6 +93,7 @@ class _Relay:
         self.lock = threading.Condition()
         self.pending: list[dict] = []
         self.waiting: dict[str, dict] = {}  # job id -> {"event", "result"}
+        self.cancelled_operations: dict[str, float] = {}
         self.last_seen = 0.0
         self.version = ""
         self.email = ""  # the ChatGPT account the Chrome profile is logged into
@@ -116,7 +117,11 @@ class _Relay:
                     return None
                 self.lock.wait(min(left, 5))
                 self.last_seen = time.time()
-            return self.pending.pop(0)
+            job = self.pending.pop(0)
+            slot = self.waiting.get(job["id"])
+            if slot:
+                slot["phase"] = "received"
+            return job
 
     def finish(self, result: dict) -> None:
         self.last_seen = time.time()
@@ -125,35 +130,62 @@ class _Relay:
         if result.get("error"):  # the whole message, in the program's log (pages may shorten what they show)
             print(f"[Chrome] งาน ChatGPT ไม่สำเร็จ: {str(result['error'])[:600]}", flush=True)
         slot = self.waiting.get(str(result.get("id") or ""))
-        if slot:
+        if slot and not slot.get("cancelled"):
             slot["result"] = result
             slot["event"].set()
 
     # program side
     def progress(self, result: dict) -> bool:
         slot = self.waiting.get(str(result.get("id") or ""))
-        if slot is None:
+        if slot is None or slot.get("cancelled"):
             return False
         self.last_seen = time.time()
         slot["activity_at"] = time.monotonic()
-        slot["rate_limited"] = True  # Only the post-send 429 reader sends heartbeats.
+        if result.get("phase") in ("opening", "sending", "waiting"):
+            slot["phase"] = result["phase"]
+        if "retry_after" in result:
+            slot["rate_limited"] = True
         return True
+
+    def cancel(self, operation_id: str) -> None:
+        """End this caller's HTTP wait and withdraw queued work, including a late-arriving request."""
+        if not operation_id:
+            return
+        with self.lock:
+            now = time.monotonic()
+            self.cancelled_operations = {k: v for k, v in self.cancelled_operations.items() if now - v < 3600}
+            self.cancelled_operations[operation_id] = now
+            self.pending[:] = [job for job in self.pending if job.get("operation_id") != operation_id]
+            for slot in list(self.waiting.values()):
+                if slot.get("operation_id") == operation_id:
+                    slot["cancelled"] = True
+                    slot["result"] = {"error": "ChatGPT operation cancelled"}
+                    slot["event"].set()
 
     def run(self, job: dict) -> dict:
         job = dict(job)
+        def cancelled():
+            return bool(job.get("operation_id") and job["operation_id"] in self.cancelled_operations)
+        if cancelled():
+            return {"error": "ChatGPT operation cancelled"}
         if not self.status()["connected"]:
             # A GPT job but the program's Chrome is closed: open it and wait for the extension.
             self._open_chrome()
             deadline = time.time() + OPEN_WAIT
             while time.time() < deadline and not self.status()["connected"]:
+                if cancelled():
+                    return {"error": "ChatGPT operation cancelled"}
                 time.sleep(1)
             if not self.status()["connected"]:
                 return {"error": "เปิด Chrome ของโปรแกรมให้แล้ว แต่ส่วนขยาย Tidmunz ChatGPT ยังไม่เชื่อมต่อ — "
                                  "ติดตั้งส่วนขยายและล็อกอิน ChatGPT ในหน้าต่าง Chrome นั้น แล้วลองใหม่"}
         job["id"] = uuid.uuid4().hex
-        slot = {"event": threading.Event(), "result": None, "activity_at": time.monotonic()}
-        self.waiting[job["id"]] = slot
+        slot = {"event": threading.Event(), "result": None, "activity_at": time.monotonic(),
+                "operation_id": job.get("operation_id"), "phase": "queued"}
         with self.lock:
+            if job.get("operation_id") in self.cancelled_operations:
+                return {"error": "ChatGPT operation cancelled"}
+            self.waiting[job["id"]] = slot
             self.pending.append(job)
             self.lock.notify_all()
         try:
@@ -183,7 +215,8 @@ class _Relay:
     def status(self) -> dict:
         # While the extension works on a job it does not ask for more, so a job in flight counts as linked.
         linked = time.time() - self.last_seen < CONNECTED_WITHIN or (bool(self.waiting) and self.last_seen > 0)
-        return {"connected": linked, "last_seen": self.last_seen,
+        phases = [slot.get("phase", "queued") for slot in list(self.waiting.values()) if not slot.get("cancelled")]
+        return {"connected": linked, "last_seen": self.last_seen, "active_phase": phases[0] if phases else "",
                 "images_estimate": estimate_left(self.email, self.reset, self.images),
                 "queue": len(self.pending), "busy": len(self.waiting), "extension_version": self.version,
                 "email": self.email, "images_left": self.images, "images_reset": self.reset,
@@ -273,7 +306,10 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._send(400, {"error": {"code": "bad_json", "message": "bad json"}})
             return True
-        code, payload = snapgen_chrome_api.handle(method, "/" + path[len(prefix):], body, RELAY.run, RELAY.status())
+        operation_id = str(self.headers.get("X-Tidmunz-Operation") or "")
+        def run(job):
+            return RELAY.run({**job, "operation_id": operation_id})
+        code, payload = snapgen_chrome_api.handle(method, "/" + path[len(prefix):], body, run, RELAY.status())
         self._send(code, payload)
         return True
 

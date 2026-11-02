@@ -1144,6 +1144,17 @@ class Stopped(Exception):
     pass
 
 
+def stamp_bridge_operation(request):
+    """Associate the local HTTP wait with its cancellable queue owner."""
+    thread = threading.current_thread()
+    cancelled = getattr(thread, "_tidmunz_cancelled", None)
+    if cancelled is not None and cancelled.is_set():
+        raise Stopped()
+    operation_id = getattr(thread, "_tidmunz_operation_id", None)
+    if operation_id:
+        request.add_header("X-Tidmunz-Operation", operation_id)
+
+
 class HistoryLost(RuntimeError):
     """The story's GPT conversation no longer exists; never replaced silently."""
 
@@ -4064,6 +4075,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if waited >= 60 and not told:
                 told = True
                 log(f"⏳ รอคิว GPT นานแล้ว 1 นาที: {owner} ยังใช้อยู่ — รอให้เสร็จ หรือหยุดงานนั้นก่อน")
+        from uuid import uuid4
+        operation_id = uuid4().hex
         result, done, cancelled = {}, threading.Event(), threading.Event()
 
         def check_cancelled():
@@ -4075,11 +4088,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             log(f"⏳ Chrome ยังอ่านแชตเดิมไม่ได้ (429) — ยังไม่ส่งพรอมต์ รอ {int(seconds)} วินาทีแล้วลองต่อ (รอบ {attempt})")
 
         def worker():
+            thread = threading.current_thread()
+            thread._tidmunz_operation_id = operation_id
+            thread._tidmunz_cancelled = cancelled
             try:
                 result["value"] = run_bridge_with_cooldown(send, check_cancelled, cancelled.wait, cooldown)
             except BaseException as exc:  # handed to the waiting thread
                 result["error"] = exc
             finally:
+                del thread._tidmunz_operation_id
+                del thread._tidmunz_cancelled
                 g["_bridge_queue_owner"] = None
                 lock.release()
                 done.set()
@@ -4093,12 +4111,26 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 if left:
                     ui(detail_var.set, f"{base} · ยังไม่ส่งพรอมต์: Chrome อ่านแชตไม่ได้ (429) รออีก {left} วินาที")
                 else:
-                    ui(detail_var.set, f"{base} · รอ {what} ตอบ {fmt_time(waited)} — ทำต่ออัตโนมัติเมื่อได้คำตอบ")
+                    phase = ""
+                    try:
+                        import snapgen_chrome_relay
+                        if snapgen_chrome_relay.RELAY.port:
+                            phase = snapgen_chrome_relay.RELAY.status().get("active_phase") or ""
+                    except Exception:
+                        pass
+                    description = {"queued": "รอส่วนขยายรับงาน — ยังไม่ส่งเข้า GPT",
+                                   "received": "ส่วนขยายรับงานแล้ว",
+                                   "opening": "กำลังเปิดหน้าทำงาน GPT",
+                                   "sending": "กำลังใส่และส่งพรอมต์เข้า GPT",
+                                   "waiting": f"ส่งแล้ว รอ {what} ตอบ"}.get(phase, f"กำลังเชื่อมต่อ {what}")
+                    ui(detail_var.set, f"{base} · {description} {fmt_time(waited)}")
             if waited >= 180 and not warned:
                 warned = True
                 log(f"⏳ {what} ยังไม่ตอบ 3 นาที — ระบบรอคำตอบของงานเดิมและทำต่อให้อัตโนมัติ กด ⏸ หยุด ได้")
             if state["stop"]:
                 cancelled.set()
+                import snapgen_chrome_relay
+                snapgen_chrome_relay.RELAY.cancel(operation_id)
                 raise Stopped()  # the request ends in the background and frees the queue itself
         ui(detail_var.set, base)
         if "error" in result:
@@ -4108,6 +4140,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def open_bridge(request) -> dict:
         """POST to the Bridge; an error says what the Bridge said, not just "HTTP Error 409: Conflict"."""
         try:
+            stamp_bridge_operation(request)
             # The local relay enforces inactivity timeout; a live 429 cooldown may outlast 10 minutes.
             with urllib.request.urlopen(request, timeout=None) as response:
                 return json.loads(response.read().decode("utf-8", errors="replace"))
@@ -4149,6 +4182,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if callable(wait_free):
                 wait_free(log_fn=log)
             try:
+                stamp_bridge_operation(request)
                 with urllib.request.urlopen(request, timeout=None) as response:
                     return json.loads(response.read().decode("utf-8", errors="replace")), False
             except urllib.error.HTTPError as exc:

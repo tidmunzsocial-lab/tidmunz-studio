@@ -44,20 +44,34 @@ function badge(text, color) {
 
 // Which ChatGPT account this Chrome profile is logged into and its picture quota (shown in Tidmunz).
 let account = {email: "", images: "", reset: "", plan: "", used: "", checked: 0};
+let accountRefresh = null;
+async function accountJSON(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(url, {...options, signal: controller.signal});
+    if (!response.ok) throw new Error(`account HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function chatgptAccount() {
   if (Date.now() - account.checked < 120000) return account;
-  const next = {email: "", images: "", reset: "", plan: "", used: "", checked: Date.now()};
+  const next = {...account, checked: Date.now()};
+  account.checked = next.checked;
   try {
-    const session = await (await fetch("https://chatgpt.com/api/auth/session", {credentials: "include"})).json();
+    const session = await accountJSON("https://chatgpt.com/api/auth/session", {credentials: "include"});
     next.email = (session && session.user && session.user.email) || "";
     next.plan = (session && session.account && (session.account.planType || session.account.plan_type)) || "";
     if (session && session.accessToken) {
       // The same call chatgpt.com makes when it opens: it reports what is left of each limit.
-      const init = await (await fetch("https://chatgpt.com/backend-api/conversation/init", {
+      const init = await accountJSON("https://chatgpt.com/backend-api/conversation/init", {
         method: "POST", credentials: "include",
         headers: {"Authorization": "Bearer " + session.accessToken, "Content-Type": "application/json"},
         body: JSON.stringify({requested_default_model: null, conversation_id: null,
-                              timezone_offset_min: new Date().getTimezoneOffset(), conversation_origin: null})})).json();
+                              timezone_offset_min: new Date().getTimezoneOffset(), conversation_origin: null})});
       const image = (init.limits_progress || []).find(f => f.feature_name === "image_gen");
       const blocked = (init.blocked_features || []).find(f => f.name === "image_gen" || f.feature_name === "image_gen");
       if (blocked) { next.images = "0"; next.reset = blocked.resets_after || blocked.reset_after || ""; }
@@ -65,8 +79,8 @@ async function chatgptAccount() {
       // ChatGPT's "remaining" stays at the full number until the limit is near. The account's picture
       // library holds every picture made on it (from every PC), so it tells how many the last 24 hours took.
       try {
-        const library = await (await fetch("https://chatgpt.com/backend-api/my/recent/image_gen?limit=200", {
-          credentials: "include", headers: {"Authorization": "Bearer " + session.accessToken}})).json();
+        const library = await accountJSON("https://chatgpt.com/backend-api/my/recent/image_gen?limit=200", {
+          credentials: "include", headers: {"Authorization": "Bearer " + session.accessToken}});
         const since = Date.now() / 1000 - 86400;
         if (Array.isArray(library.items)) next.used = String(library.items.filter(i => (i.created_at || 0) > since).length);
       } catch (e) {}
@@ -89,8 +103,12 @@ async function loop() {
     for (;;) {
       let job = null;
       try {
-        const who = await chatgptAccount();
-        job = await relay(`/next?wait=25&v=${chrome.runtime.getManifest().version}&email=${encodeURIComponent(who.email)}` +
+        // Account/quota requests are optional display data, never a prerequisite for taking work.
+        if (!accountRefresh && Date.now() - account.checked >= 120000) {
+          accountRefresh = chatgptAccount().catch(() => {}).finally(() => { accountRefresh = null; });
+        }
+        const who = account;
+        job = await relay(`/next?wait=5&v=${chrome.runtime.getManifest().version}&email=${encodeURIComponent(who.email)}` +
                           `&images=${encodeURIComponent(who.images)}&reset=${encodeURIComponent(who.reset)}&plan=${encodeURIComponent(who.plan)}` +
                           `&used=${encodeURIComponent(who.used)}`);
         badge("ON", "#10A37F");
@@ -223,7 +241,8 @@ async function freshTab(tabId, url) {
   return id;
 }
 
-async function openPage(tabId, url, retryWithFreshTab = true) {
+async function openPage(tabId, url, retryWithFreshTab = true, isCancelled = () => false) {
+  if (isCancelled()) throw new Error("ChatGPT operation cancelled");
   try {
     const current = await chrome.tabs.get(tabId);
     if (current.url !== url || current.pendingUrl) await chrome.tabs.update(tabId, {url});
@@ -235,6 +254,7 @@ async function openPage(tabId, url, retryWithFreshTab = true) {
   let seen = "", reloaded = false;
   const start = Date.now();
   while (Date.now() - start < 120000) {
+    if (isCancelled()) throw new Error("ChatGPT operation cancelled");
     await sleep(1000);
     let ready = null;
     try {
@@ -263,8 +283,9 @@ async function openPage(tabId, url, retryWithFreshTab = true) {
     }
   }
   if (retryWithFreshTab) {
+    if (isCancelled()) throw new Error("ChatGPT operation cancelled");
     const replacement = await freshTab(tabId, url);
-    return openPage(replacement, url, false);
+    return openPage(replacement, url, false, isCancelled);
   }
   throw new Error("ChatGPT page not ready after 2 minutes — the window shows: " + (seen || "nothing"));
 }
@@ -275,9 +296,32 @@ async function inPage(tabId, func, args) {
 }
 
 async function runJob(job) {
-  let tabId = await workerTab();
+  let cancelled = false, checking = false, finished = false, tabId = null;
+  const report = async phase => {
+    if (cancelled) throw new Error("ChatGPT operation cancelled");
+    try {
+      const reply = await relay("/progress", {id: job.id, phase});
+      if (finished) return;
+      if (reply && reply.active === false) {
+        cancelled = true;
+        throw new Error("ChatGPT operation cancelled");
+      }
+    } catch (e) { if (cancelled) throw e; }
+  };
+  const heartbeat = setInterval(async () => {
+    if (checking || cancelled) return;
+    checking = true;
+    try { await report(); }
+    catch (e) {
+      // Reload only this job's dedicated worker tab to abort an in-page fetch/script after Stop.
+      if (!finished && tabId !== null) try { await chrome.tabs.reload(tabId); } catch (ignored) {}
+    } finally { checking = false; }
+  }, 2000);
+  try {
+  await report("opening");
+  tabId = await workerTab();
   const url = job.conversation_id ? `https://chatgpt.com/c/${job.conversation_id}` : "https://chatgpt.com/";
-  tabId = await openPage(tabId, url);
+  tabId = await openPage(tabId, url, true, () => cancelled);
   // Messages already in an existing chat, read before sending: if the send's own answer is lost, a chat that
   // gained messages shows the job went out.
   let known = null;
@@ -285,15 +329,18 @@ async function runJob(job) {
     try { known = await inPage(tabId, pageNodes, [job.conversation_id, job.type]); } catch (e) { known = null; }
   }
   let started = null;
+  await report("sending");
   try {
     started = await inPage(tabId, pageSend, [job]);
   } catch (e) {
     started = null;  // the page moved to the new chat right after sending: its answer was lost, not the job
   }
+  if (cancelled) return {error: "ChatGPT operation cancelled"};
   if (!started && !job.conversation_id) {
     // A long message (a whole story) is sent, then ChatGPT navigates to /c/<id> before the result comes back.
     // If a new chat opened, the message went out: keep waiting for the reply in that chat.
     for (let i = 0; i < 10 && !started; i++) {
+      if (cancelled) return {error: "ChatGPT operation cancelled"};
       await sleep(1500);
       try {
         const tab = await chrome.tabs.get(tabId);
@@ -303,6 +350,7 @@ async function runJob(job) {
   }
   if (!started && job.conversation_id && Array.isArray(known)) {
     for (let i = 0; i < 10 && !started; i++) {
+      if (cancelled) return {error: "ChatGPT operation cancelled"};
       await sleep(1500);
       try {
         const now = await inPage(tabId, pageNodes, [job.conversation_id, job.type]);
@@ -311,6 +359,7 @@ async function runJob(job) {
     }
   }
   if (!started || started.error) return started || {error: "ChatGPT page did not answer (no message reached the chat)"};
+  await report("waiting");
   // The job's state lives here, not in the page: a reloaded tab keeps going from the conversation itself.
   const state = {before: started.before, oldPointers: started.oldPointers, sentAt: Date.now(),
                  cid: job.conversation_id || null, idle: 0,
@@ -319,6 +368,7 @@ async function runJob(job) {
   let deadline = Date.now() + JOB_LIMIT_MS;
   let throttles = 0;
   while (Date.now() < deadline) {
+    if (cancelled) return {error: "ChatGPT operation cancelled"};
     await sleep(3000);  // short calls keep this worker alive while ChatGPT works
     let result = null;
     try {
@@ -341,6 +391,7 @@ async function runJob(job) {
       deadline += seconds * 1000;
       let left = seconds * 1000;
       while (left > 0) {
+        if (cancelled) return {error: "ChatGPT operation cancelled"};
         let progress = null;
         try { progress = await relay("/progress", {id: job.id, retry_after: Math.ceil(left / 1000)}); } catch (e) {}
         if (progress && progress.active === false) return {error: "ChatGPT cooldown recovery interrupted — prompt already sent", provider_status: 429, send_state: "sent"};
@@ -355,6 +406,10 @@ async function runJob(job) {
     if (result.done || result.error) return result;
   }
   return {error: "ChatGPT took longer than 12 minutes"};
+  } finally {
+    finished = true;
+    clearInterval(heartbeat);
+  }
 }
 
 // ── functions below run inside the chatgpt.com page ──
