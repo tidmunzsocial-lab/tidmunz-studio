@@ -143,6 +143,11 @@ def image_job(body: dict) -> dict:
 
 def error_reply(result: dict) -> tuple[int, dict]:
     error = str(result.get("error") or "ChatGPT (Chrome) error")
+    if result.get("provider_status") == 429:
+        return 429, {"error": {"code": "rate_limited", "provider_status": 429,
+                                "send_state": result.get("send_state") or "unknown",
+                                "retry_after": result.get("retry_after") or 0,
+                                "message": "ChatGPT rate limit (HTTP 429): " + error}}
     if result.get("provider_status") in (401, 403):
         status = int(result["provider_status"])
         return status, {"error": {"code": "chatgpt_conversation_access_denied",

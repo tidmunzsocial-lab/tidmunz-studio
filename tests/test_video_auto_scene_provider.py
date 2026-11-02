@@ -228,7 +228,7 @@ def test_video_auto_sends_snapgen_lower_multipart_with_panel_first(tmp_path, mon
     Image.new("RGB", (48, 64), "blue").save(buffer, "PNG")
     generated = buffer.getvalue()
     for path in paths:
-        Path(path).write_bytes(generated)
+        Image.new("RGB", (48, 64), "red").save(path)  # The generated scene must differ from input refs.
     requests = []
     def reply(request, **kwargs):
         requests.append(request)

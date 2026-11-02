@@ -314,7 +314,8 @@ async function runJob(job) {
   // The job's state lives here, not in the page: a reloaded tab keeps going from the conversation itself.
   const state = {before: started.before, oldPointers: started.oldPointers, sentAt: Date.now(),
                  cid: job.conversation_id || null, idle: 0};
-  const deadline = Date.now() + JOB_LIMIT_MS;
+  let deadline = Date.now() + JOB_LIMIT_MS;
+  let throttles = 0;
   while (Date.now() < deadline) {
     await sleep(3000);  // short calls keep this worker alive while ChatGPT works
     let result = null;
@@ -328,6 +329,23 @@ async function runJob(job) {
     if (!result) continue;
     if (result.cid) state.cid = result.cid;
     if (result.idle != null) state.idle = result.idle;
+    if (result.rate_limited) {
+      // A prompt already went out: wait and read this same conversation, never call pageSend again.
+      const seconds = Math.max(Number(result.retry_after) || 0, Math.min(300, 30 * 2 ** Math.min(throttles++, 4)));
+      deadline += seconds * 1000;
+      let left = seconds * 1000;
+      while (left > 0) {
+        let progress = null;
+        try { progress = await relay("/progress", {id: job.id, retry_after: Math.ceil(left / 1000)}); } catch (e) {}
+        if (progress && progress.active === false) return {error: "ChatGPT cooldown recovery interrupted — prompt already sent", provider_status: 429, send_state: "sent"};
+        await chrome.tabs.get(tabId);  // Keep this MV3 worker alive during long provider cooldowns.
+        const step = Math.min(left, 5000);
+        await sleep(step);
+        left -= step;
+      }
+      continue;
+    }
+    throttles = 0;
     if (result.done || result.error) return result;
   }
   return {error: "ChatGPT took longer than 12 minutes"};
@@ -364,8 +382,12 @@ async function pageSend(job) {
       await sleep(1500);
     }
     if (check.status === 404) return {error: "ChatGPT conversation failed: 404 — not found for this account", not_found: true};
-    if (!check.ok) return {error: `ChatGPT conversation read failed: HTTP ${check.status} — message not sent`,
-                          provider_status: check.status};
+    if (!check.ok) {
+      const raw = check.headers && check.headers.get("Retry-After");
+      const retry = raw ? (/^\d+(\.\d+)?$/.test(raw.trim()) ? Number(raw) : (Date.parse(raw) - Date.now()) / 1000) : 0;
+      return {error: `ChatGPT conversation read failed: HTTP ${check.status} — message not sent`,
+              provider_status: check.status, send_state: "not_sent", retry_after: Number.isFinite(retry) ? Math.max(0, retry) : 0};
+    }
     const data = await check.json();
     before = Object.keys(data.mapping || {});
     for (const node of Object.values(data.mapping || {}))
@@ -444,6 +466,12 @@ async function pagePoll(kind, state) {
   const auth = {headers: {Authorization: "Bearer " + token}};
   const response = await fetch(`/backend-api/conversation/${cid}`, {...auth, cache: "no-store"});
   if (!response.ok) {
+    if (response.status === 429) {
+      const raw = response.headers && response.headers.get("Retry-After");
+      const retry = raw ? (/^\d+(\.\d+)?$/.test(raw.trim()) ? Number(raw) : (Date.parse(raw) - Date.now()) / 1000) : 0;
+      return {done: false, cid, idle, rate_limited: true,
+              retry_after: Number.isFinite(retry) ? Math.max(0, retry) : 0};
+    }
     if (response.status === 404 && elapsed < 30) return {done: false, cid, idle};
     return {error: `ChatGPT conversation read failed: HTTP ${response.status} — reply not recovered`,
             provider_status: response.status};

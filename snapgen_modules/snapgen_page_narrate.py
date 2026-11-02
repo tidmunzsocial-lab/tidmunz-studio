@@ -1018,6 +1018,18 @@ def import_scene_image(project, folder, index, source):
     return str(target.absolute())
 
 
+def archive_scene_image(path):
+    """Keep a content-addressed original before a generated replacement can overwrite it."""
+    import hashlib
+    source = Path(path)
+    if not source.is_file():
+        return
+    backup = source.parent / "_replaced" / f"{source.stem}_{hashlib.sha256(source.read_bytes()).hexdigest()[:16]}{source.suffix}"
+    backup.parent.mkdir(exist_ok=True)
+    if not backup.exists():
+        shutil.copy2(source, backup)
+
+
 def local_image_problems(scenes, aspect) -> dict:
     """Scene pictures that are surely broken: wrong shape (a leftover collage) or a copy of another scene."""
     import hashlib
@@ -1028,6 +1040,13 @@ def local_image_problems(scenes, aspect) -> dict:
     w, h = SIZES.get(aspect, SIZES["16:9"])
     want = w / h
     problems, seen = {}, {}
+    boards = set()
+    for path in {s.get("board") for s in scenes if s.get("board")}:
+        try:
+            with Image.open(path) as image:
+                boards.add((image.size, hashlib.sha256(image.convert("RGB").tobytes()).digest()))
+        except (OSError, ValueError):
+            pass
     for i, scene in enumerate(scenes):
         path = scene.get("image")
         if not (path and os.path.isfile(path)):
@@ -1035,15 +1054,17 @@ def local_image_problems(scenes, aspect) -> dict:
         try:
             with Image.open(path) as image:
                 ratio = image.width / image.height
+                pixels = (image.size, hashlib.sha256(image.convert("RGB").tobytes()).digest())
         except Exception:
             problems[i] = "เปิดรูปไม่ได้"
             continue
-        digest = hashlib.md5(Path(path).read_bytes()).hexdigest()
-        if abs(ratio - want) / want > 0.12:
+        if pixels in boards:
+            problems[i] = "เป็นภาพสตอรี่บอร์ด/เรฟที่แนบ ไม่ใช่ผลสร้างฉากใหม่"
+        elif abs(ratio - want) / want > 0.12:
             problems[i] = "สัดส่วนรูปผิด (น่าจะเป็นภาพหลายช่อง/รูปค้างจากฉากอื่น)"
-        elif digest in seen:
-            problems[i] = f"รูปซ้ำกับฉาก {seen[digest] + 1}"
-        seen.setdefault(digest, i)
+        elif pixels in seen:
+            problems[i] = f"รูปซ้ำกับฉาก {seen[pixels] + 1}"
+        seen.setdefault(pixels, i)
     return problems
 
 
@@ -1126,7 +1147,48 @@ class HistoryLost(RuntimeError):
 
 
 class RateLimited(RuntimeError):
-    """ChatGPT's image quota is used up; stop instead of retrying."""
+    """A provider limit; replay is safe only when the request was explicitly not sent."""
+
+
+def bridge_rate_limit(status, detail):
+    if status != 429:
+        return None
+    try:
+        error = json.loads(detail).get("error") or {}
+        message = str(error.get("message") or detail)
+    except (ValueError, AttributeError):
+        error, message = {}, str(detail)
+    limited = RateLimited(f"ChatGPT HTTP 429: {message[:400]}")
+    limited.image_generation = False
+    send_state = error.get("send_state") or "unknown"
+    limited.request_not_sent = send_state == "not_sent" or (send_state == "unknown" and "— message not sent" in message)
+    try:
+        delay = float(error.get("retry_after") or 0)
+    except (TypeError, ValueError):
+        delay = 0
+    limited.retry_after = delay if 0 < delay < float("inf") else 0
+    return limited
+
+
+def run_bridge_with_cooldown(send, check_stop, wait, on_wait):
+    """Replay only a pre-send rejection; an accepted/unknown request is never submitted again."""
+    attempt = 0
+    while True:
+        check_stop()
+        try:
+            return send()
+        except RateLimited as exc:
+            if not getattr(exc, "request_not_sent", False):
+                raise
+            attempt += 1
+            delay = max(getattr(exc, "retry_after", 0), min(300, 30 * 2 ** min(attempt - 1, 4)))
+            on_wait(delay, attempt)
+            remaining = delay
+            while remaining > 0:
+                check_stop()
+                step = min(1, remaining)
+                wait(step)
+                remaining -= step
 
 
 # ── pure helpers (unit-tested) ────────────────────────────────────────────
@@ -3886,11 +3948,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if waited >= 60 and not told:
                 told = True
                 log(f"⏳ รอคิว GPT นานแล้ว 1 นาที: {owner} ยังใช้อยู่ — รอให้เสร็จ หรือหยุดงานนั้นก่อน")
-        result, done = {}, threading.Event()
+        result, done, cancelled = {}, threading.Event(), threading.Event()
+
+        def check_cancelled():
+            if cancelled.is_set() or state["stop"]:
+                raise Stopped()
+
+        def cooldown(seconds, attempt):
+            result["cooldown_until"] = time.monotonic() + seconds
+            log(f"⏳ ChatGPT ตอบ 429 ก่อนส่ง — รอ {int(seconds)} วินาทีแล้วทำต่ออัตโนมัติ (รอบ {attempt})")
 
         def worker():
             try:
-                result["value"] = send()
+                result["value"] = run_bridge_with_cooldown(send, check_cancelled, cancelled.wait, cooldown)
             except BaseException as exc:  # handed to the waiting thread
                 result["error"] = exc
             finally:
@@ -3903,12 +3973,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         while not done.wait(1):
             waited = int(time.time() - asked)
             if waited % 5 == 0:
-                ui(detail_var.set, f"{base} · รอ {what} ตอบ {fmt_time(waited)}")
+                left = max(0, int(result.get("cooldown_until", 0) - time.monotonic()))
+                if left:
+                    ui(detail_var.set, f"{base} · ChatGPT 429: รออีก {left} วินาที แล้วทำต่ออัตโนมัติ")
+                else:
+                    ui(detail_var.set, f"{base} · รอ {what} ตอบ {fmt_time(waited)} — ทำต่ออัตโนมัติเมื่อได้คำตอบ")
             if waited >= 180 and not warned:
                 warned = True
-                log(f"⚠ {what} ยังไม่ตอบ 3 นาที — ดูแถบล่าง (Chrome/GPT) ว่าทำงานอยู่ไหม "
-                    "ถ้าค้าง กด ⏸ หยุด แล้ว ▶ ทำต่อ (งานที่ทำแล้วไม่หาย)")
+                log(f"⏳ {what} ยังไม่ตอบ 3 นาที — ระบบรอคำตอบของงานเดิมและทำต่อให้อัตโนมัติ กด ⏸ หยุด ได้")
             if state["stop"]:
+                cancelled.set()
                 raise Stopped()  # the request ends in the background and frees the queue itself
         ui(detail_var.set, base)
         if "error" in result:
@@ -3918,10 +3992,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def open_bridge(request) -> dict:
         """POST to the Bridge; an error says what the Bridge said, not just "HTTP Error 409: Conflict"."""
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            # The local relay enforces inactivity timeout; a live 429 cooldown may outlast 10 minutes.
+            with urllib.request.urlopen(request, timeout=None) as response:
                 return json.loads(response.read().decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            limited = bridge_rate_limit(exc.code, detail)
+            if limited is not None:
+                raise limited from exc
             try:
                 error = json.loads(detail).get("error") or {}
                 if error.get("code") == "chatgpt_conversation_not_found" and not json.loads(
@@ -3955,12 +4033,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if callable(wait_free):
                 wait_free(log_fn=log)
             try:
-                with urllib.request.urlopen(request, timeout=600) as response:
+                with urllib.request.urlopen(request, timeout=None) as response:
                     return json.loads(response.read().decode("utf-8", errors="replace")), False
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
                 if "codex history moved" in detail and body.get("metadata"):
                     return {}, True
+                if exc.code == 429:
+                    raise bridge_rate_limit(exc.code, detail) from exc
                 raise RuntimeError(f"Bridge HTTP {exc.code}: {detail[:600]}") from exc
         data, moved = queued_bridge(send)
         if moved:
@@ -4333,7 +4413,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         import hashlib
         old = {hashlib.md5(Path(s["image"]).read_bytes()).hexdigest()
                for s in project.get("scenes") or [] if s.get("image") and os.path.isfile(s["image"])}
-        old.update(project.get("rejected_hashes") or [])
+        if not video_mode:
+            old.update(project.get("rejected_hashes") or [])
+        old.update(hashlib.md5(Path(p).read_bytes()).hexdigest() for p in refs if Path(p).is_file())
         protected_images = {Path(p).resolve() for p in [*refs, *(s.get("image") for s in project.get("scenes") or [])] if p}
         # Pictures go into short chats of IMAGES_PER_CHAT, not the story chat: it grows ~2 MB per picture
         # and, once it held a few dozen, every new picture there took 3-8 minutes (the page and GPT re-read
@@ -4393,6 +4475,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     raise
             return image
 
+        if video_mode and name.startswith("scene_"):
+            for previous in Path(out_dir).glob(f"{name}.*"):
+                if previous.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                    archive_scene_image(previous)
         out = maybe_qwen(generate_base())
         if hashlib.md5(Path(out).read_bytes()).hexdigest() in old:
             if provider in ("snapgen", "qwen"):
@@ -4432,7 +4518,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             check_stop()
             try:
                 return action()
-            except (Stopped, ImageProviderError):
+            except (Stopped, RateLimited, ImageProviderError):
                 raise
             except Exception as exc:
                 last = exc
@@ -5469,7 +5555,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def completed(job, image, error):
             nonlocal finished
             i = job[0]
-            if error is None and job[2] and looks_like_reference_sheet(image):
+            if not video_mode and error is None and job[2] and looks_like_reference_sheet(image):
                 error = ImageProviderError(f"ฉาก {i + 1} คล้ายรูปเรฟพื้นหลังเรียบ — เก็บรูปไว้ ตรวจผลก่อนสร้างใหม่")
             with state["lock"]:
                 if image:
@@ -5522,6 +5608,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if selected_redraw:
             restored_prompt = False
             for i in dict.fromkeys(todo):
+                scenes[i].pop("auto_image_repair_count", None)
                 original_prompt = scenes[i].pop("prompt_before_visual_redraw", None)
                 if original_prompt is not None:
                     scenes[i]["prompt"] = original_prompt
@@ -5590,7 +5677,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     image_prompt, ref_paths, images_dir, f"scene_{i + 1:03d}", project["aspect"], board=board,
                     **redraw_options))
                 scene["image"] = generated_image
-                if ref_paths and looks_like_reference_sheet(scene["image"]):
+                if not video_mode and ref_paths and looks_like_reference_sheet(scene["image"]):
                     if (redraw_context or image_provider_for("images") in ("qwen", "snapgen")
                             or scene.get("identity_repair")):
                         save_project()
@@ -5765,18 +5852,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return found
 
     def verify_images(rounds=3):
-        """Before the video: find broken scene pictures, mark them red and draw them again until they pass."""
+        """Repair demonstrably broken inputs without deleting completed frames or restarting the budget."""
         project = state["project"]
         scenes = project["scenes"]
         for round_no in range(1, rounds + 2):
             check_stop()
             set_progress("images", 1.0, f"ตรวจรูปทุกฉากก่อนตัดต่อ (รอบ {round_no})")
             problems = local_image_problems(scenes, project["aspect"])
-            try:
-                for i, reason in gpt_image_problems(scenes).items():
-                    problems.setdefault(i, reason)
-            except Exception as exc:
-                log(f"GPT ตรวจรูปไม่สำเร็จ ({str(exc)[:120]}) — ใช้ผลตรวจในเครื่องอย่างเดียว")
+            if not video_mode:
+                try:
+                    for i, reason in gpt_image_problems(scenes).items():
+                        problems.setdefault(i, reason)
+                except Exception as exc:
+                    log(f"GPT ตรวจรูปไม่สำเร็จ ({str(exc)[:120]}) — ใช้ผลตรวจในเครื่องอย่างเดียว")
             for i, scene in enumerate(scenes):
                 scene.pop("bad", None)
                 if i in problems:
@@ -5794,25 +5882,21 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 except Exception as exc:
                     log(f"ทำรูปรวมทุกฉากไม่สำเร็จ: {str(exc)[:120]}")
                 return
-            if round_no > rounds:
+            if round_no > rounds or any(scenes[i].get("auto_image_repair_count", 0) >= rounds for i in problems):
                 break
             log("รูปที่ต้องเจนใหม่: " + ", ".join(f"ฉาก {i + 1} ({r})" for i, r in sorted(problems.items())))
             for i in problems:
                 image = scenes[i].get("image")
                 if image and os.path.isfile(image):
-                    import hashlib
-                    rejected = project.setdefault("rejected_hashes", [])
-                    digest = hashlib.md5(Path(image).read_bytes()).hexdigest()
-                    if digest not in rejected:
-                        rejected.append(digest)
-                    os.remove(image)
-                scenes[i]["image"] = None
+                    archive_scene_image(image)
+                scenes[i]["auto_image_repair_count"] = scenes[i].get("auto_image_repair_count", 0) + 1
                 scenes[i]["prompt"] = scenes[i].get("prompt", "") if "ภาพเดียวเต็มเฟรม" in scenes[i].get("prompt", "") else \
                     scenes[i].get("prompt", "") + " (ภาพเดียวเต็มเฟรม ไม่แบ่งช่อง ฉากแบบไทย)"
+            save_project()  # Persist before submitting; resume never restarts automatic repair attempts.
             stage_images(sorted(problems))
         left = [i + 1 for i, s in enumerate(scenes) if s.get("bad")]
-        raise RuntimeError(f"รูปฉาก {', '.join(map(str, left))} ยังใช้ไม่ได้หลังเจนใหม่ {rounds} รอบ — "
-                           "เลือกฉากแล้วกดสร้างรูปใหม่ หรือกดเริ่มอีกครั้ง")
+        raise RuntimeError(f"รูปฉาก {', '.join(map(str, left))} ยังมีปัญหาไฟล์หลังซ่อมอัตโนมัติ {rounds} ครั้ง — "
+                           "เก็บภาพเดิมไว้แล้ว เลือกแก้เฉพาะฉากนี้ (กดทำต่อจะไม่เริ่มวงจรสร้างซ้ำ)")
 
     def relink_or_report_missing_clips(scenes, folder):
         """Before cutting: every shot needs a clip. Clips still in clips/ but no longer linked
@@ -7368,9 +7452,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 log("⏸ หยุดแล้ว — กดเริ่มเพื่อทำต่อจากจุดเดิม")
                 ui(stage_var.set, "หยุดแล้ว (ทำต่อได้)")
             except RateLimited as exc:
-                log("⛔ " + str(exc).splitlines()[0])
-                ui(stage_var.set, "ติดลิมิตสร้างรูป — กด ▶ ทำต่อ หลังเวลารีเซ็ต (งานที่ทำแล้วเก็บไว้ครบ)")
-                ui(detail_var.set, " ".join(str(exc).splitlines()[1:3]))
+                if getattr(exc, "image_generation", False):
+                    log("⛔ " + str(exc).splitlines()[0])
+                    ui(stage_var.set, "ติดลิมิตสร้างรูป — กด ▶ ทำต่อ หลังเวลารีเซ็ต (งานที่ทำแล้วเก็บไว้ครบ)")
+                    ui(detail_var.set, " ".join(str(exc).splitlines()[1:3]))
+                else:
+                    log("⛔ " + str(exc).splitlines()[0])
+                    ui(stage_var.set, "ChatGPT จำกัดคำขอชั่วคราว — รอสักครู่แล้วกด ▶ ทำต่อ (งานที่ทำแล้วเก็บไว้ครบ)")
+                    ui(detail_var.set, str(exc)[:200])
             except Exception as exc:
                 log(f"❌ {current}: {exc}")
                 ui(stage_var.set, "ติดปัญหา — แก้แล้วกดเริ่มเพื่อทำต่อ")

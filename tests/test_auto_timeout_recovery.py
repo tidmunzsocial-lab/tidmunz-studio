@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 import pytest
 
 from test_video_auto_scene_provider import N, batch_scope, load
+import snapgen_chrome_api as C
 
 
 IMAGE = "data:image/png;base64," + base64.b64encode(b"generated-image").decode()
@@ -166,6 +167,105 @@ def motion_scope(tmp_path, accept=True):
     load(scope, "stage_motion")
     load(scope, "review_clip_prompt")
     return scope, scenes, questions, calls
+
+
+def test_chrome_conversation_429_remains_rate_limited():
+    status, payload = C.error_reply({
+        "error": "ChatGPT conversation read failed: HTTP 429 — message not sent",
+        "provider_status": 429,
+        "send_state": "not_sent", "retry_after": 75,
+    })
+    assert status == 429
+    assert payload["error"]["code"] == "rate_limited"
+    assert payload["error"]["provider_status"] == 429
+    assert payload["error"]["send_state"] == "not_sent"
+    assert payload["error"]["retry_after"] == 75
+
+
+def test_auto_recovers_pre_send_429_with_backoff_and_same_request():
+    calls, waits, notices = [], [], []
+    error = N.bridge_rate_limit(429, json.dumps({"error": {
+        "message": "blocked before send", "send_state": "not_sent", "retry_after": 75}}))
+
+    def send():
+        calls.append("same-request")
+        if len(calls) < 3:
+            raise error
+        return "answer"
+
+    assert N.run_bridge_with_cooldown(send, lambda: None, waits.append,
+                                     lambda delay, attempt: notices.append((delay, attempt))) == "answer"
+    assert calls == ["same-request"] * 3
+    assert notices == [(75, 1), (75, 2)] and sum(waits) == 150
+
+
+def test_auto_cooldown_stop_never_resubmits():
+    calls, waits = [], []
+    error = N.bridge_rate_limit(429, json.dumps({"error": {"send_state": "not_sent"}}))
+
+    def check_stop():
+        if waits:
+            raise N.Stopped()
+
+    def send():
+        calls.append(1)
+        raise error
+
+    with pytest.raises(N.Stopped):
+        N.run_bridge_with_cooldown(send, check_stop, waits.append, lambda *_: None)
+    assert calls == [1] and waits == [1]
+
+
+@pytest.mark.parametrize("send_state", ["sent", "unknown"])
+def test_auto_never_replays_an_accepted_or_unknown_request(send_state):
+    error = N.bridge_rate_limit(429, json.dumps({"error": {"send_state": send_state}}))
+    calls = []
+
+    def send():
+        calls.append(1)
+        raise error
+
+    with pytest.raises(N.RateLimited):
+        N.run_bridge_with_cooldown(send, lambda: None, lambda _: pytest.fail("must not wait/replay"), lambda *_: None)
+    assert calls == [1]
+
+
+def test_narrate_chat_429_is_non_image_rate_limit_and_not_retried(monkeypatch):
+    calls = []
+
+    def blocked(request, **kwargs):
+        calls.append(request.get_method())
+        payload = json.dumps({"error": {"code": "rate_limited", "message": "HTTP 429"}}).encode()
+        raise HTTPError(request.full_url, 429, "Too Many Requests", {}, io.BytesIO(payload))
+
+    monkeypatch.setattr(N.urllib.request, "urlopen", blocked)
+    scope = dict(vars(N), state={"project": {"conversation": {}}},
+                 g={"_chatgpt_api_base": lambda: "http://bridge.test"},
+                 queued_bridge=lambda send: send(), check_stop=lambda: None, log=lambda *_: None)
+    chat = load(scope, "chat", parent="_build")
+    with_retries = load(scope, "with_retries", parent="_build")
+    with pytest.raises(N.RateLimited, match="HTTP 429") as caught:
+        with_retries("พรอมต์วิดีโอ", lambda: chat("video prompt"))
+    assert caught.value.image_generation is False
+    assert calls == ["POST"]
+
+
+def test_motion_rate_limit_does_not_fallback_to_text_only(tmp_path):
+    scope, scenes, questions, calls = motion_scope(tmp_path)
+    before = json.loads(json.dumps(scenes))
+
+    def blocked(content):
+        calls.append(content)
+        limited = N.RateLimited("ChatGPT rate limit (HTTP 429)")
+        limited.image_generation = False
+        raise limited
+
+    scope["chat"] = blocked
+    with pytest.raises(N.RateLimited, match="HTTP 429"):
+        scope["stage_motion"]()
+    assert len(calls) == 1
+    assert not questions and not scope["state"].get("motion_text_only")
+    assert scenes == before
 
 
 def test_motion_fallback_requires_consent_and_keeps_plan_and_images(tmp_path):

@@ -130,6 +130,15 @@ class _Relay:
             slot["event"].set()
 
     # program side
+    def progress(self, result: dict) -> bool:
+        slot = self.waiting.get(str(result.get("id") or ""))
+        if slot is None:
+            return False
+        self.last_seen = time.time()
+        slot["activity_at"] = time.monotonic()
+        slot["rate_limited"] = True  # Only the post-send 429 reader sends heartbeats.
+        return True
+
     def run(self, job: dict) -> dict:
         job = dict(job)
         if not self.status()["connected"]:
@@ -142,17 +151,21 @@ class _Relay:
                 return {"error": "เปิด Chrome ของโปรแกรมให้แล้ว แต่ส่วนขยาย Tidmunz ChatGPT ยังไม่เชื่อมต่อ — "
                                  "ติดตั้งส่วนขยายและล็อกอิน ChatGPT ในหน้าต่าง Chrome นั้น แล้วลองใหม่"}
         job["id"] = uuid.uuid4().hex
-        slot = {"event": threading.Event(), "result": None}
+        slot = {"event": threading.Event(), "result": None, "activity_at": time.monotonic()}
         self.waiting[job["id"]] = slot
         with self.lock:
             self.pending.append(job)
             self.lock.notify_all()
         try:
-            if not slot["event"].wait(JOB_TIMEOUT):
-                with self.lock:
-                    if job in self.pending:
-                        self.pending.remove(job)
-                return {"error": "Chrome did not finish the ChatGPT job in time (is Chrome open?)"}
+            while not slot["event"].wait(min(1, JOB_TIMEOUT)):
+                if time.monotonic() - slot["activity_at"] >= JOB_TIMEOUT:
+                    with self.lock:
+                        if job in self.pending:
+                            self.pending.remove(job)
+                    if slot.get("rate_limited"):
+                        return {"error": "ChatGPT cooldown recovery interrupted — prompt already sent",
+                                "provider_status": 429, "send_state": "sent"}
+                    return {"error": "Chrome did not finish the ChatGPT job in time (is Chrome open?)"}
             return slot["result"] or {"error": "empty result"}
         finally:
             self.waiting.pop(job["id"], None)
@@ -313,6 +326,8 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/result":
             RELAY.finish(body)
             return self._send(200, {"ok": True})
+        if path == "/progress":
+            return self._send(200, {"active": RELAY.progress(body)})
         if path == "/job":
             return self._send(200, RELAY.run(body))
         self._send(404, {"error": "not found"})
