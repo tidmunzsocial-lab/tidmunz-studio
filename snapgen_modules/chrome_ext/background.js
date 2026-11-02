@@ -474,17 +474,47 @@ async function pageSend(job) {
     const previous = new Set([...before, ...domBefore]);
     const normalized = str => str.replace(/\s+/g, " ").trim();
     const expected = normalized(String(job.prompt || ""));
-    for (let attempt = 0; attempt < 60 && !userMessageId; attempt++) {
-      await sleep(250);
+    const findUserMessage = () => {
       const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
       const anchor = domBefore.length ? nodes.findIndex(n => n.getAttribute("data-message-id") === domBefore[domBefore.length - 1]) : -1;
-      if (domReady && domBefore.length && anchor < 0) continue;
+      if (domReady && domBefore.length && anchor < 0) return null;
       for (const node of nodes.slice(anchor + 1)) {
         const id = node.getAttribute("data-message-id");
         if (!id || previous.has(id) || node.getAttribute("data-message-author-role") !== "user") continue;
         if (!expected || !normalized(node.textContent || "").includes(expected)) continue;
-        userMessageId = id;
+        return id;
       }
+      return null;
+    };
+    const waitForUserMessage = async () => {
+      for (let attempt = 0; attempt < 60 && !userMessageId; attempt++) {
+        await sleep(250);
+        userMessageId = findUserMessage();
+      }
+    };
+    await waitForUserMessage();
+    if (!userMessageId) {
+      // Retry only if the exact prompt is still in the composer, the button is enabled, and ChatGPT
+      // is idle. A cleared composer or active response is ambiguous: never submit that prompt again.
+      const retryEditor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
+        document.querySelector('form #prompt-textarea[contenteditable="true"]');
+      const retryForm = retryEditor && retryEditor.closest("form");
+      const retrySend = retryForm && retryForm.querySelector('button[type="submit"]');
+      const draft = normalized(retryEditor && (retryEditor.innerText || retryEditor.textContent || ""));
+      const buttons = retryForm ? [...retryForm.querySelectorAll("button")] : [];
+      const busy = buttons.some(b => b.getAttribute("data-testid") === "stop-button" ||
+        /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((b.getAttribute("aria-label") || "").trim()));
+      const uploading = retryForm && retryForm.querySelector('[role="progressbar"], [aria-busy="true"], circle[stroke-dasharray]');
+      const attached = buttons.filter(b => /^(ลบ|remove)\s/i.test((b.getAttribute("aria-label") || "").trim())).length;
+      if (retryEditor && retryEditor.isConnected && retryForm && retryForm.isConnected && draft === expected &&
+          retrySend && !retrySend.disabled && !busy && !uploading && attached >= images.length) {
+        retrySend.click();
+        await waitForUserMessage();
+      }
+    }
+    if (!userMessageId) {
+      return {error: "ChatGPT page did not answer: the prompt was not confirmed in the conversation; no reply wait started",
+              send_state: "unknown"};
     }
   }
   return {ok: true, before, oldPointers, dom_before: domBefore,

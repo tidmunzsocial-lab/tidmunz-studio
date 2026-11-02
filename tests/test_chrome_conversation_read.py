@@ -195,6 +195,79 @@ global.fetch=async url=>{
     assert data["result"]["dom_before"] == data["known"] == ["old-0", "old-1"]
 
 
+@pytest.mark.parametrize("retry_succeeds,expected_clicks", [(True, 2), (False, 1)])
+def test_text_send_waits_only_after_chat_confirms_the_prompt(retry_succeeds, expected_clicks):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    functions = source[source.index("async function pageNodes("):source.index("async function pagePoll(")]
+    harness = r'''
+let clicks=0;
+const retrySucceeds=RETRY_SUCCEEDS;
+const messages=[
+ {id:'old-user',role:'user',text:'old'},
+ {id:'old-assistant',role:'assistant',text:'old reply'}
+].map(m=>({textContent:m.text,getAttribute:k=>k==='data-message-id'?m.id:m.role}));
+const editor={isConnected:true,innerText:'',textContent:'',closest:()=>form,focus(){}};
+const send={disabled:false,click(){
+ clicks++;
+ if(clicks===1&&!retrySucceeds) editor.innerText='';
+ if(clicks===2&&retrySucceeds){
+   messages.push({textContent:'new plan prompt',getAttribute:k=>k==='data-message-id'?'sent-user':'user'});
+   editor.innerText='';
+ }
+}};
+const form={isConnected:true,querySelectorAll:()=>[],querySelector:s=>s==='button[type="submit"]'?send:null};
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+global.document={
+ querySelectorAll:s=>s.includes('data-message-id')?messages:[],
+ querySelector:()=>editor,
+ execCommand:(cmd,_show,value)=>{if(cmd==='selectAll')editor.innerText='';if(cmd==='insertText')editor.innerText=value;}
+};
+global.fetch=async()=>{throw Error('loaded chat must use the DOM path');};
+pageSend({type:'chat',conversation_id:'existing',prompt:'new plan prompt',images:[]}).then(result=>
+ console.log(JSON.stringify({result,clicks})))
+ .catch(e=>{console.error(e);process.exitCode=1});
+'''.replace("RETRY_SUCCEEDS", str(retry_succeeds).lower())
+    result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["clicks"] == expected_clicks
+    if retry_succeeds:
+        assert data["result"]["user_message_id"] == "sent-user"
+    else:
+        assert "no reply wait started" in data["result"]["error"]
+        assert data["result"]["send_state"] == "unknown"
+
+
+def test_run_job_does_not_poll_gpt_after_an_unconfirmed_send():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    run = source[source.index("async function runJob("):source.index("// ── functions below")]
+    harness = r'''
+let polls=0;
+const JOB_LIMIT_MS=720000, sleep=async()=>{};
+const workerTab=async()=>7, openPage=async id=>id;
+function pageNodes(){} function pageSend(){} function pagePoll(){polls++;}
+async function inPage(_id,fn){
+ if(fn.name==='pageNodes')return ['old-user','old-assistant'];
+ if(fn.name==='pageSend')return {error:'ChatGPT page did not answer: prompt was not confirmed'};
+ return fn();
+}
+const relay=async()=>({active:true});
+runJob({id:'job',type:'chat',conversation_id:'existing',prompt:'plan'}).then(result=>
+ console.log(JSON.stringify({result,polls})))
+ .catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", run + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["polls"] == 0
+    assert "not confirmed" in data["result"]["error"]
+
+
 def test_text_reply_requires_new_id_and_stable_json_without_api_polling():
     node = shutil.which("node")
     if not node:
