@@ -29,10 +29,12 @@ def test_auto_only_pauses_for_requested_review(review, only, planned, confirm):
     elif only:
         assert calls == ["confirm", "images"]
     elif planned:
-        assert calls == ["confirm"] + [key for key, _, _ in stages if key != "plan"]
+        assert calls == ["confirm"] + [key for key, _, _ in stages if key not in ("plan", "motion")]
+        assert project["done"]["motion"] and project["done"]["clips"]
         assert project["done"]["video"] is True
     else:
-        assert calls == [key for key, _, _ in stages]
+        assert calls == [key for key, _, _ in stages if key != "motion"]
+        assert project["done"]["motion"] and project["done"]["clips"]
         assert project["done"]["video"] is True
     assert ("confirm" in calls) is confirm
     assert scope["state"]["busy"] is False

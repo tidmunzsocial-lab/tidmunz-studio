@@ -2798,6 +2798,25 @@ def video_plan_request(numbered: list, names: list, previous: str, era: str, hor
     )
 
 
+VIDEO_AUDIO_RULE = (
+    "This audio rule overrides any conflicting audio instructions elsewhere in the prompt. "
+    "AUDIO: Absolutely no music, background music, score, songs, melodies or musical instruments. "
+    "Use only natural ambience and diegetic sound effects matching the visible scene and action "
+    "(wind, waves, animal calls or footsteps only where appropriate). "
+    "Do not invent animals or events just to add sound. Keep scripted dialogue unchanged; "
+    "no additional speech. Natural sound effects remain audible in shots without dialogue."
+)
+
+
+def with_video_audio(prompt: str, scene: dict) -> str:
+    effects = str(scene.get("sound_effects") or "").strip()
+    if effects and "[เสียงเอฟเฟกต์] " + effects not in prompt:
+        prompt += "\n[เสียงเอฟเฟกต์] " + effects
+    if VIDEO_AUDIO_RULE not in prompt:
+        prompt += "\n" + VIDEO_AUDIO_RULE
+    return prompt
+
+
 def motion_request(items: list, era: str, horror: bool = False) -> str:
     """Write each clip's video prompt from its finished first frame (attached in order) and the script.
 
@@ -2849,6 +2868,10 @@ def motion_request(items: list, era: str, horror: bool = False) -> str:
         "และแสงของฉาก "
         "ห้ามเขียนให้กล้องซูมหรือดอลลี่เข้าใกล้จนภาพกว้างกลายเป็นภาพใกล้ (โมเดลวิดีโอจะตัดหรือละลายภาพไปเป็นภาพใกล้แทน); "
         "[บรรยากาศ] สิ่งรอบตัวที่ขยับ (น้ำ ลม ฝุ่น ไฟ ผม ผ้า) แสงและอารมณ์; "
+        "[เสียงเอฟเฟกต์] ระบุเสียงธรรมชาติและเสียงการกระทำที่ตรงกับแต่ละช็อต เช่น ลม คลื่นทะเล "
+        "เสียงร้องและฝีเท้าสัตว์ที่อยู่ในฉาก เลือกเฉพาะเสียงที่เหมาะกับภาพและเหตุการณ์ ไม่เพิ่มสัตว์หรือเหตุการณ์เพื่อทำเสียง. "
+        "ห้ามมีเสียงเพลงหรือดนตรีประกอบเด็ดขาด แต่ไม่ใช่ปิดเสียงทั้งหมด; "
+        "คืน sound_effects เป็นคำบรรยายเสียงเฉพาะช็อตด้วย. " + VIDEO_AUDIO_RULE + " " +
         "[การกำกับอารมณ์] 1–2 ประโยค: อารมณ์ที่ต้องแสดงออกทางสีหน้าและสายตา แบบเก็บๆ ไม่เกินจริง; "
         "[ข้อห้ามและความต่อเนื่อง] ขึ้นต้น 'One continuous N-second shot.' แล้วตามด้วยข้อห้ามเฉพาะช็อตนี้เป็นข้อๆ ขึ้นต้นด้วย '* ห้าม…' "
         "(เช่น ห้ามหันหน้ามองกล้อง ห้ามเดินออกจากตำแหน่ง ห้ามตัวละครอื่นเข้ามา); "
@@ -2861,7 +2884,7 @@ def motion_request(items: list, era: str, horror: bool = False) -> str:
         + REALISM_NOTE + ". ไม่มีตัวหนังสือ ไม่มีคนเล่าเรื่อง. "
         + (HORROR_NOTE if horror else "")
         + f"ยุค/บรรยากาศ: {era}. "
-        "ตอบ JSON เท่านั้น: {\"shots\":[{\"shot\":1,\"seen\":\"\",\"video_prompt\":\"\",\"anatomy\":\"\",\"negative\":\"\",\"shot_type\":\"character\",\"has_people\":true}]} "
+        "ตอบ JSON เท่านั้น: {\"shots\":[{\"shot\":1,\"seen\":\"\",\"video_prompt\":\"\",\"sound_effects\":\"\",\"anatomy\":\"\",\"negative\":\"\",\"shot_type\":\"character\",\"has_people\":true}]} "
         "shot_type=scenery เฉพาะภาพวิว/เมืองว่างที่ไม่มีตัวละคร; นอกนั้น character หรือ action. "
         "has_people ต้องตัดสินจากรูปจริง: true ถ้าเห็นคนรวมถึงตัวประกอบหรือเงาคน; false เฉพาะไม่มีคนจริง. "
         "seen = สิ่งที่เห็นในรูปจริงตามตาเห็น (ไม่ใช่ตามบท) 1–2 ประโยค: มีใครบ้าง อยู่ตรงไหน หันหน้า/หันข้าง/หันหลัง "
@@ -3028,14 +3051,14 @@ PROMPT_CHECK = (
     "(รูปแบบเดิม [เปิดภาพ] [จังหวะ] [ร่างกาย] [กล้อง] [บรรยากาศ] เฉพาะช็อตนี้), anatomy = ร่างกายของคนในเฟรมนี้สั้นๆ (รูปลักษณ์เท่านั้น), "
     "continuity = สภาพที่มองเห็นบนตัวที่ต้องคงไว้ (ว่างได้). "
     "english = คำสั่งฉบับสุดท้ายทั้งหมด (ฉบับที่แก้แล้วถ้าไม่ผ่าน) แปลเป็นภาษาอังกฤษสำหรับโมเดลวิดีโอ: ครบทุกส่วนและทุกข้อห้าม "
-    "เขียนกระชับ ชัด เป็นคำสั่งเชิงบวกก่อน (one continuous shot, single location, silent — mouths closed ถ้าไม่มีบทพูด, "
+    "เขียนกระชับ ชัด เป็นคำสั่งเชิงบวกก่อน (one continuous shot, single location, no dialogue — human mouths closed ถ้าไม่มีบทพูด แต่คงเสียงธรรมชาติและเอฟเฟกต์, "
     "keeps facing away ถ้ามีคนหันหลัง) ชื่อคนไทยเขียนทับศัพท์ และปิดท้ายด้วยบรรทัด 'Negative: ...'; "
     "ถ้ามีบทพูด ให้คงประโยคที่พูดเป็นภาษาไทยตามเดิมในเครื่องหมายคำพูด. "
     "ตอบ JSON เท่านั้น: {{\"pass\":true,\"problems\":[],\"video_prompt\":\"\",\"anatomy\":\"\",\"continuity\":\"\",\"english\":\"\"}}\n\n"
     "ช็อตนี้ในเรื่อง:\n{anchor}\n\nคำสั่งที่จะส่งให้ AI วิดีโอ:\n{request}")
 TRANSLATE_REQUEST = (
     "แปลคำสั่งสร้างวิดีโอด้านล่างเป็นภาษาอังกฤษสำหรับโมเดลวิดีโอ AI: ครบทุกส่วนและทุกข้อห้าม ห้ามตัดหรือเพิ่มเนื้อหา "
-    "เขียนกระชับ ชัด ข้อห้ามสำคัญเขียนเป็นคำสั่งเชิงบวกก่อน (one continuous shot, silent — mouths closed, "
+    "เขียนกระชับ ชัด ข้อห้ามสำคัญเขียนเป็นคำสั่งเชิงบวกก่อน (one continuous shot, no dialogue — human mouths closed แต่คงเสียงธรรมชาติและเอฟเฟกต์, "
     "keeps facing away from the camera สำหรับคนที่หันหลัง) ชื่อคนไทยเขียนทับศัพท์ ประโยคบทพูดคงเป็นภาษาไทยในเครื่องหมายคำพูด "
     "ปิดท้ายด้วยบรรทัด 'Negative: ...'. ตอบ JSON เท่านั้น: {{\"english\":\"\"}}\n\n{request}")
 # Checker 2: after the clip, a GPT look at its frames decides whether it can be used.
@@ -4207,9 +4230,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             raise RuntimeError(json.dumps(data["error"], ensure_ascii=False)[:600])
         conversation_id, parent_id = g["_extract_bridge_cursor"](data)
         if conversation_id and parent_id:
-            conversation.update({"conversation_id": str(conversation_id), "parent_message_id": str(parent_id)})
-            if data.get("chatgpt_account"):
-                conversation["account_alias"] = str(data["chatgpt_account"])
+            with state["lock"]:
+                conversation.update({"conversation_id": str(conversation_id), "parent_message_id": str(parent_id)})
+                if data.get("chatgpt_account"):
+                    conversation["account_alias"] = str(data["chatgpt_account"])
             save_project()
         message = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         if isinstance(message, list):
@@ -6340,7 +6364,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             log("ใช้พรอมต์วิดีโอเดิมตามที่ยืนยันเฉพาะรอบนี้ — ไม่ได้ตรวจรูป/คำสั่งด้วย GPT Web; ตรวจคลิปในเครื่อง")
         return True
 
-    def stage_motion(indices=None, force=False):
+    def stage_motion(indices=None, force=False, *, prepared=False, lookahead=False):
         """After the pictures: GPT looks at each finished first frame with the script and writes its video prompt.
 
         A shot is written again only when its picture changed since (or never had one).
@@ -6356,19 +6380,24 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         if state.get("motion_planned_only") and use_planned_motion(todo, "no assistant text came back"):
             return
-        ensure_story_in_history()
-        ensure_continuity()
-        ensure_bodies()
-        assign_clips(scenes, float(project["duration"]), economy_on())
-        apply_selected_video_model(project)
+        if not prepared:
+            ensure_story_in_history()
+            ensure_continuity()
+            ensure_bodies()
+            assign_clips(scenes, float(project["duration"]), economy_on())
+            apply_selected_video_model(project)
         era = ((project.get("context") or {}).get("story") or {}).get("era") or "-"
         horror = project.get("style_mode") == "เรื่องผี"
         batches = [todo[k:k + MOTION_BATCH] for k in range(0, len(todo), MOTION_BATCH)]
         for b, batch in enumerate(batches, 1):
             check_stop()
             shots = ", ".join(str(i + 1) for i in batch)
-            set_progress("motion", (b - 1) / len(batches),
-                         f"GPT ดูรูปและบท เขียนพรอมต์วิดีโอ {b}/{len(batches)} (ช็อต {shots})")
+            if lookahead:
+                set_progress("clips", state.get("clip_fraction", 0),
+                             f"{state.get('clip_label', '')} · เตรียมพรอมต์ช็อต {shots}")
+            else:
+                set_progress("motion", (b - 1) / len(batches),
+                             f"GPT ดูรูปและบท เขียนพรอมต์วิดีโอ {b}/{len(batches)} (ช็อต {shots})")
             request = motion_request(motion_items(batch), era, horror)
             reply = None
             if not state.get("motion_text_only"):
@@ -6409,22 +6438,25 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 prompt = str(item.get("video_prompt") or "").strip()
                 if i not in batch or not prompt:
                     continue
-                scene = scenes[i]
-                scene.setdefault("video_prompt_planned", scene.get("video_prompt") or "")
-                scene["video_prompt"] = prompt
-                scene["anatomy"] = str(item.get("anatomy") or "").strip()
-                scene["forbid"] = merge_forbid(scene.get("forbid"), item.get("negative"), item.get("forbid"))
-                # What GPT saw in the real first frame: the checker compares the request against it.
-                scene["seen"] = str(item.get("seen") or "").strip() if not state.get("motion_text_only") else ""
-                if not state.get("motion_text_only"):
-                    scene["has_people"] = item.get("has_people") if isinstance(item.get("has_people"), bool) else None
-                    if item.get("shot_type") in ("scenery", "character", "action"):
-                        scene["shot_type"] = item["shot_type"]
-                scene["motion_image"] = file_digest(scene["image"])
+                with state["lock"]:
+                    scene = scenes[i]
+                    scene.setdefault("video_prompt_planned", scene.get("video_prompt") or "")
+                    scene["sound_effects"] = str(item.get("sound_effects") or scene.get("sound_effects") or "").strip()
+                    scene["video_prompt"] = with_video_audio(prompt, scene)
+                    scene["anatomy"] = str(item.get("anatomy") or "").strip()
+                    scene["forbid"] = merge_forbid(scene.get("forbid"), item.get("negative"), item.get("forbid"))
+                    # What GPT saw in the real first frame: the checker compares the request against it.
+                    scene["seen"] = str(item.get("seen") or "").strip() if not state.get("motion_text_only") else ""
+                    if not state.get("motion_text_only"):
+                        scene["has_people"] = item.get("has_people") if isinstance(item.get("has_people"), bool) else None
+                        if item.get("shot_type") in ("scenery", "character", "action"):
+                            scene["shot_type"] = item["shot_type"]
+                    scene["motion_image"] = file_digest(scene["image"])
             missed = [i + 1 for i in batch if scenes[i].get("motion_image") != file_digest(scenes[i]["image"])]
             if missed:
                 log(f"พรอมต์วิดีโอ: GPT ไม่ได้ส่งช็อต {', '.join(map(str, missed))} — ใช้พรอมต์จากแผนเดิม")
-            apply_selected_video_model(project)
+            if not prepared:
+                apply_selected_video_model(project)
             save_project()
             ui(refresh_table)
         log(f"✓ พรอมต์วิดีโอจากรูปจริง + บท: {len(todo)} ช็อต")
@@ -6478,7 +6510,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         turned = "คนที่หันหลังหันหน้ามาทางกล้อง" if any(word in opening for word in BACK_TURNED_WORDS) else ""
         main = compact_forbid(scene.get("forbid"), body_forbid, silent, turned, VIDEO_NEGATIVE)
         prompt += "\nNegative — ห้ามปรากฏเด็ดขาดตลอดทั้งคลิป: " + merge_forbid(fix_forbid, main)
-        return prompt
+        return with_video_audio(prompt, scene)
 
     def gpt_look(text: str, images=()) -> dict:
         """One question with pictures to GPT in a temporary chat (keeps the story history clean); JSON reply."""
@@ -6869,7 +6901,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(refresh_all)
         threading.Thread(target=worker, daemon=True).start()
 
-    def make_clip(scene, index):
+    def make_clip(scene, index, *, prepared=False, on_submitted=None):
         """Generate one clip by driving the Slot exactly like pressing its Generate button."""
         busy = runtime["slot_busy"]
         waited = 0
@@ -6883,7 +6915,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         before = {str(f): f.stat().st_mtime for f in out_dir.glob("*.mp4")} if out_dir.is_dir() else {}
         started = time.time()
         errors = []
-        apply_selected_video_model(state["project"])
+        if not prepared:
+            apply_selected_video_model(state["project"])
         selected_model = scene.get("clip_model") or (state["project"] or {}).get("video_model")
         seedance_refs = []
         if selected_model in SEEDANCE_MODELS:
@@ -6898,13 +6931,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         elif selected_model == VIDEO_MUSE_MODEL:
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS, False
             log(f"ช็อต {index + 1}: {VIDEO_MUSE_LABEL} · 10 วินาที")
-        if not scene.get("seen") and not state.get("motion_text_only"):
+        if not prepared and not scene.get("seen") and not state.get("motion_text_only"):
             # Written before the request was tied to its own picture (shots used to share one GPT look):
             # look at this shot's real first frame once, so the checker can compare against it.
             log(f"ช็อต {index + 1}: เขียนพรอมต์วิดีโอใหม่จากรูปจริงของช็อตนี้ก่อนตรวจ")
             scene.pop("prompt_review", None)
             stage_motion([index], force=True)
-        review_clip_prompt(scene, index)  # checker 1: a second GPT passes or rewrites the request first
+        if not prepared:
+            review_clip_prompt(scene, index)  # checker 1: a second GPT passes or rewrites the request first
         prompt = clip_prompt(scene)
         review = scene.get("prompt_review") or {}
         import hashlib
@@ -6920,6 +6954,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 prompt += "\nNegative" + thai.rsplit("\nNegative", 1)[1]
             log(f"ช็อต {index + 1}: ส่งคำสั่งภาษาอังกฤษให้โมเดลวิดีโอ (ฉบับไทยดูได้ในตาราง)")
 
+        prompt = with_video_audio(prompt, scene)  # retain the audio rule even if a cached English review omitted it
         runtime.setdefault("_auto_video_scene_number_by_slot", {})[slot_index] = index + 1
         runtime.setdefault("_auto_video_downloaded_by_slot", {}).pop(slot_index, None)
 
@@ -6959,6 +6994,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         try:
             if not run_on_ui(submit):
                 raise RuntimeError("Slot ไม่รับงาน: " + ("; ".join(errors) or "ตรวจรูป/พรอมต์/โมเดลใน Slot"))
+            if on_submitted:
+                on_submitted()
             waited = 0
             while busy[slot_index]:
                 time.sleep(3)
@@ -7054,7 +7091,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         scenes = project["scenes"]
         todo = indices if indices is not None else [
             i for i, sc in enumerate(scenes) if not (sc.get("clip") and os.path.isfile(sc["clip"]))]
-        stage_motion(todo)  # pictures changed since (redrawn / edited) get a fresh video prompt first
+        if not video_mode:
+            stage_motion(todo)
         assign_clips(scenes, float(project["duration"]), economy_on())
         apply_selected_video_model(project)
         cfg = runtime["slot_cfg_vars"][slot_index]
@@ -7073,10 +7111,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         runtime["_auto_video_pipeline_async"] = True
         runtime["_auto_video_progress"] = show_auto_upscale_progress
         try:
+            finalize_auto_video_postprocesses()  # drain restored local work before submitting another cloud clip
             run_clips(project, scenes, todo)
         finally:
             try:
-                finalize_auto_video_postprocesses()
+                if not video_mode or state.get("auto_video_postprocess_pending"):
+                    finalize_auto_video_postprocesses()
             finally:
                 runtime["_auto_video_pipeline_async"] = old_async
                 if old_progress is None:
@@ -7097,10 +7137,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             raise RuntimeError(f"ยังขาดคลิปฉาก {', '.join(map(str, missing[:15]))} — กดเริ่มอีกครั้งเพื่อลองใหม่")
         log(f"✓ คลิปครบ {len(wanted)} ฉาก" if indices is None else f"✓ เจนคลิปเสร็จ: ช็อต {', '.join(str(i + 1) for i in wanted)}")
 
-    def make_scene_clip(scene, i):
+    def make_scene_clip(scene, i, *, prepared=False, on_submitted=None):
         """vela first when the plan says cheap; if vela can't make it, the same shot goes to grok-lower."""
         try:
-            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i),
+            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i, prepared=prepared, on_submitted=on_submitted),
                                 attempts=1 if scene.get("clip_model") in (VIDEO_CHEAP_MODEL, VIDEO_MUSE_MODEL) else 2)
         except (Stopped, HistoryLost, RateLimited, ImageProviderError):
             raise
@@ -7113,9 +7153,95 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
                 float(scene.get("shot_seconds") or VIDEO_AUTO_AVG_SECONDS), bool(scene.get("slow")))
             log(f"ฉาก {i + 1}: vela เจนไม่ได้ ({error_reason(str(exc))}) → ใช้ {clip_label(scene)}")
-            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i), attempts=2)
+            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i, prepared=prepared, on_submitted=on_submitted), attempts=2)
+
+    def run_clips_lookahead(project, scenes, todo):
+        """One cloud/local clip pipeline plus at most the next shot's prompt."""
+        if not todo:
+            return
+        from copy import deepcopy
+        ensure_story_in_history()
+        ensure_continuity()
+        ensure_bodies()
+
+        def render(scene, index, submitted):
+            # Slot preparation mutates a scene: keep it private while GPT prepares the next scene.
+            work = deepcopy(scene)
+            work["clip"] = make_scene_clip(work, index, prepared=True, on_submitted=submitted.set)
+            work.pop("clip_error", None)
+            with state["lock"]:
+                for key in tuple(scene):
+                    if key not in work:
+                        scene.pop(key, None)
+                scene.update(work)
+                for item in state.get("auto_video_postprocess_pending") or []:
+                    if item["scene"] is work:
+                        item["scene"] = scene
+            save_project()  # retain the download and its local-work receipt even if the next prompt failed
+            finalize_auto_video_postprocesses()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            for n, index in enumerate(todo):
+                check_stop()
+                scene = scenes[index]
+                if not (scene.get("image") and os.path.isfile(scene["image"])):
+                    raise RuntimeError(f"ฉาก {index + 1} ยังไม่มีรูป")
+                state["clip_fraction"] = n / max(1, len(todo))
+                state["clip_label"] = f"ช็อต {index + 1} ({n + 1}/{len(todo)})"
+                stage_motion([index], prepared=True, lookahead=True)
+                apply_selected_video_model(project)
+                if not scene.get("seen") and not state.get("motion_text_only"):
+                    scene.pop("prompt_review", None)
+                    stage_motion([index], force=True, prepared=True, lookahead=True)
+                    apply_selected_video_model(project)
+                scene["video_prompt"] = with_video_audio(str(scene.get("video_prompt") or ""), scene)
+                review_clip_prompt(scene, index)
+                save_project()
+                check_stop()
+                state["clip_label"] = f"สร้างคลิป {n + 1}/{len(todo)} (ฉากที่ {index + 1}) ด้วย {clip_label(scene)}"
+                set_progress("clips", state["clip_fraction"], state["clip_label"])
+                submitted = threading.Event()
+                future = pool.submit(render, scene, index, submitted)
+                prompt_error = None
+                try:
+                    # Begin the next prompt only after the current Slot actually accepted its cloud job.
+                    while not submitted.wait(0.1):
+                        if future.done():
+                            future.result()
+                            break
+                        check_stop()
+                    check_stop()
+                    if n + 1 < len(todo):
+                        stage_motion([todo[n + 1]], prepared=True, lookahead=True)
+                except BaseException as exc:
+                    prompt_error = exc
+                try:
+                    future.result()  # includes download, Slow 2x, upscale and saving the verified output
+                except Exception as exc:
+                    with state["lock"]:
+                        scene["clip_error"] = str(exc)[:300]
+                    save_project()
+                    raise
+                if prompt_error is not None:
+                    raise prompt_error
+                check_stop()
+                try:
+                    review_clip(scene, index)
+                except (Stopped, HistoryLost, RateLimited, ImageProviderError):
+                    raise
+                except Exception as exc:
+                    log(f"ตรวจคลิปช็อต {index + 1} ไม่ได้: {str(exc)[:200]}")
+                save_project()
+                ui(refresh_table)
+                ui(follow_shot, index)
+                try:
+                    update_preview()
+                except Exception as exc:
+                    log(f"ทำตัวอย่างไม่ได้: {str(exc)[:200]}")
 
     def run_clips(project, scenes, todo):
+        if video_mode:
+            return run_clips_lookahead(project, scenes, todo)
         started, failures_in_row = time.time(), 0
         for n, i in enumerate(todo, 1):
             check_stop()
@@ -7195,13 +7321,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 target = Path(item["target"])
                 if output.resolve() != target.resolve():
                     shutil.copy2(output, target)
-                scene["clip"] = str(target)
-                scene["clip_upscale_status"] = "complete"
-                scene["clip_upscale_backend"] = str(result.get("backend") or "ตรวจขนาดแล้ว") if isinstance(result, dict) else "ตรวจขนาดแล้ว"
-                scene.pop("clip_postprocess_source", None)
-                for key in ("clip_postprocess_slow", "clip_postprocess_target_4k",
-                            "clip_postprocess_upscale_enabled", "clip_postprocess_mute", "clip_upscale_error"):
-                    scene.pop(key, None)
+                with state["lock"]:
+                    scene["clip"] = str(target)
+                    scene["clip_upscale_status"] = "complete"
+                    scene["clip_upscale_backend"] = str(result.get("backend") or "ตรวจขนาดแล้ว") if isinstance(result, dict) else "ตรวจขนาดแล้ว"
+                    scene.pop("clip_postprocess_source", None)
+                    for key in ("clip_postprocess_slow", "clip_postprocess_target_4k",
+                                "clip_postprocess_upscale_enabled", "clip_postprocess_mute", "clip_upscale_error"):
+                        scene.pop(key, None)
                 try:
                     import ai_slow2x as _video_info
                     dims = _video_info._video_dimensions(_video_info.ensure_ffmpeg_tool(log=log), target)
@@ -7212,8 +7339,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 save_project()
                 ui(refresh_table)
             except Exception as exc:
-                scene["clip_upscale_status"] = "failed"
-                scene["clip_upscale_error"] = str(exc)[:300]
+                with state["lock"]:
+                    scene["clip_upscale_status"] = "failed"
+                    scene["clip_upscale_error"] = str(exc)[:300]
                 pending.pop(0)
                 save_project()
                 raise RuntimeError(f"ฉาก {index + 1} อัปสเกลไม่ผ่าน จึงยังไม่รวมวิดีโอ: {exc}") from exc
@@ -7583,6 +7711,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     try:
                         if key == "characters" and character_limit:
                             stage_characters(limit=character_limit)
+                        elif video_mode and only is None and key == "motion":
+                            STAGE_FUNCS["clips"]()
+                            project["done"]["clips"] = True
                         else:
                             STAGE_FUNCS[key]()
                     except RateLimited as exc:

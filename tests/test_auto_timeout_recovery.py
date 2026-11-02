@@ -151,7 +151,7 @@ def motion_scope(tmp_path, accept=True):
     scenes = [{"image": str(image), "video_prompt": f"planned-{i}"} for i in range(3)]
     questions, calls, logs = [], [], []
     noop = lambda *args, **kwargs: None
-    scope = dict(vars(N), state={"project": {"scenes": scenes, "duration": 60}}, video_mode=True,
+    scope = dict(vars(N), state={"project": {"scenes": scenes, "duration": 60}, "lock": N.threading.RLock()}, video_mode=True,
                  file_digest=lambda path: "digest", check_stop=noop, ensure_story_in_history=noop,
                  ensure_continuity=noop, ensure_bodies=noop, assign_clips=noop, economy_on=lambda: False,
                  apply_selected_video_model=noop, set_progress=noop, motion_request=lambda *a: "request",
@@ -312,7 +312,8 @@ def test_working_web_still_writes_and_checks_real_frames(tmp_path):
         {"video_prompt": "new motion", "seen": "real frame"}]})
     scope["stage_motion"]()
     assert not questions and not scope["state"].get("motion_planned_only")
-    assert all(scene["video_prompt"] == "new motion" and scene["seen"] == "real frame"
+    assert all(scene["video_prompt"].startswith("new motion\n") and N.VIDEO_AUDIO_RULE in scene["video_prompt"]
+               and scene["seen"] == "real frame"
                and scene["motion_image"] == "digest" for scene in scenes)
 
 
