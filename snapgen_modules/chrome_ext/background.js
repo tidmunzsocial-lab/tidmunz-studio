@@ -527,7 +527,7 @@ async function pageSend(job) {
   let userMessageId = null;
   if (job.type === "chat") {
     const previous = new Set([...before, ...domBefore]);
-    const normalized = str => str.replace(/\s+/g, " ").trim();
+    const normalized = str => str.normalize("NFKC").replace(/[\s\p{Cf}]+/gu, "");
     const expected = normalized(String(job.prompt || ""));
     const findUserMessage = () => {
       const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
@@ -536,7 +536,7 @@ async function pageSend(job) {
       for (const node of nodes.slice(anchor + 1)) {
         const id = node.getAttribute("data-message-id");
         if (!id || previous.has(id) || node.getAttribute("data-message-author-role") !== "user") continue;
-        if (!expected || !normalized(node.textContent || "").includes(expected)) continue;
+        if (!expected || !normalized(node.innerText || node.textContent || "").includes(expected)) continue;
         return id;
       }
       return null;

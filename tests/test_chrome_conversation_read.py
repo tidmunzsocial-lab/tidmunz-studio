@@ -241,6 +241,41 @@ pageSend({type:'chat',conversation_id:'existing',prompt:'new plan prompt',images
         assert data["result"]["send_state"] == "unknown"
 
 
+def test_text_send_confirmation_ignores_rendered_whitespace_and_invisible_unicode():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    functions = source[source.index("async function pageNodes("):source.index("async function pagePoll(")]
+    harness = r'''
+let clicks=0;
+const messages=[
+ {id:'old-user',role:'user',text:'old'},
+ {id:'old-assistant',role:'assistant',text:'old reply'}
+].map(m=>({innerText:m.text,getAttribute:k=>k==='data-message-id'?m.id:m.role}));
+const editor={isConnected:true,innerText:'',textContent:'',closest:()=>form,focus(){}};
+const send={disabled:false,click(){
+ clicks++;
+ if(clicks===1){
+   messages.push({innerText:'new\nplan\u200b  prompt',getAttribute:k=>k==='data-message-id'?'sent-user':'user'});
+   editor.innerText='';
+ }
+}};
+const form={isConnected:true,querySelectorAll:()=>[],querySelector:s=>s==='button[type="submit"]'?send:null};
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+global.document={querySelectorAll:s=>s.includes('data-message-id')?messages:[],querySelector:()=>editor,
+ execCommand:(cmd,_show,value)=>{if(cmd==='selectAll')editor.innerText='';if(cmd==='insertText')editor.innerText=value;}};
+global.fetch=async()=>{throw Error('loaded chat must use the DOM path');};
+pageSend({type:'chat',conversation_id:'existing',prompt:'new plan prompt',images:[]}).then(result=>
+ console.log(JSON.stringify({result,clicks}))).catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["clicks"] == 1
+    assert data["result"]["user_message_id"] == "sent-user"
+
+
 def test_run_job_does_not_poll_gpt_after_an_unconfirmed_send():
     node = shutil.which("node")
     if not node:
