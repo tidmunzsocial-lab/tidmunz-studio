@@ -142,6 +142,39 @@ def test_parallel_rejects_shared_history():
         G.generate_image('ONE',parallel_images=True,use_story_history=True)
 
 
+def test_overflow_keeps_named_characters_and_specific_main_location():
+    scene={'characters':['ท้าวธันตะรด','ลูกชายทั้งสี่คน'], 'location':'พระราชวังเมืองบาดาล'}
+    paths=['ท้าวธันตะรด.png','ลูกชายทั้งสี่คน.png','พระราชวังเมืองบาดาล.png',
+           'เมืองบาดาล.png','ท้องพระโรง.png','สกุลเนตร.png']
+    assert N.primary_scene_references(scene,paths,5)==paths[:3]
+    assert N.primary_scene_references(scene,paths,6)==paths
+
+
+def test_overflow_never_drops_an_explicit_main_character():
+    scene={'characters':[f'person{i}' for i in range(6)],'location':'palace'}
+    paths=[f'person{i}.png' for i in range(6)]+['palace.png']
+    with pytest.raises(N.ImageProviderError,match='เรฟตัวละคร'):
+        N.primary_scene_references(scene,paths,5)
+
+
+def test_gpt_scene_worker_submits_only_primary_refs_when_over_limit(tmp_path):
+    board=tmp_path/'panel.png';board.write_bytes(b'board')
+    scene={'characters':['ท้าวธันตะรด','ลูกชายทั้งสี่คน'], 'location':'พระราชวังเมืองบาดาล',
+           'board':str(board),'prompt':'new scene'}
+    paths=['ท้าวธันตะรด.png','ลูกชายทั้งสี่คน.png','พระราชวังเมืองบาดาล.png',
+           'เมืองบาดาล.png','ท้องพระโรง.png','สกุลเนตร.png']
+    sent=[];noop=lambda *a,**k:None
+    def make_image(prompt, refs, folder, name, aspect, **kwargs):
+        sent.append((list(refs),kwargs));result=folder/(name+'.png');result.write_bytes(b'scene');return str(result)
+    project={'scenes':[scene],'aspect':'16:9'}
+    scope=dict(vars(N),state={'project':project,'lock':threading.RLock()},
+        attachments_for=lambda _scene,limit=None:paths,scene_prompt=lambda s:s['prompt'],make_image=make_image,
+        check_stop=noop,save_project=noop,log=noop,set_progress=noop,ui=noop,refresh_table=noop,follow_shot=noop)
+    load(scope,'run_gpt_scenes')([0],[scene],tmp_path)
+    assert sent[0][0]==paths[:3] and sent[0][1]['board']==str(board)
+    assert Path(scene['image']).is_file()
+
+
 def test_worker_tabs_allocate_distinct_ids_and_protect_both_lanes():
     code = SOURCE[SOURCE.index('function isWorkerTab('):SOURCE.index('async function waitLoaded(')]
     data = run_node(code + r'''

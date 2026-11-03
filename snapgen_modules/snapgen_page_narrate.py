@@ -1398,6 +1398,39 @@ def character_ref_files(folder, names) -> list:
     return [(wanted[w], best[w][1]) for w in wanted if w in best]
 
 
+def primary_scene_references(scene, paths, limit):
+    """When over the provider limit, keep only explicitly named characters and the main location."""
+    if len(paths) <= limit:
+        return list(paths)
+    if limit <= 0:
+        raise ImageProviderError("ไม่มีช่องเหลือสำหรับแนบเรฟหลักของฉาก")
+    names = [str(name).split("(")[0].strip().casefold() for name in scene.get("characters") or []]
+    location = str(scene.get("location") or "").strip().casefold()
+    repair = (scene.get("identity_repair") or {}).get("reference")
+    selected = []
+    def add(path):
+        if path and path not in selected:
+            selected.append(path)
+    for name in names:
+        for path in paths:
+            if reference_character_name(Path(path).stem).casefold() == name:
+                add(path)
+    if repair:
+        for path in paths:
+            if os.path.normcase(os.path.abspath(str(path))) == os.path.normcase(os.path.abspath(str(repair))):
+                add(path)
+    locations = []
+    for path in paths:
+        stem = reference_character_name(Path(path).stem).casefold()
+        if location and stem and (stem in location or location in stem):
+            locations.append((stem == location, len(stem), path))
+    if locations:
+        add(max(locations, key=lambda item: (item[0], item[1]))[2])
+    if not selected or len(selected) > limit:
+        raise ImageProviderError("เรฟตัวละครหรือสถานที่หลักเกินจำนวนที่ GPT รับได้ — ตรวจรายชื่อเรฟของฉากนี้")
+    return selected
+
+
 def plan_windows(segments: list, window: float = PLAN_WINDOW) -> list:
     """Group transcript segments into consecutive windows of about ``window`` s."""
     groups, current, start = [], [], None
@@ -5912,8 +5945,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             board = scene.get("board") if os.path.isfile(scene.get("board") or "") else None
             repair = scene.get("identity_repair")
             face = (repair or {}).get("face_reference")
-            if len(paths) + bool(board) + bool(face and Path(face).is_file()) > 6:
-                raise ImageProviderError(f"ช็อต {i + 1}: เรฟรวมเกิน 6 รูป — หยุดก่อนส่งเพื่อไม่ให้เรฟตกหล่น")
+            capacity = 6 - bool(board) - bool(face and Path(face).is_file())
+            if len(paths) > capacity:
+                try:
+                    selected = primary_scene_references(scene, paths, capacity)
+                except ImageProviderError as exc:
+                    raise ImageProviderError(f"ช็อต {i + 1}: {exc}") from exc
+                omitted = [Path(path).stem for path in paths if path not in selected]
+                log(f"ช็อต {i + 1}: เกินขีดจำกัด GPT — แนบเฉพาะตัวละครและสถานที่หลัก {len(selected)} รูป; ไม่แนบ "
+                    + ", ".join(omitted))
+                paths = selected
             jobs.append((i, scene_prompt(scene), paths, board, repair))
         finished = 0
         log(f"GPT: สร้างรูปพร้อมกันสูงสุด 2 งาน · แยกแชตและเรฟแต่ละช็อต · รอ {len(jobs)} รูป")
