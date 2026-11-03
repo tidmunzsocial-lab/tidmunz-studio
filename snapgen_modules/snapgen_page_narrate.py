@@ -1328,6 +1328,7 @@ def bind_auto_context(project, payload, text, references=None):
         project.setdefault("previous_context_histories", []).append({
             "conversation": project.get("conversation") or {}, "image_chat": previous_image_chat})
     project.update(context=context, context_binding=binding, conversation={}, image_chat={}, history_seeded=False)
+    project.pop("storyboard_prompt_repairs", None)
     for key in ("bodies", "base_looks", "same_person", "ghosts", "continuity_done", "continuity_v"):
         project.pop(key, None)
     names = [str(c.get("name") or "") for c in context.get("characters", []) if isinstance(c, dict) and c.get("name")]
@@ -5633,7 +5634,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         grid_template = (ensure_board_template(
             board_dir / f"_grid_{aspect.replace(':', '-')}.png", aspect) if video_mode else None)
         provider = image_provider_for("storyboard")
-        if video_mode and len(groups) > 1 and provider in ("gpt_web", "snapgen"):
+        if video_mode and provider in ("gpt_web", "snapgen"):
             # Each pair uses the same last completed sheet as its continuity reference.
             # Wait for both sheets before choosing the reference for the next pair.
             completed_count = 0
@@ -5642,6 +5643,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 pair = groups[pair_start:pair_start + 2]
                 previous_sheet = previous_board_sheet(board_dir, pair[0][0] + 1)
                 jobs = []
+                failures = []
                 for grp in pair:
                     first, last = grp[0] + 1, grp[-1] + 1
                     refs = []
@@ -5656,6 +5658,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     prompt = board_request([(i + 1, scenes[i]) for i in grp], project["aspect"],
                                            live_action=True, grid_template=bool(grid_template),
                                            prior_sheet=bool(previous_sheet)) + "\n" + style_text()
+                    prompt = (project.get("storyboard_prompt_repairs") or {}).get(f"{first:03d}-{last:03d}") or prompt
                     jobs.append((grp, first, last, sheet_refs, prompt))
 
                 def work(job):
@@ -5669,6 +5672,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     grp, first, last, _refs, _prompt = job
                     if error is not None:
                         log(f"❌ สตอรี่ชีต ช็อต {first}–{last}: {error}")
+                        failures.append((job, error))
                         return
                     panels = [board_dir / f"panel_{i + 1:03d}.png" for i in grp]
                     crop_board(sheet, len(grp), panels)
@@ -5681,7 +5685,38 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                  f"สตอรี่ชีตพร้อมกันสูงสุด 2 · เสร็จ {completed_count}/{len(groups)}")
                     log(f"✓ สตอรี่ชีต ช็อต {first}–{last}: {Path(sheet).name}")
 
-                _run_image_jobs(jobs, work, completed, check_stop, max_workers=2)
+                try:
+                    _run_image_jobs(jobs, work, completed, check_stop, max_workers=2)
+                except (Stopped, HistoryLost, RateLimited, ImageProviderError):
+                    raise
+                except Exception:
+                    # Only an explicit content-policy refusal is safe to rewrite and resubmit.
+                    # A timeout or unknown send state may already have produced a paid image.
+                    if not failures or any(
+                            "gpt said:" not in str(error).lower() or not any(
+                                marker in str(error).lower() for marker in ("นโยบาย", "policy", "content_policy"))
+                            for _job, error in failures):
+                        raise
+                    for job, _error in failures:
+                        check_stop()
+                        grp, first, last, refs, original = job
+                        key = f"{first:03d}-{last:03d}"
+                        if key in (project.get("storyboard_prompt_repairs") or {}):
+                            raise RuntimeError(f"สตอรี่ชีต {first}–{last} ยังถูกปฏิเสธหลังแก้พรอมต์ — ตรวจคำสั่งก่อนทำต่อ")
+                        set_progress("storyboard", completed_count / len(groups),
+                                     f"GPT ปรับพรอมต์สตอรี่ชีต {first}–{last} ให้สอดคล้องนโยบาย")
+                        revised = gpt_text(
+                            "ปรับคำสั่งสตอรี่บอร์ดต่อไปนี้ให้สอดคล้องนโยบายการสร้างภาพ "
+                            "ลดรายละเอียดที่ไม่เหมาะสมโดยรักษาเรื่อง ตัวละคร ลำดับช่อง มุมกล้อง และบทบาทของเรฟเท่าที่ทำได้ "
+                            "ตอบเฉพาะคำสั่งใหม่ ห้ามเพิ่มคำอธิบาย:\n\n" + original).strip()
+                        if not revised:
+                            raise RuntimeError(f"GPT ไม่ส่งพรอมต์ใหม่สำหรับสตอรี่ชีต {first}–{last}")
+                        with state["lock"]:
+                            project.setdefault("storyboard_prompt_repairs", {})[key] = revised
+                            save_project()
+                        repaired_job = (grp, first, last, refs, revised)
+                        sheet = work(repaired_job)
+                        completed(repaired_job, sheet, None)
             log(f"✓ สตอรี่ชีตครบ {len(groups)} ชีต")
             return
         for k, grp in enumerate(groups, 1):

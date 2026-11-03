@@ -1,9 +1,11 @@
 """Exercise the actual storyboard stage without Tk, paid APIs, or recovered code."""
 import ast
 import os
+import threading
 from pathlib import Path
 
 import pytest
+from test_video_auto_scene_provider import N
 
 
 @pytest.mark.parametrize("provider,ref_count,expected", [
@@ -25,7 +27,8 @@ def test_storyboard_continues_with_provider_limit(tmp_path, provider, ref_count,
     noop = lambda *args, **kwargs: None
     scope = {
         "Path": Path, "os": os, "video_mode": True,
-        "state": {"project": {"scenes": scenes, "aspect": "9:16"}, "folder": str(tmp_path)},
+        "state": {"project": {"scenes": scenes, "aspect": "9:16"}, "folder": str(tmp_path), "lock": threading.RLock()},
+        "_run_image_jobs": N._run_image_jobs,
         "board_groups": lambda *args, **kwargs: [list(range(9))],
         "ensure_board_template": lambda *args: "grid.png",
         "previous_board_sheet": lambda *args: "previous.png",

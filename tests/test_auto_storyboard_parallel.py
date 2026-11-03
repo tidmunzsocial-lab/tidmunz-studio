@@ -68,3 +68,40 @@ def test_stop_drains_both_submitted_sheets_and_saves_successes(tmp_path):
         set_progress=noop,log=noop)
     with pytest.raises(N.Stopped):load(scope,'stage_storyboard')()
     assert len(started)==2 and all(scenes[i].get('board') for i in (0,1)) and not scenes[2].get('board')
+
+
+@pytest.mark.parametrize('refusal', [True, False])
+def test_refused_sheet_is_safely_rewritten_after_other_finishes_but_unknown_failure_is_not_replayed(tmp_path, refusal):
+    groups=[[0],[1]]; scenes=[{'prompt':'original zero'},{'prompt':'original one'}]
+    state={'project':{'scenes':scenes,'aspect':'16:9'},'folder':str(tmp_path),'lock':threading.RLock()}
+    barrier=threading.Barrier(2);calls=[];rewrites=[];saved=[]
+    def make_image(prompt,refs,folder,name,aspect,**kwargs):
+        calls.append((name,prompt))
+        if len(calls)<=2:barrier.wait(timeout=4)
+        if name=='sheet_001-001' and prompt != 'safe storyboard prompt':
+            raise RuntimeError('HTTP 502 no_image GPT said: ขัดต่อนโยบายด้านเนื้อหา' if refusal else 'HTTP 502 timeout unknown')
+        path=folder/(name+'.png');path.write_text(name);return str(path)
+    def crop(sheet,_count,panels):
+        for p in panels:p.write_text(Path(sheet).name)
+    def rewrite(prompt):
+        assert scenes[1].get('board'), 'other submitted sheet must be saved before GPT rewrite'
+        rewrites.append(prompt);return 'safe storyboard prompt'
+    noop=lambda *a,**k:None
+    scope=dict(vars(N),state=state,video_mode=True,board_groups=lambda *a,**k:groups,
+        check_script_matches_audio=noop,ensure_story_in_history=noop,ensure_continuity=noop,ensure_bodies=noop,
+        ensure_board_template=lambda *a:'grid.png',character_refs=lambda:{},image_provider_for=lambda stage:'gpt_web',
+        previous_board_sheet=lambda *a:None,attachments_for=lambda scene:[],board_request=lambda *a,**k:'original board',
+        style_text=lambda:'style',make_image=make_image,crop_board=crop,check_stop=noop,
+        save_project=lambda:saved.append(dict(state['project'].get('storyboard_prompt_repairs') or {})),
+        set_progress=noop,log=noop,gpt_text=rewrite)
+    stage=load(scope,'stage_storyboard')
+    if refusal:
+        stage()
+        assert len(rewrites)==1 and len(calls)==3
+        assert state['project']['storyboard_prompt_repairs']=={'001-001':'safe storyboard prompt'}
+        assert saved[-1]=={'001-001':'safe storyboard prompt'}
+        assert all(s.get('board') for s in scenes)
+    else:
+        with pytest.raises(RuntimeError,match='timeout unknown'):stage()
+        assert not rewrites and len(calls)==2 and scenes[1].get('board')
+    assert [s['prompt'] for s in scenes]==['original zero','original one']
