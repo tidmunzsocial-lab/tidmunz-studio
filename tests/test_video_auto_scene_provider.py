@@ -15,11 +15,15 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "snapgen_modules"))
 import snapgen_page_narrate as N
+from snapgen_mobile_controller import MobileController
 
 TREE = ast.parse(Path(N.__file__).read_text(encoding="utf-8-sig"))
 
 
 def load(scope, name, parent=None):
+    if parent == "start_pipeline":
+        # Extracted workers need the enclosing function's default argument.
+        scope.setdefault("image_provider_choice", None)
     tree = TREE if parent is None else next(n for n in ast.walk(TREE)
                                            if isinstance(n, ast.FunctionDef) and n.name == parent)
     node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -287,3 +291,49 @@ def test_stop_drains_five_submitted_jobs_and_saves_all_results():
         assert errors == ["stopped"]
     finally:
         release.set(); worker.join(5)
+
+
+@pytest.mark.parametrize("data,expected", [({}, {}), ({"provider": "gpt_web"}, {"image_provider_choice": "gpt_web"})])
+def test_execute_routes_provider_to_pipeline(data, expected):
+    calls = []
+    scope = dict(state={"busy": False, "project": {"scenes": [{}] * 115}},
+                 start_pipeline=lambda **kw: calls.append(kw))
+    start = load(scope, "mobile_start")
+    controller = MobileController.__new__(MobileController)
+    controller.g = {"mobile_image_actions": {}, "mobile_auto": {"start": start}}
+    controller.execute({"action": "auto_start", "data": data})
+    assert calls == [expected]
+
+
+@pytest.mark.parametrize("provider", ["snapgen", "unknown", "", None, [], {}])
+def test_explicit_unsupported_provider_never_starts(provider):
+    controller = MobileController.__new__(MobileController)
+    controller.g = {"mobile_image_actions": {}, "mobile_auto": {
+        "start": lambda **kw: pytest.fail("unsupported provider started")}}
+    with pytest.raises(ValueError, match="gpt_web"):
+        controller.execute({"action": "auto_start", "data": {"provider": provider,
+                            "accept_snapgen_credit": True}})
+
+
+def test_explicit_web_survives_worker_reset_without_chooser(tmp_path):
+    scope, dialogs, logs = chooser_scope(tmp_path, [])
+    project = scope["state"]["project"]
+    project["image_stage_providers"] = {"images": "snapgen"}
+    scope["state"]["snapgen_credit_acceptance"] = {"ceiling": 999}
+    seen = []
+    def images():
+        seen.append(scope["image_provider_for"]("images"))
+        raise N.Stopped()
+    scope.update(project=project, only=None, character_limit=None, image_provider_choice="gpt_web",
+                 stages=[("images", "images", 1)], STAGE_FUNCS={"images": images},
+                 review_var=SimpleNamespace(get=lambda: False),
+                 refresh_stages=lambda *a: None, refresh_all=lambda: None,
+                 ui=lambda fn, *a: fn(*a), g={}, stage_var=Widget(), detail_var=Widget(),
+                 bar=Widget(), start_btn=Widget())
+    load(scope, "worker", "start_pipeline")()
+    assert seen == ["gpt_web"]
+    assert dialogs == []
+    assert "snapgen_credit_acceptance" not in scope["state"]
+    assert scope["image_provider_for"]("storyboard") == "snapgen"
+    assert project["scenes"] == [{"image": "keep-existing.png"}]
+    assert not any(message.startswith("❌") for message in logs)

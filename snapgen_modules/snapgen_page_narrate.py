@@ -7774,7 +7774,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         dialog.wait_window()
         return result["value"]
 
-    def start_pipeline(only=None, character_limit=None):
+    def start_pipeline(only=None, character_limit=None, *, image_provider_choice=None):
+        if image_provider_choice not in (None, "gpt_web"):
+            raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web")
         if video_mode and only == "video":
             render_video_selected()
             return
@@ -7910,6 +7912,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         state.pop(transient, None)
                     ui(refresh_snapgen_credit_warning)
                     project.setdefault("image_stage_providers", {}).pop("images", None)
+                    if image_provider_choice is not None:
+                        project["image_stage_providers"]["images"] = image_provider_choice
                 keys = [only] if only else [k for k, _t, _w in stages]
                 confirmed = False
                 for key in keys:
@@ -8807,12 +8811,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 raise ValueError("เปิดเรื่องนี้ไม่ได้")
             return f"เปิดเรื่อง {folder.name} แล้ว"
 
-        def mobile_start() -> str:
+        def mobile_start(provider=None) -> str:
+            if provider not in (None, "gpt_web"):
+                raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web")
             if state["busy"]:
                 raise ValueError("ออโต้กำลังทำงานอยู่แล้ว")
             if not state.get("project"):
                 raise ValueError("ยังไม่ได้เปิดเรื่อง — เลือกเรื่องก่อน")
-            start_pipeline()
+            if provider is None:
+                start_pipeline()
+            else:
+                start_pipeline(image_provider_choice=provider)
             return "เริ่ม / ทำต่อแล้ว ดูความคืบหน้าในหน้านี้"
 
         def mobile_stop() -> str:

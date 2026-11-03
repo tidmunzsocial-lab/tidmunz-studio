@@ -721,6 +721,10 @@ class MobileController:
             if action == "auto_open":
                 return auto["open"](str(data.get("name") or ""))
             if action == "auto_start":
+                if "provider" in data:
+                    if data["provider"] != "gpt_web":
+                        raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web")
+                    return auto["start"](provider=data["provider"])
                 return auto["start"]()
             if action == "auto_stop":
                 return auto["stop"]()
