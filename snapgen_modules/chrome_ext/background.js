@@ -379,9 +379,58 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
                send_state: "unknown"};
   }
   if (cancelled) return {error: "ChatGPT operation cancelled"};
+  let deliveryBaseline = Array.isArray(known) ? known :
+    (started && Array.isArray(started.before) ? started.before : null);
+  const reconcileUnknownSend = async () => {
+    if (!started || !started.error || started.send_state !== "unknown") return;
+    if (!job.conversation_id) {
+      // A new chat can confirm acceptance only after its new conversation contains this prompt.
+      for (let i = 0; i < 10 && started.send_state === "unknown"; i++) {
+        if (cancelled) return;
+        await sleep(1500);
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          const created = (tab.url || "").match(/^https:\/\/chatgpt\.com\/c\/([0-9a-f-]{20,})(?:[/?#]|$)/);
+          if (created) {
+            const newJob = {...job, conversation_id: created[1]};
+            const baseline = Array.isArray(deliveryBaseline) ? deliveryBaseline : [];
+            const verified = await inPage(tabId, pageVerifyDelivery, [newJob, baseline]);
+            if (verified && verified.state === "sent")
+              started = {ok: true, before: baseline, oldPointers: [], dom_before: baseline,
+                         conversation_id: created[1], user_message_id: verified.user_message_id,
+                         send_state: "sent"};
+            return;
+          }
+        } catch (e) {}
+      }
+    } else if (Array.isArray(deliveryBaseline)) {
+      // Give the UI time to expose the new message, then verify its exact prompt server-side.
+      for (let i = 0; i < 10 && started.send_state === "unknown"; i++) {
+        if (cancelled) return;
+        await sleep(1500);
+        try {
+          const now = await inPage(tabId, pageNodes, [job.conversation_id, job.type]);
+          if (Array.isArray(now) && now.length > deliveryBaseline.length) break;
+        } catch (e) {}
+      }
+    }
+    if (started.send_state !== "unknown" || !Array.isArray(deliveryBaseline)) return;
+    try {
+      const verified = await inPage(tabId, pageVerifyDelivery, [job, deliveryBaseline]);
+      if (verified && verified.state === "sent") {
+        started = {ok: true, before: deliveryBaseline, oldPointers: [], dom_before: deliveryBaseline,
+                   dom_mode: job.type === "chat", user_message_id: verified.user_message_id,
+                   conversation_id: job.conversation_id || null, send_state: "sent"};
+      } else if (verified && verified.state === "not_sent") {
+        started = {error: "ChatGPT confirmed no new prompt reached the conversation; safe to retry once",
+                   send_state: "not_sent", dom_before: deliveryBaseline};
+      }
+    } catch (e) {} // A failed or rate-limited verification remains unknown; never guess.
+  };
+  await reconcileUnknownSend();
+  if (cancelled) return {error: "ChatGPT operation cancelled"};
   if (started && started.error && started.send_state === "not_sent") {
-    // A stale/restoring ChatGPT tab can keep its URL but fail to accept a prompt. Retry only when
-    // pageSend proved the draft was still unsent, and use a fresh worker tab exactly once.
+    // Retry only after a failure before the click or an authoritative no-new-message check.
     try {
       await report("opening");
       tabId = await freshTab(tabId, url, workerKey);
@@ -397,36 +446,11 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
       started = {error: "ChatGPT page stopped responding after the retry send attempt: " + String(e && e.message || e),
                  send_state: "unknown"};
     }
+    if (!job.conversation_id && started && Array.isArray(started.dom_before))
+      deliveryBaseline = started.dom_before;
+    await reconcileUnknownSend(); // confirm this one retry, but never send a third time
   }
-  if ((!started || started.error && started.send_state === "unknown") && !job.conversation_id) {
-    // A long message (a whole story) is sent, then ChatGPT navigates to /c/<id> before the result comes back.
-    // If a new chat opened, the message went out: keep waiting for the reply in that chat.
-    for (let i = 0; i < 10 && (!started || started.send_state === "unknown"); i++) {
-      if (cancelled) return {error: "ChatGPT operation cancelled"};
-      await sleep(1500);
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        const created = (tab.url || "").match(/^https:\/\/chatgpt\.com\/c\/([0-9a-f-]{20,})(?:[/?#]|$)/);
-        if (created) started = {ok: true, before: [], oldPointers: [], conversation_id: created[1], send_state: "sent"};
-      } catch (e) {}
-    }
-  }
-  if ((!started || started.error && started.send_state === "unknown") &&
-      job.conversation_id && Array.isArray(known)) {
-    for (let i = 0; i < 10 && (!started || started.send_state === "unknown"); i++) {
-      if (cancelled) return {error: "ChatGPT operation cancelled"};
-      await sleep(1500);
-      try {
-        const now = await inPage(tabId, pageNodes, [job.conversation_id, job.type]);
-        if (Array.isArray(now) && now.length > known.length) {
-          // The page may accept the prompt but fail to expose its new message ID/text to pageSend.
-          // Conversation growth confirms this ambiguous send; continue polling without resubmitting.
-          started = {ok: true, before: known, oldPointers: [], send_state: "sent"};
-          break;
-        }
-      } catch (e) {}
-    }
-  }
+  if (cancelled) return {error: "ChatGPT operation cancelled"};
   if (!started || started.error) return started || {error: "ChatGPT page did not answer (no message reached the chat)"};
   await report("waiting");
   // The job's state lives here, not in the page: a reloaded tab keeps going from the conversation itself.
@@ -495,13 +519,83 @@ async function pageNodes(cid, kind) {
   return Object.keys((await r.json()).mapping || {});
 }
 
+// A clicked Send with no visible confirmation is ambiguous. Retry only when two fresh,
+// identical conversation reads prove no prompt arrived and the same composer draft is still ready.
+async function pageVerifyDelivery(job, before) {
+  const previous = Array.isArray(before) ? before : [];
+  const normalize = value => String(value || "").normalize("NFKC").replace(/[\s\p{Cf}]+/gu, "");
+  const expected = normalize(job.prompt);
+  if (!expected) return {state: "unknown"};
+  const routeCid = (location.pathname || "").match(/^\/c\/([0-9a-f-]{20,})(?:[/?#]|$)/i);
+  const cid = String(job.conversation_id || (routeCid && routeCid[1]) || "");
+  const domNodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
+  const domMatch = domNodes.find(node => node.getAttribute("data-message-author-role") === "user" &&
+    !previous.includes(node.getAttribute("data-message-id") || "") &&
+    normalize(node.innerText || node.textContent || "").includes(expected));
+  if (domMatch) return {state: "sent", user_message_id: domMatch.getAttribute("data-message-id")};
+  if (cid) {
+    if (job.conversation_id && location.pathname !== `/c/${cid}`) return {state: "unknown"};
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 3000));
+      let entries;
+      try {
+        const session = await (await fetch("/api/auth/session", {cache: "no-store"})).json();
+        if (!session || !session.accessToken) return {state: "unknown"};
+        const response = await fetch(`/backend-api/conversation/${cid}`, {
+          cache: "no-store", headers: {Authorization: "Bearer " + session.accessToken}
+        });
+        if (!response.ok) return {state: "unknown", provider_status: response.status};
+        const data = await response.json();
+        entries = Object.entries(data.mapping || {}).filter(([, node]) => node && node.message);
+      } catch (e) { return {state: "unknown"}; }
+      const fresh = entries.filter(([id]) => !previous.includes(id));
+      const matchingUser = fresh.find(([, node]) => {
+        if (!node.message.author || node.message.author.role !== "user") return false;
+        const parts = node.message.content && node.message.content.parts || [];
+        return normalize(parts.filter(part => typeof part === "string").join("\n")).includes(expected);
+      });
+      if (matchingUser) return {state: "sent", user_message_id: matchingUser[0]};
+      // Any unexplained change is ambiguous; only two unchanged snapshots can prove not-sent.
+      if (fresh.length || entries.length !== previous.length) return {state: "unknown"};
+    }
+    // A newly created conversation without the exact prompt is still ambiguous.
+    if (!job.conversation_id && routeCid) return {state: "unknown"};
+  } else {
+    // The new-chat page has no authoritative conversation read; never retry an ambiguous click.
+    return {state: "unknown"};
+  }
+
+  const editor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
+    document.querySelector('form #prompt-textarea[contenteditable="true"]');
+  const form = editor && editor.closest("form");
+  const send = form && form.querySelector('button[type="submit"]');
+  const draft = normalize(editor && (editor.innerText || editor.textContent || ""));
+  const buttons = form ? [...form.querySelectorAll("button")] : [];
+  const busy = buttons.some(button => button.getAttribute("data-testid") === "stop-button" ||
+    /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((button.getAttribute("aria-label") || "").trim()));
+  const uploading = Boolean(form && form.querySelector('[role="progressbar"], [aria-busy="true"], circle[stroke-dasharray]'));
+  const attached = buttons.filter(button => /^(ลบ|remove)\s/i.test((button.getAttribute("aria-label") || "").trim())).length;
+  const expectedImages = (job.images || []).length;
+  if (editor && editor.isConnected !== false && form && form.isConnected !== false &&
+      send && send.isConnected !== false && !send.disabled && !busy && !uploading &&
+      draft === expected && attached >= expectedImages)
+    return {state: "not_sent"};
+  return {state: "unknown"};
+}
+
 async function pageSend(job) {
   let sendAttempted = false;
+  let sendBaseline = null;
+  let sendDomBaseline = null;
   try {
-    return await pageSendInner(job, () => { sendAttempted = true; });
+    return await pageSendInner(job, (baseline, domBaseline) => {
+      sendAttempted = true; sendBaseline = baseline; sendDomBaseline = domBaseline;
+    });
   } catch (e) {
     return {error: "ChatGPT page error while sending: " + (e && e.message ? e.message : String(e)),
-            send_state: sendAttempted ? "unknown" : "not_sent"};
+            send_state: sendAttempted ? "unknown" : "not_sent",
+            ...(Array.isArray(sendBaseline) ? {before: sendBaseline} : {}),
+            ...(Array.isArray(sendDomBaseline) ? {dom_before: sendDomBaseline} : {})};
   }
   async function pageSendInner(job, markSendAttempted) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -620,7 +714,7 @@ async function pageSend(job) {
   editor = latestEditor;
   form = latestForm;
   send = latestSend;
-  markSendAttempted();
+  markSendAttempted(before, domBefore);
   send.click();
   let sendClicks = 1;
   let userMessageId = null;
@@ -682,7 +776,7 @@ async function pageSend(job) {
                   typeof currentSend.getAttribute === "function" && currentSend.getAttribute("data-testid") === "send-button")),
               };
       return {error: "ChatGPT page did not answer: the prompt was not confirmed in the conversation; no reply wait started; delivery=" + JSON.stringify(deliveryDebug),
-              send_state: "unknown", delivery_debug: deliveryDebug};
+              send_state: "unknown", delivery_debug: deliveryDebug, before, dom_before: domBefore};
     }
   }
   return {ok: true, before, oldPointers, dom_before: domBefore,

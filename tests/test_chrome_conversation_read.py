@@ -368,6 +368,106 @@ pageSend({type:'chat',conversation_id:'existing',prompt:'plan',images:[]}).then(
     assert data["result"]["delivery_debug"]["draft_matches"] is True
 
 
+@pytest.mark.parametrize("accepted,status,expected_state,expected_reads", [
+    (False, 200, "not_sent", 2),
+    (True, 200, "sent", 1),
+    (False, 429, "unknown", 1),
+])
+def test_delivery_verification_requires_fresh_authoritative_reads(accepted, status, expected_state, expected_reads):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    function = source[source.index("async function pageVerifyDelivery("):source.index("async function pageSend(job)")]
+    harness = r'''
+let reads=0;
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+const send={disabled:false,getAttribute:()=>null};
+const form={isConnected:true,querySelectorAll:()=>[send],querySelector:s=>s==='button[type="submit"]'?send:null};
+const editor={isConnected:true,innerText:'plan',textContent:'plan',closest:()=>form};
+global.document={querySelector:()=>editor,querySelectorAll:()=>[]};
+global.fetch=async(url,options)=>{
+ if(url==='/api/auth/session')return {json:async()=>({accessToken:'test'})};
+ if(options.cache!=='no-store')throw Error('delivery read must not use cache');
+ reads++;
+ if(STATUS!==200)return {ok:false,status:STATUS};
+ const mapping={
+  'old-user':{message:{author:{role:'user'},content:{parts:['plan']}}},
+  'old-assistant':{message:{author:{role:'assistant'},content:{parts:['old reply']}}}
+ };
+ if(ACCEPTED)mapping['new-user']={message:{author:{role:'user'},content:{parts:['plan']}}};
+ return {ok:true,json:async()=>({mapping})};
+};
+pageVerifyDelivery({conversation_id:'existing',prompt:'plan',images:[]},['old-user','old-assistant']).then(result=>
+ console.log(JSON.stringify({result,reads}))).catch(e=>{console.error(e);process.exitCode=1});
+'''.replace("ACCEPTED", str(accepted).lower()).replace("STATUS", str(status))
+    result = subprocess.run([node, "-e", function + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["result"]["state"] == expected_state
+    assert data["reads"] == expected_reads
+
+
+def test_delivery_verification_accepts_exact_new_dom_prompt_without_private_api_read():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    function = source[source.index("async function pageVerifyDelivery("):source.index("async function pageSend(job)")]
+    harness = r'''
+const old={getAttribute:k=>k==='data-message-id'?'old-user':'user',innerText:'plan'};
+const fresh={getAttribute:k=>k==='data-message-id'?'new-user':'user',innerText:'plan'};
+global.location={pathname:'/c/existing'};
+global.document={querySelectorAll:()=>[old,fresh]};
+global.fetch=async()=>{throw Error('the exact new DOM message is sufficient');};
+pageVerifyDelivery({conversation_id:'existing',prompt:'plan',images:[]},['old-user']).then(result=>
+ console.log(JSON.stringify(result))).catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", function + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data == {"state": "sent", "user_message_id": "new-user"}
+
+
+@pytest.mark.parametrize("verification,retry_expected", [("not_sent", True), ("unknown", False)])
+def test_unknown_existing_chat_retries_only_after_verified_no_delivery(verification, retry_expected):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    run = source[source.index("async function runJob("):source.index("// ── functions below")]
+    harness = r'''
+let sends=0,polls=0,fresh=0,verifies=0,reads=0;
+const JOB_LIMIT_MS=720000,sleep=async()=>{};
+const workerTab=async()=>7, freshTab=async()=>{fresh++;return 8;}, openPage=async id=>id;
+global.chrome={tabs:{get:async()=>({status:'complete'})}};
+function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
+async function inPage(_id,fn){
+ if(fn.name==='pageNodes'){reads++;return ['old-user','old-assistant'];}
+ if(fn.name==='pageSend'){
+  sends++;
+  return sends===1?{error:'prompt was not confirmed',send_state:'unknown',before:['old-user','old-assistant']}:
+    {ok:true,before:['old-user','old-assistant'],oldPointers:[],conversation_id:'existing'};
+ }
+ if(fn.name==='pageVerifyDelivery'){verifies++;return {state:VERIFICATION};}
+ if(fn.name==='pagePoll'){polls++;return {done:true,text:'recovered reply',conversation_id:'existing'};}
+}
+const relay=async()=>({active:true});
+runJob({id:'job',type:'chat',conversation_id:'existing',prompt:'plan'}).then(result=>
+ console.log(JSON.stringify({result,sends,polls,fresh,verifies,reads})))
+ .catch(e=>{console.error(e);process.exitCode=1});
+'''.replace("VERIFICATION", json.dumps(verification))
+    result = subprocess.run([node, "-e", run + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["sends"] == (2 if retry_expected else 1)
+    assert data["fresh"] == (1 if retry_expected else 0)
+    assert data["verifies"] == 1 and data["reads"] >= 2
+    assert data["polls"] == (1 if retry_expected else 0)
+    if retry_expected:
+        assert data["result"]["text"] == "recovered reply"
+    else:
+        assert data["result"]["send_state"] == "unknown"
+
+
 def test_run_job_retries_proven_unsent_prompt_once_in_fresh_worker_tab():
     node = shutil.which("node")
     if not node:
@@ -415,10 +515,11 @@ let sends=0, polls=0, reads=0;
 const JOB_LIMIT_MS=720000, sleep=async()=>{};
 const workerTab=async()=>7, openPage=async id=>id;
 global.chrome={tabs:{get:async()=>({status:'complete'})}};
-function pageNodes(){} function pageSend(){} function pagePoll(){}
+function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
 async function inPage(_id,fn){
  if(fn.name==='pageNodes')return ++reads===1?['old-user','old-assistant']:['old-user','old-assistant','new-user'];
  if(fn.name==='pageSend'){sends++;return {error:'prompt was not confirmed',send_state:'unknown'};}
+ if(fn.name==='pageVerifyDelivery')return {state:'sent',user_message_id:'new-user'};
  if(fn.name==='pagePoll'){polls++;return {done:true,text:'recovered reply',conversation_id:'existing'};}
 }
 const relay=async()=>({active:true});
@@ -448,9 +549,10 @@ def test_unknown_new_chat_recovers_created_conversation_without_resending(locati
 let sends=0, polls=0, polledCid=null;
 const JOB_LIMIT_MS=720000, sleep=async()=>{}, workerTab=async()=>7, openPage=async id=>id;
 global.chrome={tabs:{get:async()=>({status:'complete',url:LOCATION})}};
-function pageNodes(){} function pageSend(){} function pagePoll(){}
+function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
 async function inPage(_id,fn,args){
  if(fn.name==='pageSend'){sends++;return {error:'prompt was not confirmed',send_state:'unknown'};}
+ if(fn.name==='pageVerifyDelivery')return {state:'sent',user_message_id:'new-user'};
  if(fn.name==='pagePoll'){polls++;polledCid=args[1].cid;return {done:true,text:'new reply'};}
  throw Error('unexpected read');
 }
