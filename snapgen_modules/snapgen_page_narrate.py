@@ -1183,6 +1183,14 @@ def bridge_rate_limit(status, detail):
     return limited
 
 
+def image_rate_limit_from_error(error):
+    """Recover explicit pre-send metadata from the image bridge's HTTPError string."""
+    match = re.search(r"HTTP\s*429:\s*(\{.*\})", str(error), re.DOTALL)
+    if not match:
+        return None
+    return bridge_rate_limit(429, match.group(1))
+
+
 def run_bridge_with_cooldown(send, check_stop, wait, on_wait):
     """Replay only a pre-send rejection; an accepted/unknown request is never submitted again."""
     attempt = 0
@@ -5981,8 +5989,24 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             i, prompt, paths, board, repair = job
             with attempt_lock:
                 attempts[i] += 1
-            return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}", project["aspect"],
-                              board=board, identity_repair=repair, fresh_chat=True, parallel_images=True)
+
+            def send():
+                try:
+                    return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}", project["aspect"],
+                                      board=board, identity_repair=repair, fresh_chat=True, parallel_images=True)
+                except Exception as exc:
+                    limited = image_rate_limit_from_error(exc)
+                    if limited is not None:
+                        raise limited from exc
+                    raise
+
+            def cooldown(delay, attempt):
+                saved = sum(1 for current in jobs if image_saved(current))
+                log(f"⏳ GPT รูปช็อต {i + 1} ยังไม่รับคำขอ (429) — รอ {int(delay)} วินาทีแล้วส่งคำขอเดิมต่อ (รอบ {attempt})")
+                set_progress("images", saved / max(1, len(jobs)),
+                             f"GPT สูงสุด 2 งาน · เสร็จ {saved}/{len(jobs)} · ช็อต {i + 1} รอ GPT {int(delay)} วินาที")
+
+            return run_bridge_with_cooldown(send, check_stop, time.sleep, cooldown)
 
         def completed(job, image, error):
             i = job[0]

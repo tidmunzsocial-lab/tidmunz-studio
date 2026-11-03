@@ -89,6 +89,46 @@ def test_auto_two_jobs_preserve_out_of_order_results_and_drain(tmp_path, stop):
         assert Path(restored['scenes'][i]['image']).read_text() == f'shot {i}'
 
 
+@pytest.mark.parametrize(('send_state', 'expected_attempts'), [('not_sent', 2), ('sent', 1), ('unknown', 1)])
+def test_gpt_image_429_retries_only_explicit_not_sent(tmp_path, monkeypatch, send_state, expected_attempts):
+    scenes = [dict(prompt='shot 0', characters=['person0'])]
+    project = dict(scenes=scenes, aspect='16:9')
+    calls, waits, logs = [], [], []
+    monkeypatch.setattr(N.time, 'sleep', lambda seconds: waits.append(seconds))
+
+    def make_image(prompt, paths, folder, name, aspect, **kwargs):
+        call = (prompt, tuple(paths), name, aspect, kwargs.copy())
+        calls.append(call)
+        if len(calls) == 1:
+            body = json.dumps({'error': {
+                'code': 'rate_limited', 'send_state': send_state,
+                'retry_after': 15, 'message': 'image queue cooling down'}})
+            raise RuntimeError('HTTP 429: ' + body)
+        output = folder / (name + '.png')
+        output.write_text('generated')
+        return str(output)
+
+    scope = dict(vars(N), state=dict(project=project, lock=threading.RLock()),
+                 attachments_for=lambda _scene, limit: ['primary-ref'],
+                 scene_prompt=lambda scene: scene['prompt'], make_image=make_image,
+                 check_stop=lambda: None, save_project=lambda: None,
+                 log=lambda message: logs.append(message), set_progress=lambda *args: None,
+                 ui=lambda *args: None, refresh_table=None, follow_shot=None)
+    run = load(scope, 'run_gpt_scenes')
+
+    if send_state == 'not_sent':
+        run(range(1), scenes, tmp_path)
+        assert Path(scenes[0]['image']).read_text() == 'generated'
+        assert len(waits) == 30 and sum(waits) == 30
+        assert any('รอ 30 วินาที' in message for message in logs)
+        assert calls[0] == calls[1]
+    else:
+        with pytest.raises(N.RateLimited):
+            run(range(1), scenes, tmp_path)
+        assert waits == []
+    assert len(calls) == expected_attempts
+
+
 def test_gpt_ambiguous_timeout_is_not_resent_and_unstarted_jobs_continue(tmp_path):
     scenes = [dict(prompt=f'shot {i}', characters=[f'person{i}']) for i in range(5)]
     state_lock = threading.RLock()
