@@ -1274,7 +1274,24 @@ def context_matches_script(payload, script, text):
     except (OSError, ValueError, zipfile.BadZipFile):
         return False
     if expected and not shared.matches_story(payload, full):
-        return False
+        # Prompt-Ref retains blank Word paragraphs while Auto strips them.
+        # Verify the original Prompt-Ref extraction against the stored hash;
+        # the selected story still has to match that source below.
+        if source.suffix.lower() != ".docx":
+            return False
+        try:
+            import xml.etree.ElementTree as ET
+            ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            with zipfile.ZipFile(source) as archive:
+                root = ET.fromstring(archive.read("word/document.xml"))
+            prompt_ref_text = "\n".join(
+                "".join(node.text or "" for node in para.iter(ns + "t"))
+                for para in root.iter(ns + "p")
+            ).strip()
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError):
+            return False
+        if not shared.matches_story(payload, prompt_ref_text):
+            return False
     if _squash(text) not in _squash(full):
         return False
     if not expected:

@@ -1,10 +1,26 @@
 """Changed input must not inherit another story's Context/chat or adopt old scene files."""
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
 from test_video_auto_scene_provider import N, load
 import snapgen_shared_context as shared
+
+
+def test_word_blank_paragraphs_match_prompt_ref_hash_without_accepting_other_story(tmp_path):
+    story = tmp_path / "story.docx"
+    xml = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           '<w:body><w:p><w:r><w:t>นาคา</w:t></w:r></w:p><w:p/>'
+           '<w:p><w:r><w:t>ช่วยชาวบ้าน</w:t></w:r></w:p></w:body></w:document>')
+    with zipfile.ZipFile(story, 'w') as archive:
+        archive.writestr('word/document.xml', xml)
+    data = {'path': str(tmp_path / 'story.tidmunz-context.json'), 'source_name': story.name,
+            'story_sha256': shared.story_hash('นาคา\n\nช่วยชาวบ้าน')}
+    assert N.context_matches_script(data, story, N.read_script(story))
+    assert not N.context_matches_script(data, story, 'อีกเรื่องหนึ่ง')
+    data['story_sha256'] = shared.story_hash('บทอื่น')
+    assert not N.context_matches_script(data, story, N.read_script(story))
 
 
 def payload(folder, name, text, title, characters=None, saved="2026-11-02 12:00:00"):
