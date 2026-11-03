@@ -7861,8 +7861,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return result["value"]
 
     def start_pipeline(only=None, character_limit=None, *, image_provider_choice=None):
-        if image_provider_choice not in (None, "gpt_web"):
-            raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web")
+        if image_provider_choice not in (None, "gpt_web", "snapgen"):
+            raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web หรือ snapgen")
         if video_mode and only == "video":
             render_video_selected()
             return
@@ -8898,8 +8898,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return f"เปิดเรื่อง {folder.name} แล้ว"
 
         def mobile_start(provider=None) -> str:
-            if provider not in (None, "gpt_web"):
-                raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web")
+            if provider not in (None, "gpt_web", "snapgen"):
+                raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web หรือ snapgen")
             if state["busy"]:
                 raise ValueError("ออโต้กำลังทำงานอยู่แล้ว")
             if not state.get("project"):

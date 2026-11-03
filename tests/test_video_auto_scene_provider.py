@@ -293,7 +293,11 @@ def test_stop_drains_five_submitted_jobs_and_saves_all_results():
         release.set(); worker.join(5)
 
 
-@pytest.mark.parametrize("data,expected", [({}, {}), ({"provider": "gpt_web"}, {"image_provider_choice": "gpt_web"})])
+@pytest.mark.parametrize("data,expected", [
+    ({}, {}),
+    ({"provider": "gpt_web"}, {"image_provider_choice": "gpt_web"}),
+    ({"provider": "snapgen"}, {"image_provider_choice": "snapgen"}),
+])
 def test_execute_routes_provider_to_pipeline(data, expected):
     calls = []
     scope = dict(state={"busy": False, "project": {"scenes": [{}] * 115}},
@@ -305,7 +309,7 @@ def test_execute_routes_provider_to_pipeline(data, expected):
     assert calls == [expected]
 
 
-@pytest.mark.parametrize("provider", ["snapgen", "unknown", "", None, [], {}])
+@pytest.mark.parametrize("provider", ["unknown", "", None, [], {}])
 def test_explicit_unsupported_provider_never_starts(provider):
     controller = MobileController.__new__(MobileController)
     controller.g = {"mobile_image_actions": {}, "mobile_auto": {
@@ -313,6 +317,15 @@ def test_explicit_unsupported_provider_never_starts(provider):
     with pytest.raises(ValueError, match="gpt_web"):
         controller.execute({"action": "auto_start", "data": {"provider": provider,
                             "accept_snapgen_credit": True}})
+
+
+@pytest.mark.parametrize("provider", ["gpt_web", "snapgen"])
+def test_start_pipeline_accepts_supported_mobile_image_provider(provider):
+    start = load({}, "start_pipeline")
+    # The supported provider must pass validation; execution then stops at the
+    # next missing GUI dependency without starting any workflow or API call.
+    with pytest.raises(NameError, match="video_mode"):
+        start(image_provider_choice=provider)
 
 
 def test_explicit_web_survives_worker_reset_without_chooser(tmp_path):
@@ -337,3 +350,55 @@ def test_explicit_web_survives_worker_reset_without_chooser(tmp_path):
     assert scope["image_provider_for"]("storyboard") == "snapgen"
     assert project["scenes"] == [{"image": "keep-existing.png"}]
     assert not any(message.startswith("❌") for message in logs)
+
+
+def test_explicit_snapgen_routes_only_missing_scene_images_and_keeps_existing(tmp_path):
+    scope, dialogs, logs = chooser_scope(tmp_path, [])
+    project = scope["state"]["project"]
+    project["image_stage_providers"] = {"images": "gpt_web"}
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    existing_path = images_dir / "scene_001.png"
+    existing_path.write_bytes(b"existing")
+    existing = {"image": str(existing_path)}
+    project["scenes"] = [existing, {"image": None}]
+    scope["state"]["folder"] = str(tmp_path)
+    routed = []
+
+    def snapgen(todo, scenes, refs, target, selected_redraw=False):
+        routed.append((list(todo), selected_redraw))
+        generated = Path(target) / "scene_002.png"
+        generated.write_bytes(b"generated")
+        scenes[1]["image"] = str(generated)
+
+    scope.update(
+        video_mode=True,
+        image_provider_for=lambda stage: project["image_stage_providers"].get(stage),
+        check_script_matches_audio=lambda: None,
+        ensure_story_in_history=lambda: None,
+        ensure_continuity=lambda: None,
+        ensure_bodies=lambda: None,
+        research_ghosts=lambda: None,
+        run_snapgen_scenes=snapgen,
+        verify_images=lambda: None,
+    )
+    stage_images = load(scope, "stage_images", "_build")
+
+    def images():
+        stage_images()
+
+    scope.update(project=project, only=None, character_limit=None, image_provider_choice="snapgen",
+                 stages=[("images", "images", 1)], STAGE_FUNCS={"images": images},
+                 review_var=SimpleNamespace(get=lambda: False),
+                 refresh_stages=lambda *a: None, refresh_all=lambda: None,
+                 ui=lambda fn, *a: fn(*a), g={}, stage_var=Widget(), detail_var=Widget(),
+                 bar=Widget(), start_btn=Widget())
+    load(scope, "worker", "start_pipeline")()
+
+    assert project["image_stage_providers"]["images"] == "snapgen"
+    assert routed == [([1], False)]
+    assert project["scenes"][0] is existing
+    assert project["scenes"][0]["image"] == str(existing_path)
+    assert existing_path.read_bytes() == b"existing"
+    assert (images_dir / "scene_002.png").is_file()
+    assert dialogs == []
