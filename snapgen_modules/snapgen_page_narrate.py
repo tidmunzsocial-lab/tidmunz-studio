@@ -5632,6 +5632,58 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         aspect = str(project.get("aspect") or "16:9")
         grid_template = (ensure_board_template(
             board_dir / f"_grid_{aspect.replace(':', '-')}.png", aspect) if video_mode else None)
+        provider = image_provider_for("storyboard")
+        if video_mode and len(groups) > 1 and provider in ("gpt_web", "snapgen"):
+            # Each pair uses the same last completed sheet as its continuity reference.
+            # Wait for both sheets before choosing the reference for the next pair.
+            completed_count = 0
+            for pair_start in range(0, len(groups), 2):
+                check_stop()
+                pair = groups[pair_start:pair_start + 2]
+                previous_sheet = previous_board_sheet(board_dir, pair[0][0] + 1)
+                jobs = []
+                for grp in pair:
+                    first, last = grp[0] + 1, grp[-1] + 1
+                    refs = []
+                    for i in grp:
+                        refs.extend(p for p in attachments_for(scenes[i]) if p not in refs)
+                    sheet_refs = ([grid_template] if grid_template else []) + ([previous_sheet] if previous_sheet else [])
+                    sheet_refs.extend(p for p in refs if p not in sheet_refs)
+                    limit = 6 if provider == "gpt_web" else 16
+                    if len(sheet_refs) > limit:
+                        log(f"สตอรี่ชีต {first}–{last}: รับเรฟได้ {limit} รูป — ไม่แนบเรฟเพิ่มอีก {len(sheet_refs) - limit} รูป")
+                        sheet_refs = sheet_refs[:limit]
+                    prompt = board_request([(i + 1, scenes[i]) for i in grp], project["aspect"],
+                                           live_action=True, grid_template=bool(grid_template),
+                                           prior_sheet=bool(previous_sheet)) + "\n" + style_text()
+                    jobs.append((grp, first, last, sheet_refs, prompt))
+
+                def work(job):
+                    grp, first, last, refs, prompt = job
+                    options = {"fresh_chat": True, "parallel_images": True} if provider == "gpt_web" else {}
+                    return make_image(prompt, refs, board_dir, f"sheet_{first:03d}-{last:03d}",
+                                      project["aspect"], grid_template=bool(grid_template), **options)
+
+                def completed(job, sheet, error):
+                    nonlocal completed_count
+                    grp, first, last, _refs, _prompt = job
+                    if error is not None:
+                        log(f"❌ สตอรี่ชีต ช็อต {first}–{last}: {error}")
+                        return
+                    panels = [board_dir / f"panel_{i + 1:03d}.png" for i in grp]
+                    crop_board(sheet, len(grp), panels)
+                    with state["lock"]:
+                        for i, panel in zip(grp, panels):
+                            scenes[i]["board"] = str(panel)
+                        save_project()
+                    completed_count += 1
+                    set_progress("storyboard", completed_count / len(groups),
+                                 f"สตอรี่ชีตพร้อมกันสูงสุด 2 · เสร็จ {completed_count}/{len(groups)}")
+                    log(f"✓ สตอรี่ชีต ช็อต {first}–{last}: {Path(sheet).name}")
+
+                _run_image_jobs(jobs, work, completed, check_stop, max_workers=2)
+            log(f"✓ สตอรี่ชีตครบ {len(groups)} ชีต")
+            return
         for k, grp in enumerate(groups, 1):
             check_stop()
             first, last = grp[0] + 1, grp[-1] + 1
