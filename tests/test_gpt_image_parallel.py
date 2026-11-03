@@ -89,6 +89,91 @@ def test_auto_two_jobs_preserve_out_of_order_results_and_drain(tmp_path, stop):
         assert Path(restored['scenes'][i]['image']).read_text() == f'shot {i}'
 
 
+def test_gpt_timeout_retries_only_failed_shot_then_continues_unstarted_jobs(tmp_path):
+    scenes = [dict(prompt=f'shot {i}', characters=[f'person{i}']) for i in range(5)]
+    state_lock = threading.RLock()
+    first_pair = threading.Barrier(2)
+    provider_attempts = {}
+    active = 0
+    peak = 0
+    counts_lock = threading.Lock()
+    project = dict(scenes=scenes, aspect='16:9')
+    disk = tmp_path/'project.json'
+
+    def make_image(prompt, _paths, folder, name, _aspect, **_kwargs):
+        nonlocal active, peak
+        i = int(name[-3:]) - 1
+        with counts_lock:
+            provider_attempts[i] = provider_attempts.get(i, 0) + 1
+            attempt = provider_attempts[i]
+            active += 1
+            peak = max(peak, active)
+        try:
+            if i < 2 and attempt == 1:
+                first_pair.wait(timeout=3)
+            if i == 0 and attempt == 1:
+                try:
+                    raise TimeoutError('Unexpected: timed out')
+                except TimeoutError as exc:
+                    raise N.ImageProviderError('GPT request failed') from exc
+            path = folder/(name+'.png')
+            path.write_text(prompt)
+            return str(path)
+        finally:
+            with counts_lock:
+                active -= 1
+
+    scope = dict(vars(N), state=dict(project=project, lock=state_lock),
+                 attachments_for=lambda s, limit: ['ref'+s['prompt'].split()[-1]],
+                 scene_prompt=lambda s:s['prompt'], make_image=make_image,
+                 check_stop=lambda:None,
+                 save_project=lambda:disk.write_text(json.dumps(project)),
+                 log=lambda *a:None, set_progress=lambda *a:None,
+                 ui=lambda *a:None, refresh_table=None, follow_shot=None)
+
+    load(scope, 'run_gpt_scenes')(range(5), scenes, tmp_path)
+
+    assert peak == 2 and active == 0
+    assert provider_attempts == {0: 2, 1: 1, 2: 1, 3: 1, 4: 1}
+    restored = json.loads(disk.read_text())
+    for i, scene in enumerate(restored['scenes']):
+        assert Path(scene['image']).read_text() == f'shot {i}'
+
+
+def test_gpt_repeated_timeout_is_bounded_and_keeps_other_saved_images(tmp_path):
+    scenes = [dict(prompt=f'shot {i}', characters=[f'person{i}']) for i in range(4)]
+    state_lock = threading.RLock()
+    provider_attempts = {}
+    project = dict(scenes=scenes, aspect='16:9')
+    disk = tmp_path/'project.json'
+
+    def make_image(prompt, _paths, folder, name, _aspect, **_kwargs):
+        i = int(name[-3:]) - 1
+        provider_attempts[i] = provider_attempts.get(i, 0) + 1
+        if i == 0:
+            raise TimeoutError('Unexpected: timed out')
+        path = folder/(name+'.png')
+        path.write_text(prompt)
+        return str(path)
+
+    scope = dict(vars(N), state=dict(project=project, lock=state_lock),
+                 attachments_for=lambda s, limit: ['ref'+s['prompt'].split()[-1]],
+                 scene_prompt=lambda s:s['prompt'], make_image=make_image,
+                 check_stop=lambda:None,
+                 save_project=lambda:disk.write_text(json.dumps(project)),
+                 log=lambda *a:None, set_progress=lambda *a:None,
+                 ui=lambda *a:None, refresh_table=None, follow_shot=None)
+
+    with pytest.raises(N.ImageProviderError, match='หมดเวลา'):
+        load(scope, 'run_gpt_scenes')(range(4), scenes, tmp_path)
+
+    assert provider_attempts == {0: 3, 1: 1, 2: 1, 3: 1}
+    restored = json.loads(disk.read_text())
+    assert restored['scenes'][0].get('image') is None
+    for i in (1, 2, 3):
+        assert Path(restored['scenes'][i]['image']).read_text() == f'shot {i}'
+
+
 def test_parallel_http_results_and_refs_are_not_crossed(tmp_path, monkeypatch):
     import snapgen_image_gen as G
     monkeypatch.setitem(sys.modules, 'ai_slow2x', SimpleNamespace(enhance_image_async=lambda *a,**k:None))

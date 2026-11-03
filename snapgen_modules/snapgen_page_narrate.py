@@ -5935,7 +5935,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 log(f"คิว API 5 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
 
     def run_gpt_scenes(todo, scenes, images_dir):
-        """Two independent chats; stop feeding on error and save all submitted results."""
+        """Run two independent chats; retry transient timeouts without losing completed images."""
         project = state["project"]
         jobs = []
         for i in dict.fromkeys(todo):
@@ -5956,34 +5956,95 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     + ", ".join(omitted))
                 paths = selected
             jobs.append((i, scene_prompt(scene), paths, board, repair))
-        finished = 0
+        max_attempts = 3
+        attempts = {job[0]: 0 for job in jobs}
+        attempt_lock = threading.Lock()
+        last_errors = {}
         log(f"GPT: สร้างรูปพร้อมกันสูงสุด 2 งาน · แยกแชตและเรฟแต่ละช็อต · รอ {len(jobs)} รูป")
+
+        def image_saved(job):
+            image = scenes[job[0]].get("image")
+            return bool(image and os.path.isfile(image))
+
+        def is_timeout_error(error):
+            seen = set()
+            while error is not None and id(error) not in seen:
+                seen.add(id(error))
+                if isinstance(error, TimeoutError) or re.search(
+                    r"(?:timed\s*out|timeout)", str(error), re.IGNORECASE
+                ):
+                    return True
+                error = error.__cause__ or error.__context__
+            return False
 
         def work(job):
             check_stop()
             i, prompt, paths, board, repair = job
+            with attempt_lock:
+                attempts[i] += 1
             return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}", project["aspect"],
                               board=board, identity_repair=repair, fresh_chat=True, parallel_images=True)
 
         def completed(job, image, error):
-            nonlocal finished
             i = job[0]
             with state["lock"]:
                 if error is None:
                     scenes[i]["image"] = image
                     scenes[i].pop("error", None)
                     scenes[i].pop("bad", None)
+                    last_errors.pop(i, None)
                 else:
                     scenes[i]["error"] = str(error)[:600]
+                    last_errors[i] = error
                 save_project()
-            finished += 1
-            set_progress("images", finished / max(1, len(jobs)),
-                         f"GPT สูงสุด 2 งาน · เสร็จ {finished}/{len(jobs)} · ช็อต {i + 1}")
+            saved = sum(1 for current in jobs if image_saved(current))
+            set_progress("images", saved / max(1, len(jobs)),
+                         f"GPT สูงสุด 2 งาน · เสร็จ {saved}/{len(jobs)} · ช็อต {i + 1}")
             ui(refresh_table)
             if error is None:
                 ui(follow_shot, i)
 
-        _run_image_jobs(jobs, work, completed, check_stop, max_workers=2)
+        pending_jobs = list(jobs)
+        while pending_jobs:
+            check_stop()
+            pass_errors = {}
+
+            def pass_completed(job, image, error):
+                if error is not None:
+                    pass_errors[job[0]] = error
+                completed(job, image, error)
+
+            try:
+                _run_image_jobs(pending_jobs, work, pass_completed, check_stop, max_workers=2)
+                break
+            except (Stopped, HistoryLost, RateLimited):
+                raise
+            except Exception as exc:
+                if (not is_timeout_error(exc) or not pass_errors
+                        or any(not is_timeout_error(error) for error in pass_errors.values())):
+                    raise
+                check_stop()
+                unattempted = [job for job in jobs
+                               if attempts[job[0]] == 0 and not image_saved(job)]
+                retryable = [job for job in jobs
+                             if 0 < attempts[job[0]] < max_attempts
+                             and job[0] in last_errors
+                             and is_timeout_error(last_errors[job[0]])
+                             and not image_saved(job)]
+                pending_jobs = unattempted + retryable
+                if retryable:
+                    shot_numbers = ", ".join(str(job[0] + 1) for job in retryable)
+                    attempt_number = max(attempts[job[0]] for job in retryable) + 1
+                    log(f"GPT timeout ช็อต {shot_numbers} — ลองใหม่อัตโนมัติครั้ง {attempt_number}/{max_attempts}")
+                    time.sleep(min(12, 3 * (attempt_number - 1)))
+
+        missing = [job[0] + 1 for job in jobs if not image_saved(job)]
+        if missing:
+            log(f"GPT ยังสร้างรูปไม่สำเร็จหลังลอง timeout อัตโนมัติ — ช็อต {', '.join(map(str, missing[:15]))}")
+            raise ImageProviderError(
+                f"GPT หมดเวลาหลังลองใหม่อัตโนมัติ {max_attempts - 1} ครั้ง — ยังขาดรูปช็อต "
+                + ", ".join(map(str, missing[:15]))
+            )
 
     def stage_images(indices=None, selected_redraw=False):
         project = state["project"]
