@@ -89,7 +89,7 @@ def test_auto_two_jobs_preserve_out_of_order_results_and_drain(tmp_path, stop):
         assert Path(restored['scenes'][i]['image']).read_text() == f'shot {i}'
 
 
-def test_gpt_timeout_retries_only_failed_shot_then_continues_unstarted_jobs(tmp_path):
+def test_gpt_ambiguous_timeout_is_not_resent_and_unstarted_jobs_continue(tmp_path):
     scenes = [dict(prompt=f'shot {i}', characters=[f'person{i}']) for i in range(5)]
     state_lock = threading.RLock()
     first_pair = threading.Barrier(2)
@@ -131,16 +131,18 @@ def test_gpt_timeout_retries_only_failed_shot_then_continues_unstarted_jobs(tmp_
                  log=lambda *a:None, set_progress=lambda *a:None,
                  ui=lambda *a:None, refresh_table=None, follow_shot=None)
 
-    load(scope, 'run_gpt_scenes')(range(5), scenes, tmp_path)
+    with pytest.raises(N.ImageProviderError, match='ไม่ส่งคำขอซ้ำ'):
+        load(scope, 'run_gpt_scenes')(range(5), scenes, tmp_path)
 
     assert peak == 2 and active == 0
-    assert provider_attempts == {0: 2, 1: 1, 2: 1, 3: 1, 4: 1}
+    assert provider_attempts == {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
     restored = json.loads(disk.read_text())
-    for i, scene in enumerate(restored['scenes']):
+    assert restored['scenes'][0].get('image') is None
+    for i, scene in enumerate(restored['scenes'][1:], 1):
         assert Path(scene['image']).read_text() == f'shot {i}'
 
 
-def test_gpt_repeated_timeout_is_bounded_and_keeps_other_saved_images(tmp_path):
+def test_gpt_timeout_is_attempted_once_and_keeps_other_saved_images(tmp_path):
     scenes = [dict(prompt=f'shot {i}', characters=[f'person{i}']) for i in range(4)]
     state_lock = threading.RLock()
     provider_attempts = {}
@@ -164,10 +166,10 @@ def test_gpt_repeated_timeout_is_bounded_and_keeps_other_saved_images(tmp_path):
                  log=lambda *a:None, set_progress=lambda *a:None,
                  ui=lambda *a:None, refresh_table=None, follow_shot=None)
 
-    with pytest.raises(N.ImageProviderError, match='หมดเวลา'):
+    with pytest.raises(N.ImageProviderError, match='ไม่ส่งคำขอซ้ำ'):
         load(scope, 'run_gpt_scenes')(range(4), scenes, tmp_path)
 
-    assert provider_attempts == {0: 3, 1: 1, 2: 1, 3: 1}
+    assert provider_attempts == {0: 1, 1: 1, 2: 1, 3: 1}
     restored = json.loads(disk.read_text())
     assert restored['scenes'][0].get('image') is None
     for i in (1, 2, 3):

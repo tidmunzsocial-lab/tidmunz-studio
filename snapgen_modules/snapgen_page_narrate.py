@@ -5935,7 +5935,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 log(f"คิว API 5 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
 
     def run_gpt_scenes(todo, scenes, images_dir):
-        """Run two independent chats; retry transient timeouts without losing completed images."""
+        """Run two independent chats; never duplicate an ambiguously timed-out submission."""
         project = state["project"]
         jobs = []
         for i in dict.fromkeys(todo):
@@ -5956,10 +5956,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     + ", ".join(omitted))
                 paths = selected
             jobs.append((i, scene_prompt(scene), paths, board, repair))
-        max_attempts = 3
         attempts = {job[0]: 0 for job in jobs}
         attempt_lock = threading.Lock()
-        last_errors = {}
+        ambiguous_timeouts = set()
         log(f"GPT: สร้างรูปพร้อมกันสูงสุด 2 งาน · แยกแชตและเรฟแต่ละช็อต · รอ {len(jobs)} รูป")
 
         def image_saved(job):
@@ -5992,10 +5991,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     scenes[i]["image"] = image
                     scenes[i].pop("error", None)
                     scenes[i].pop("bad", None)
-                    last_errors.pop(i, None)
                 else:
                     scenes[i]["error"] = str(error)[:600]
-                    last_errors[i] = error
                 save_project()
             saved = sum(1 for current in jobs if image_saved(current))
             set_progress("images", saved / max(1, len(jobs)),
@@ -6026,24 +6023,28 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 check_stop()
                 unattempted = [job for job in jobs
                                if attempts[job[0]] == 0 and not image_saved(job)]
-                retryable = [job for job in jobs
-                             if 0 < attempts[job[0]] < max_attempts
-                             and job[0] in last_errors
-                             and is_timeout_error(last_errors[job[0]])
+                timed_out = [job[0] for job in jobs
+                             if job[0] in pass_errors and is_timeout_error(pass_errors[job[0]])
                              and not image_saved(job)]
-                pending_jobs = unattempted + retryable
-                if retryable:
-                    shot_numbers = ", ".join(str(job[0] + 1) for job in retryable)
-                    attempt_number = max(attempts[job[0]] for job in retryable) + 1
-                    log(f"GPT timeout ช็อต {shot_numbers} — ลองใหม่อัตโนมัติครั้ง {attempt_number}/{max_attempts}")
-                    time.sleep(min(12, 3 * (attempt_number - 1)))
+                ambiguous_timeouts.update(timed_out)
+                if unattempted:
+                    shot_numbers = ", ".join(str(job[0] + 1) for job in unattempted)
+                    log(f"GPT timeout: ไม่ส่งช็อตที่อาจรับงานแล้วซ้ำ — ทำช็อตที่ยังไม่เริ่มต่อ: {shot_numbers}")
+                    pending_jobs = unattempted
+                    continue
+                pending_jobs = []
 
         missing = [job[0] + 1 for job in jobs if not image_saved(job)]
         if missing:
-            log(f"GPT ยังสร้างรูปไม่สำเร็จหลังลอง timeout อัตโนมัติ — ช็อต {', '.join(map(str, missing[:15]))}")
+            ambiguous = [number for number in missing if number - 1 in ambiguous_timeouts]
+            if ambiguous:
+                message = ("GPT ยังไม่ยืนยันผลของช็อต " + ", ".join(map(str, ambiguous[:15]))
+                           + " — ไม่ส่งคำขอซ้ำเพื่อป้องกันรูปซ้ำ; รูปที่สำเร็จแล้วและช็อตอื่นยังเก็บไว้ครบ")
+            else:
+                message = "GPT ยังสร้างรูปไม่สำเร็จ — ช็อต " + ", ".join(map(str, missing[:15]))
+            log(message)
             raise ImageProviderError(
-                f"GPT หมดเวลาหลังลองใหม่อัตโนมัติ {max_attempts - 1} ครั้ง — ยังขาดรูปช็อต "
-                + ", ".join(map(str, missing[:15]))
+                message
             )
 
     def stage_images(indices=None, selected_redraw=False):

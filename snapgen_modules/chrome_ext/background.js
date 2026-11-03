@@ -289,7 +289,7 @@ async function openPage(tabId, url, retryWithFreshTab = true, isCancelled = () =
     if (current.url !== url || current.pendingUrl) await chrome.tabs.update(tabId, {url});
   } catch (e) {
     if (!/navigation rejected|no tab with id|cannot access/i.test(String(e && e.message || e))) throw e;
-    tabId = await freshTab(tabId, url);
+    tabId = await freshTab(tabId, url, workerKey);
   }
   // Do not wait for "complete": ChatGPT keeps loading in the background; the composer is what counts.
   let seen = "", reloaded = false;
@@ -374,9 +374,30 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
   try {
     started = await inPage(tabId, pageSend, [job]);
   } catch (e) {
-    started = null;  // the page moved to the new chat right after sending: its answer was lost, not the job
+    // Script execution may have failed after the click. Treat delivery as ambiguous; do not resend.
+    started = {error: "ChatGPT page stopped responding after the send attempt: " + String(e && e.message || e),
+               send_state: "unknown"};
   }
   if (cancelled) return {error: "ChatGPT operation cancelled"};
+  if (started && started.error && started.send_state === "not_sent") {
+    // A stale/restoring ChatGPT tab can keep its URL but fail to accept a prompt. Retry only when
+    // pageSend proved the draft was still unsent, and use a fresh worker tab exactly once.
+    try {
+      await report("opening");
+      tabId = await freshTab(tabId, url, workerKey);
+      tabId = await openPage(tabId, url, true, () => cancelled, workerKey);
+      await report("sending");
+    } catch (e) {
+      return {error: "Prompt was not sent; retry in a fresh ChatGPT tab failed: " + String(e && e.message || e),
+              send_state: "not_sent"};
+    }
+    try {
+      started = await inPage(tabId, pageSend, [job]);
+    } catch (e) {
+      started = {error: "ChatGPT page stopped responding after the retry send attempt: " + String(e && e.message || e),
+                 send_state: "unknown"};
+    }
+  }
   if ((!started || started.error && started.send_state === "unknown") && !job.conversation_id) {
     // A long message (a whole story) is sent, then ChatGPT navigates to /c/<id> before the result comes back.
     // If a new chat opened, the message went out: keep waiting for the reply in that chat.
@@ -475,12 +496,14 @@ async function pageNodes(cid, kind) {
 }
 
 async function pageSend(job) {
+  let sendAttempted = false;
   try {
-    return await pageSendInner(job);
+    return await pageSendInner(job, () => { sendAttempted = true; });
   } catch (e) {
-    return {error: "ChatGPT page error while sending: " + (e && e.message ? e.message : String(e))};
+    return {error: "ChatGPT page error while sending: " + (e && e.message ? e.message : String(e)),
+            send_state: sendAttempted ? "unknown" : "not_sent"};
   }
-  async function pageSendInner(job) {
+  async function pageSendInner(job, markSendAttempted) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   let session = null;
   let before = [];  // messages already in the chat: everything else is this job's answer
@@ -535,12 +558,13 @@ async function pageSend(job) {
     await sleep(250);
   }
   if (!editor || !form)
-    return {error: "ChatGPT prompt box is still loading or changed — wait for the composer in the program's Chrome window, then retry"};
+    return {error: "ChatGPT prompt box is still loading or changed — wait for the composer in the program's Chrome window, then retry",
+            send_state: "not_sent"};
   const images = job.images || [];
   if (images.length) {
     const input = [...document.querySelectorAll('input[type=file]')].find(i => i.multiple && /image/.test(i.accept))
       || [...document.querySelectorAll('input[type=file]')].find(i => i.multiple);
-    if (!input) return {error: "ChatGPT file input not found"};
+    if (!input) return {error: "ChatGPT file input not found", send_state: "not_sent"};
     const dt = new DataTransfer();
     images.forEach((data, n) => {
       const [head, b64] = data.split(",");
@@ -570,8 +594,33 @@ async function pageSend(job) {
     if (settled >= 2) break;  // ready twice in a row: the upload is really done
   }
   if (images.length && attached < images.length)
-    return {error: `ChatGPT did not take the attached pictures (${attached}/${images.length} attached) — not sent`};
-  if (!send || send.disabled) return {error: "ChatGPT did not accept the attachments / prompt in time"};
+    return {error: `ChatGPT did not take the attached pictures (${attached}/${images.length} attached) — not sent`,
+            send_state: "not_sent"};
+  if (!send || send.disabled)
+    return {error: "ChatGPT did not accept the attachments / prompt in time", send_state: "not_sent"};
+  // ChatGPT can replace the composer while attachments finish uploading. Resolve the live
+  // editor/form/button again immediately before clicking so a detached stale button cannot eat the send.
+  const latestEditor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
+    document.querySelector('form #prompt-textarea[contenteditable="true"]');
+  const latestForm = latestEditor && latestEditor.closest("form");
+  const latestSend = latestForm && latestForm.querySelector('button[type="submit"]');
+  const normalizePrompt = str => String(str || "").normalize("NFKC").replace(/[\s\p{Cf}]+/gu, "");
+  const latestDraft = normalizePrompt(latestEditor && (latestEditor.innerText || latestEditor.textContent || ""));
+  const expectedPrompt = normalizePrompt(job.prompt);
+  const latestButtons = latestForm ? [...latestForm.querySelectorAll("button")] : [];
+  const latestAttached = latestButtons.filter(b => /^(ลบ|remove)\s/i.test((b.getAttribute("aria-label") || "").trim())).length;
+  const latestUploading = latestForm && latestForm.querySelector('[role="progressbar"], [aria-busy="true"], circle[stroke-dasharray]');
+  const latestBusy = latestButtons.some(b => b.getAttribute("data-testid") === "stop-button" ||
+    /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((b.getAttribute("aria-label") || "").trim()));
+  if (!latestEditor || latestEditor.isConnected === false || !latestForm || latestForm.isConnected === false ||
+      !latestSend || latestSend.isConnected === false || latestSend.disabled || latestUploading || latestBusy ||
+      latestDraft !== expectedPrompt || latestAttached < images.length)
+    return {error: "ChatGPT composer changed before Send — prompt not sent; retrying in a fresh tab is safe",
+            send_state: "not_sent"};
+  editor = latestEditor;
+  form = latestForm;
+  send = latestSend;
+  markSendAttempted();
   send.click();
   let sendClicks = 1;
   let userMessageId = null;
@@ -598,24 +647,8 @@ async function pageSend(job) {
     };
     await waitForUserMessage();
     if (!userMessageId) {
-      // Retry only if the exact prompt is still in the composer, the button is enabled, and ChatGPT
-      // is idle. A cleared composer or active response is ambiguous: never submit that prompt again.
-      const retryEditor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
-        document.querySelector('form #prompt-textarea[contenteditable="true"]');
-      const retryForm = retryEditor && retryEditor.closest("form");
-      const retrySend = retryForm && retryForm.querySelector('button[type="submit"]');
-      const draft = normalized(retryEditor && (retryEditor.innerText || retryEditor.textContent || ""));
-      const buttons = retryForm ? [...retryForm.querySelectorAll("button")] : [];
-      const busy = buttons.some(b => b.getAttribute("data-testid") === "stop-button" ||
-        /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((b.getAttribute("aria-label") || "").trim()));
-      const uploading = retryForm && retryForm.querySelector('[role="progressbar"], [aria-busy="true"], circle[stroke-dasharray]');
-      const attached = buttons.filter(b => /^(ลบ|remove)\s/i.test((b.getAttribute("aria-label") || "").trim())).length;
-      if (retryEditor && retryEditor.isConnected && retryForm && retryForm.isConnected && draft === expected &&
-          retrySend && !retrySend.disabled && !busy && !uploading && attached >= images.length) {
-        retrySend.click();
-        sendClicks++;
-        await waitForUserMessage();
-      }
+      // A failed confirmation after the click is ambiguous. Never click Send again here;
+      // runJob may retry only if this function proved the prompt was never sent.
     }
     if (!userMessageId) {
       const currentEditor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
@@ -626,15 +659,24 @@ async function pageSend(job) {
       const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
       const freshUsers = nodes.filter(n => n.getAttribute("data-message-author-role") === "user" &&
         !previous.has(n.getAttribute("data-message-id")));
+      const currentButtons = currentForm ? [...currentForm.querySelectorAll("button")] : [];
+      const activeResponse = currentButtons.some(b => b.getAttribute("data-testid") === "stop-button" ||
+        /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((b.getAttribute("aria-label") || "").trim()));
+      const uploadPending = Boolean(currentForm && currentForm.querySelector(
+        '[role="progressbar"], [aria-busy="true"], circle[stroke-dasharray]'));
+      const attachedNow = currentButtons.filter(b => /^(ลบ|remove)\s/i.test((b.getAttribute("aria-label") || "").trim())).length;
+      const draftMatches = normalized(draft) === expected;
+      const textMatches = freshUsers.some(n => normalized(n.textContent || "").includes(expected));
       const deliveryDebug = {
                 prompt_chars: String(job.prompt || "").length, draft_chars: draft.length,
-                draft_matches: normalized(draft) === expected, insert_accepted: insertAccepted === true,
+                draft_matches: draftMatches, insert_accepted: insertAccepted === true,
                 send_clicks: sendClicks, document_focused: typeof document.hasFocus === "function" && document.hasFocus(),
                 editor_focused: document.activeElement === currentEditor, page_visible: document.visibilityState === "visible",
                 existing_chat: Boolean(job.conversation_id), chat_route: /^\/c\//.test(location.pathname),
                 before_nodes: domBefore.length, current_nodes: nodes.length, new_user_nodes: freshUsers.length,
                 role_only_users: document.querySelectorAll('[data-message-author-role="user"]').length,
-                text_content_matches: freshUsers.some(n => normalized(n.textContent || "").includes(expected)),
+                text_content_matches: textMatches, active_response: activeResponse, upload_pending: uploadPending,
+                attached_images: attachedNow, expected_images: images.length,
                 send_button_found: Boolean(currentSend), send_disabled: Boolean(currentSend && currentSend.disabled),
                 send_is_expected: Boolean(currentSend && (currentSend.id === "composer-submit-button" ||
                   typeof currentSend.getAttribute === "function" && currentSend.getAttribute("data-testid") === "send-button")),
