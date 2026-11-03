@@ -291,6 +291,38 @@ def _pid_running(pid):
         return False
 
 
+def _runtime_ready(project_root):
+    """Ignore inherited PYTHONPATH so a temporary rescue environment cannot mask missing packages."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c",
+             "import sys, tkinter, PIL, websocket, qcloud_cos; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)"],
+            cwd=str(project_root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _start_after_update(project_root):
+    setup = project_root / "setup_and_run.bat"
+    setup_error = ""
+    if setup.is_file():
+        try:
+            result = subprocess.run([str(setup), "--no-run"], cwd=str(project_root), timeout=600, check=False)
+            if result.returncode:
+                setup_error = f" (setup exit {result.returncode})"
+        except (OSError, subprocess.SubprocessError) as exc:
+            setup_error = f" ({type(exc).__name__})"
+    if not _runtime_ready(project_root):
+        raise UpdateError("อัปเดตแล้วแต่แพ็กเกจ Python ยังไม่ครบ" + setup_error +
+                          " — เปิด Tidmunz-Studio.exe เพื่อติดตั้งแพ็กเกจที่ขาด แล้วเริ่มโปรแกรมอีกครั้ง")
+    main = project_root / "snapgen_gui_v2.py"
+    subprocess.Popen([sys.executable, "-B", str(main)], cwd=str(project_root))
+
+
 def _apply(staging, project_root, parent_pid):
     staging = Path(staging).resolve()
     project_root = Path(project_root).resolve()
@@ -346,19 +378,7 @@ def _apply(staging, project_root, parent_pid):
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-    # เปิด setup_and_run.bat ให้ผู้ใช้เห็น + ลงเครื่องมือที่ขาด แล้วเปิดโปรแกรมเอง
-    _setup = project_root / "setup_and_run.bat"
-    if _setup.is_file():
-        try:
-            subprocess.run(
-                [str(_setup), "--no-run"],
-                cwd=str(project_root), timeout=600, check=False,
-            )
-        except Exception:
-            pass
-
-    main = project_root / "snapgen_gui_v2.py"
-    subprocess.Popen([sys.executable, "-B", str(main)], cwd=str(project_root))
+    _start_after_update(project_root)
 
 
 if __name__ == "__main__" and len(sys.argv) >= 5 and sys.argv[1] == "--apply":
@@ -367,4 +387,9 @@ if __name__ == "__main__" and len(sys.argv) >= 5 and sys.argv[1] == "--apply":
     except Exception as exc:
         error_file = Path(sys.argv[3]) / "snapgen_update_error.txt"
         error_file.write_text(str(exc), encoding="utf-8")
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, str(exc), "ติดมันส์ สตูดิโอ", 0x10)
+        except Exception:
+            pass
         raise

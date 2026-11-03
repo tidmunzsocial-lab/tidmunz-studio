@@ -180,7 +180,7 @@ def start_app(home: Path) -> bool:
         return False
     try:
         ready = subprocess.run(
-            [str(console_python), "-B", "-c",
+            [str(console_python), "-I", "-B", "-c",
              "import sys, tkinter, PIL, websocket, qcloud_cos; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)"],
             cwd=str(home), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=30,

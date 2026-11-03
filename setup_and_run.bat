@@ -367,6 +367,12 @@ if not defined VENV_DIR (
 REM ===== Step 4: Install packages =====
 echo.
 echo [4/7] Installing packages...
+REM An update must not reinstall healthy packages or interrupt pip unnecessarily.
+"%VENV_PY%" -I -B -c "import sys, tkinter, PIL, websocket, qcloud_cos; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)" >nul 2>nul
+if not errorlevel 1 (
+  echo   Required packages are already available.
+  goto :packages_ready
+)
 "%VENV_PY%" -m pip --version >nul 2>nul
 if errorlevel 1 (
   echo   pip missing in venv - installing pip...
@@ -428,6 +434,7 @@ if errorlevel 1 (
 )
 echo   qcloud_cos OK
 
+:packages_ready
 REM ===== Step 5: Verify everything =====
 echo.
 REM ===== Step 5: Verify project files =====

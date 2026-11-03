@@ -97,6 +97,7 @@ def test_incomplete_venv_is_not_treated_as_working_install(tmp_path, monkeypatch
     calls = []
     def probe(command, **kwargs):
         assert command[0] == str(folder / "python.exe")
+        assert "-I" in command
         assert "(3, 12)" in command[-1] and "qcloud_cos" in command[-1]
         if ready == "timeout": raise subprocess.TimeoutExpired(command, 30)
         return SimpleNamespace(returncode=ready)
