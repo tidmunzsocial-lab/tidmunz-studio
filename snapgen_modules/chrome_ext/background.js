@@ -336,6 +336,8 @@ async function inPage(tabId, func, args) {
   return result;
 }
 
+let imageSendTail = Promise.resolve();
+
 async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
   let cancelled = false, checking = false, finished = false, tabId = null;
   const report = async phase => {
@@ -372,7 +374,20 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
   let started = null;
   await report("sending");
   try {
-    started = await inPage(tabId, pageSend, [job]);
+    if (job.type === "image") {
+      const previous = imageSendTail;
+      let release;
+      imageSendTail = new Promise(resolve => { release = resolve; });
+      await previous;
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        await chrome.windows.update(tab.windowId, {state: "normal", focused: true});
+        await chrome.tabs.update(tabId, {active: true});
+        started = await inPage(tabId, pageSend, [job]);
+      } finally { release(); }
+    } else {
+      started = await inPage(tabId, pageSend, [job]);
+    }
   } catch (e) {
     // Script execution may have failed after the click. Treat delivery as ambiguous; do not resend.
     started = {error: "ChatGPT page stopped responding after the send attempt: " + String(e && e.message || e),
@@ -749,7 +764,7 @@ async function pageSend(job) {
   send.click();
   let sendClicks = 1;
   let userMessageId = null;
-  if (job.type === "chat") {
+  if (job.type === "chat" || job.type === "image") {
     const previous = new Set([...before, ...domBefore]);
     const normalized = str => str.normalize("NFKC").replace(/[\s\p{Cf}]+/gu, "");
     const expected = normalized(String(job.prompt || ""));
