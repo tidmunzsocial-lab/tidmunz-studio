@@ -14,6 +14,70 @@ import snapgen_chrome_api as C
 IMAGE = "data:image/png;base64," + base64.b64encode(b"generated-image").decode()
 
 
+def test_story_history_seed_is_bounded_and_keeps_all_content():
+    context = {"character": "ตัวละครหลัก-UNIQUE-CONTEXT" * 300}
+    full = "FULL-STORY-UNIQUE " + ("เรื่องยาวมาก " * 900)
+    part = "SELECTED-PART-UNIQUE " + ("ช่วงงาน " * 300)
+    signature, messages = N.story_history_seed_messages(context, full, part)
+
+    assert len(signature) == 64 and len(messages) > 2
+    assert max(map(len, messages)) < 3500
+    joined = "\n".join(messages)
+    assert "UNIQUE-CONTEXT" in joined
+    assert "FULL-STORY-UNIQUE" in joined
+    assert "SELECTED-PART-UNIQUE" in joined
+
+
+def test_story_history_seed_resumes_after_last_saved_part():
+    project = {"context": {"story": "CTX " * 1200}, "full_script": "full.txt"}
+    state = {"project": project}
+    saved, sent = [], []
+    scope = dict(vars(N), state=state, story_script=lambda: "PART " * 900,
+                 read_script=lambda _path: "FULL " * 1600,
+                 set_progress=lambda *args: None, log=lambda *args: None,
+                 save_project=lambda: saved.append(json.loads(json.dumps(project))),
+                 with_retries=lambda _label, fn: fn())
+    expected = N.story_history_seed_messages(project["context"], "FULL " * 1600, "PART " * 900)[1]
+
+    def interrupted_chat(text):
+        if len(sent) == 1:
+            raise N.Stopped()
+        sent.append(text)
+
+    scope["chat"] = interrupted_chat
+    seed = load(scope, "ensure_story_in_history", "_build")
+    with pytest.raises(N.Stopped):
+        seed()
+    assert sent == expected[:1]
+    assert project["history_seed_progress"]["next"] == 1
+    assert not project.get("history_seeded")
+
+    resumed = []
+    scope["chat"] = resumed.append
+    seed()
+    assert resumed == expected[1:]
+    assert project["history_seeded"] is True
+    assert "history_seed_progress" not in project
+
+
+def test_changed_story_discards_half_seeded_conversation():
+    project = {
+        "context": {"story": "new"},
+        "conversation": {"conversation_id": "old-partial"},
+        "history_seed_progress": {"signature": "old", "next": 2, "total": 4},
+    }
+    sent = []
+    scope = dict(vars(N), state={"project": project}, story_script=lambda: "new script",
+                 read_script=lambda _path: "", set_progress=lambda *args: None,
+                 log=lambda *args: None, save_project=lambda: None,
+                 with_retries=lambda _label, fn: fn(), chat=sent.append)
+    load(scope, "ensure_story_in_history", "_build")()
+
+    assert sent and "ส่วน 1/" in sent[0]
+    assert project["conversation"] == {}
+    assert project["history_seeded"] is True
+
+
 def test_524_survives_restart_and_never_silently_resubmits(tmp_path, monkeypatch):
     calls = []
     def timeout(request, **kwargs):

@@ -22,6 +22,7 @@ Everything lives in EXPORT_ROOT/เล่าภาพ/<script name>/.
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.client
 import json
 import math
@@ -39,6 +40,33 @@ import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+
+
+def story_history_seed_messages(context, full_story: str, selected_part: str,
+                                fragment_chars: int = 3000):
+    """Build bounded, resumable messages that seed one story conversation."""
+    context_text = json.dumps(context or {}, ensure_ascii=False)
+    selected_part = selected_part or ""
+    full_story = full_story or ""
+    if full_story and re.sub(r"\s+", "", full_story) != re.sub(r"\s+", "", selected_part):
+        body = ("CONTEXT:\n" + context_text + "\n\nFULL STORY (ทั้งเรื่อง):\n" + full_story
+                + "\n\nช่วงที่ต้องทำในงานนี้:\n" + selected_part)
+    else:
+        body = "CONTEXT:\n" + context_text + "\n\nFULL STORY:\n" + selected_part
+    signature = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    fragment_chars = max(500, int(fragment_chars))
+    fragments = [body[pos:pos + fragment_chars]
+                 for pos in range(0, len(body), fragment_chars)] or [""]
+    total = len(fragments)
+    messages = [
+        (f"ข้อมูลบทและ Context ของเรื่องนี้ ส่วน {index}/{total}\n"
+         "เก็บข้อความส่วนนี้ต่อเนื่องกับส่วนอื่นในประวัติเดียวกัน "
+         f"และตอบสั้นๆ ว่า OK {index}/{total} เท่านั้น\n\n{fragment}")
+        for index, fragment in enumerate(fragments, 1)
+    ]
+    return signature, messages
+
+
 try:
     from .snapgen_credit_guard import image_billing, image_response_items, record_image_billing, credit_consent_required, credit_warning_text
 except ImportError:
@@ -4877,10 +4905,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         request of this history would otherwise know nothing about the story.
         """
         project = state["project"]
-        if project.get("history_seeded") or (project.get("conversation") or {}).get("conversation_id"):
-            project["history_seeded"] = True
+        if project.get("history_seeded"):
             return
-        set_progress("plan", 0.0, "ส่งบทและ Context เข้าประวัติ GPT ของเรื่องนี้ (ครั้งเดียว) ...")
         part = story_script()
         full = ""
         if project.get("full_script"):
@@ -4888,26 +4914,29 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 full = read_script(project["full_script"])
             except Exception as exc:
                 log(f"อ่านบทเต็มไม่ได้ ({exc}) — ส่งเฉพาะช่วงที่ทำ")
-        if full and _squash(full) != _squash(part):
-            # ออโต้: GPT knows the whole story first, then plans only the part this person is making.
-            content = (
-                "บทเต็มทั้งเรื่องและ SnapGen Context อยู่ด้านล่าง เก็บไว้ในประวัตินี้เพื่อใช้วางแผนฉาก สตอรี่บอร์ด และสร้างรูปทุกครั้งต่อจากนี้. "
-                "งานนี้ทำเฉพาะ 'ช่วงที่ต้องทำ' (ตรงกับเสียงบรรยายที่แนบ) แต่ต้องเข้าใจทั้งเรื่องก่อน: ใครเป็นใคร "
-                "เกิดอะไรก่อนหน้าและหลังจากนี้. ใช้ชื่อและหน้าตาตัวละครตาม Context ตรงตัว ตอบสั้นๆ ว่า OK เท่านั้น\n\nCONTEXT:\n"
-                + json.dumps(project.get("context") or {}, ensure_ascii=False)
-                + "\n\nFULL STORY (ทั้งเรื่อง):\n" + full
-                + "\n\nช่วงที่ต้องทำในงานนี้:\n" + part
-            )
-            log("ส่งบทเต็มทั้งเรื่อง + Context + ช่วงที่ทำ เข้า GPT")
-        else:
-            content = (
-                "บทและ SnapGen Context ของเรื่องนี้อยู่ด้านล่าง เก็บไว้ในประวัตินี้เพื่อใช้วางแผนฉากและสร้างรูปทุกครั้งต่อจากนี้ "
-                "ใช้ชื่อและหน้าตาตัวละครตาม Context ตรงตัว ตอบสั้นๆ ว่า OK เท่านั้น\n\nCONTEXT:\n"
-                + json.dumps(project.get("context") or {}, ensure_ascii=False)
-                + "\n\nFULL STORY:\n" + part
-            )
-        with_retries("ส่งบทเข้าประวัติ", lambda: chat(content))
+        signature, messages = story_history_seed_messages(project.get("context") or {}, full, part)
+        progress = project.get("history_seed_progress") or {}
+        if (progress.get("signature") != signature
+                or int(progress.get("total") or 0) != len(messages)):
+            # Never append a changed story to a half-seeded conversation.
+            if progress or (project.get("conversation") or {}).get("conversation_id"):
+                project["conversation"] = {}
+            progress = {"signature": signature, "next": 0, "total": len(messages)}
+            project["history_seed_progress"] = progress
+            save_project()
+        next_part = max(0, min(int(progress.get("next") or 0), len(messages)))
+        log(f"ส่งบทและ Context เข้า GPT แบบแบ่ง {len(messages)} ส่วน เริ่มที่ส่วน {next_part + 1}")
+        for index in range(next_part, len(messages)):
+            number = index + 1
+            set_progress("plan", index / len(messages),
+                         f"ส่งบทและ Context เข้าประวัติ GPT ส่วน {number}/{len(messages)} ...")
+            with_retries(f"ส่งบทเข้าประวัติส่วน {number}/{len(messages)}",
+                         lambda text=messages[index]: chat(text))
+            progress["next"] = number
+            project["history_seed_progress"] = progress
+            save_project()
         project["history_seeded"] = True
+        project.pop("history_seed_progress", None)
         save_project()
 
     def team_context_file():
