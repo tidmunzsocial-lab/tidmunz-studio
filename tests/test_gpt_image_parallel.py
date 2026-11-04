@@ -171,14 +171,13 @@ def test_gpt_ambiguous_timeout_is_not_resent_and_unstarted_jobs_continue(tmp_pat
                  log=lambda *a:None, set_progress=lambda *a:None,
                  ui=lambda *a:None, refresh_table=None, follow_shot=None)
 
-    with pytest.raises(N.ImageProviderError, match='ไม่ส่งคำขอซ้ำ'):
-        load(scope, 'run_gpt_scenes')(range(5), scenes, tmp_path)
+    # ChatGPT Web costs no credit: the timed-out shot is sent once more at the end of the pass, so the run finishes.
+    load(scope, 'run_gpt_scenes')(range(5), scenes, tmp_path)
 
     assert peak == 2 and active == 0
-    assert provider_attempts == {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
+    assert provider_attempts == {0: 2, 1: 1, 2: 1, 3: 1, 4: 1}
     restored = json.loads(disk.read_text())
-    assert restored['scenes'][0].get('image') is None
-    for i, scene in enumerate(restored['scenes'][1:], 1):
+    for i, scene in enumerate(restored['scenes']):
         assert Path(scene['image']).read_text() == f'shot {i}'
 
 
@@ -206,10 +205,11 @@ def test_gpt_timeout_is_attempted_once_and_keeps_other_saved_images(tmp_path):
                  log=lambda *a:None, set_progress=lambda *a:None,
                  ui=lambda *a:None, refresh_table=None, follow_shot=None)
 
-    with pytest.raises(N.ImageProviderError, match='ไม่ส่งคำขอซ้ำ'):
+    # The timed-out shot is sent once more at the end (ChatGPT Web, no credit); a second timeout stops clearly.
+    with pytest.raises(N.ImageProviderError, match='ยังสร้างรูปไม่สำเร็จ'):
         load(scope, 'run_gpt_scenes')(range(4), scenes, tmp_path)
 
-    assert provider_attempts == {0: 1, 1: 1, 2: 1, 3: 1}
+    assert provider_attempts == {0: 2, 1: 1, 2: 1, 3: 1}
     restored = json.loads(disk.read_text())
     assert restored['scenes'][0].get('image') is None
     for i in (1, 2, 3):

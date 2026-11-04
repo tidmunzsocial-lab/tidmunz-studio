@@ -746,7 +746,9 @@ try:
         # One click must equal one web image job.  Retrying a web job after a
         # client timeout can overlap the still-running ChatGPT task, consume
         # extra quota, and leave the UI spinning on a second request.
-        timeout=195,
+        # The Chrome extension runs one ChatGPT job at a time, so a picture may first wait for the one
+        # before it: wait as long as the relay keeps a job (15 min), or the picture is made and thrown away.
+        timeout=900,
         retry_count=0,
         retry_delay=5,
     )

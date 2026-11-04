@@ -189,7 +189,19 @@ class _Relay:
             self.pending.append(job)
             self.lock.notify_all()
         try:
+            queued_since = time.monotonic()
             while not slot["event"].wait(min(1, JOB_TIMEOUT)):
+                if slot.get("phase") == "queued":
+                    # Still waiting its turn (the extension runs one job at a time): it was never sent, so the
+                    # inactivity clock starts only when the extension takes it. A very long queue still ends.
+                    slot["activity_at"] = time.monotonic()
+                    if time.monotonic() - queued_since < 4 * JOB_TIMEOUT:
+                        continue
+                    with self.lock:
+                        if job in self.pending:
+                            self.pending.remove(job)
+                    return {"error": "ChatGPT job waited too long in the queue and was not sent",
+                            "send_state": "not_sent"}
                 if time.monotonic() - slot["activity_at"] >= JOB_TIMEOUT:
                     with self.lock:
                         if job in self.pending:

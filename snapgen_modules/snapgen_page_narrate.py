@@ -169,6 +169,25 @@ class ImageProviderError(RuntimeError):
     """Stop paid image requests instead of automatically submitting another job."""
 
 
+def snapgen_temporarily_unavailable(error):
+    """Only auto-fallback when SnapGen explicitly rejected the job as unavailable."""
+    text = str(error).casefold()
+    return any(marker in text for marker in (
+        "model_under_maintenance",
+        "experiencing high traffic",
+        "high traffic right now",
+        "service is temporarily unavailable",
+        "service temporarily unavailable",
+    ))
+
+
+def gpt_image_prompt_not_delivered(error):
+    """A narrowly classified GPT delivery rejection; unknown outcomes must not be replayed."""
+    text = str(error).casefold()
+    return ("prompt was not confirmed in the conversation" in text
+            or "no message reached the chat" in text)
+
+
 def _run_image_jobs(jobs, work, completed, check_stop, max_workers=5):
     """Bound in-flight requests; drain submitted jobs before raising."""
     remaining = iter(jobs)
@@ -361,7 +380,16 @@ def snapgen_image(prompt: str, refs: list[str], output_dir: str, name: str,
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", None)
             detail = exc.read().decode("utf-8", "replace").strip()[:500]
-            if code and 400 <= code < 500 and code != 408:
+            # SnapGen reports a model disabled for maintenance as HTTP 503.
+            # It rejected the request before creating a task, so unlike an
+            # ambiguous gateway timeout this must not leave a paid-job receipt.
+            explicit_maintenance = False
+            try:
+                error = (json.loads(detail) or {}).get("error") or {}
+                explicit_maintenance = str(error.get("code") or "").upper() == "MODEL_UNDER_MAINTENANCE"
+            except (TypeError, ValueError):
+                pass
+            if (code and 400 <= code < 500 and code != 408) or explicit_maintenance:
                 receipt.unlink(missing_ok=True)
             raise RuntimeError(
                 f"SnapGen GPT Image 2.5 Lower HTTP {code or 'ขัดข้อง'}: {detail}"
@@ -1102,6 +1130,14 @@ def local_image_problems(scenes, aspect) -> dict:
             problems[i] = f"รูปซ้ำกับฉาก {seen[pixels] + 1}"
         seen.setdefault(pixels, i)
     return problems
+
+
+def is_policy_refusal(error) -> bool:
+    """ChatGPT answered with its own words and refused on content rules (not a timeout or a lost send)."""
+    text = str(error or "").lower()
+    if "safety policy" in text:
+        return True
+    return "gpt said:" in text and any(word in text for word in ("นโยบาย", "ละเมิด", "policy", "violate", "content"))
 
 
 def error_reason(error: str) -> str:
@@ -4504,8 +4540,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return answer["provider"]
 
     def ask_image_limit_fallback(stage, error):
-        """Offer an explicitly confirmed API for a limited GPT image stage, or stop and wait."""
-        if not video_mode or not getattr(error, "image_generation", False) or stage not in ("storyboard", "images"):
+        """Offer an explicitly confirmed API after a GPT image limit or known pre-send failure."""
+        limited = getattr(error, "image_generation", False)
+        not_delivered = isinstance(error, ImageProviderError) and gpt_image_prompt_not_delivered(error)
+        if not video_mode or not (limited or not_delivered) or stage not in ("storyboard", "images"):
             return False
         project = state["project"]
         if stage == "storyboard":
@@ -4522,10 +4560,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def ask():
             win = tk.Toplevel(page)
-            win.title("ChatGPT ติดลิมิตสร้างรูป")
+            win.title("เปลี่ยนผู้สร้างรูป")
             win.transient(root)
             win.resizable(False, False)
-            tk.Label(win, text="ChatGPT Web ติดลิมิตสร้างรูป",
+            title_text = ("ChatGPT Web ติดลิมิตสร้างรูป" if limited else
+                          "ChatGPT Web ยังไม่ได้ส่ง prompt เข้าแชต")
+            tk.Label(win, text=title_text,
                      font=("TkDefaultFont", 12, "bold"), fg="#B91C1C").pack(padx=24, pady=(18, 8))
             tk.Label(win, text=("งานที่ทำเสร็จแล้วจะเก็บไว้ ถ้าเลือก API จะทำต่อเฉพาะรูปที่ยังขาด\n"
                                 "ระบบจะแสดงคำยืนยันราคา/เครดิตก่อนส่งงานไป API\n\n"
@@ -6158,6 +6198,34 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             try:
                 return run_bridge_with_cooldown(send, check_stop, time.sleep, cooldown)
             except Exception as exc:
+                if is_policy_refusal(exc):
+                    # ChatGPT refused this one picture on content rules: let GPT soften the wording once and
+                    # send the same shot again, instead of stopping every other picture of the run.
+                    check_stop()
+                    revised = (scenes[i].get("prompt_policy_repair") or "").strip()
+                    if not revised:
+                        revised = gpt_text(
+                            "ปรับคำสั่งสร้างภาพต่อไปนี้ให้สอดคล้องนโยบายการสร้างภาพของ ChatGPT "
+                            "ลดหรือเลี่ยงคำที่อาจถูกมองว่ารุนแรง น่ากลัวเกินไป เปลือย หรือไม่เหมาะสม "
+                            "โดยรักษาเรื่อง ตัวละคร สถานที่ มุมกล้อง และอารมณ์ของฉากไว้ให้มากที่สุด "
+                            "ตอบเฉพาะคำสั่งใหม่ ห้ามเพิ่มคำอธิบาย:\n\n" + prompt).strip()
+                        if not revised:
+                            raise
+                        with state["lock"]:
+                            scenes[i]["prompt_policy_repair"] = revised
+                            save_project()
+                    log(f"GPT ไม่ยอมวาดช็อต {i + 1} (ผิดนโยบาย) — ให้ GPT ปรับถ้อยคำแล้วส่งช็อตเดิมอีกครั้ง")
+                    try:
+                        return run_bridge_with_cooldown(lambda: send(revised, paths), check_stop, time.sleep, cooldown)
+                    except Exception as again:
+                        if not is_policy_refusal(again):
+                            raise
+                        # Still refused: keep going with the other shots; this one is left for the user to fix.
+                        with state["lock"]:
+                            scenes[i]["error"] = str(again)[:600]
+                            save_project()
+                        log(f"⚠ ช็อต {i + 1}: GPT ยังไม่ยอมวาดแม้ปรับถ้อยคำแล้ว — ข้ามไปทำช็อตอื่นต่อ")
+                        return None
                 if not is_prompt_too_long_error(exc):
                     raise
                 check_stop()
@@ -6192,6 +6260,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def completed(job, image, error):
             i = job[0]
+            if image is None and error is None:
+                return  # skipped after a repeated content refusal; its error is already on the shot
             with state["lock"]:
                 if error is None:
                     scenes[i]["image"] = image
@@ -6239,6 +6309,39 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     pending_jobs = unattempted
                     continue
                 pending_jobs = []
+
+        # ChatGPT Web costs no credit: a shot whose reply timed out is sent once more (a fresh chat) at the end,
+        # instead of stopping the whole run. The worst case is one extra picture in ChatGPT's own history.
+        retry = [job for job in jobs if job[0] in ambiguous_timeouts and not image_saved(job)]
+        if retry:
+            log("GPT ตอบช้าเกินเวลาในช็อต " + ", ".join(str(job[0] + 1) for job in retry)
+                + " — ส่งช็อตเหล่านี้ใหม่อีกครั้ง (ChatGPT Web ไม่เสียเครดิต)")
+            try:
+                _run_image_jobs(retry, work, completed, check_stop, max_workers=2)
+            except (Stopped, HistoryLost, RateLimited):
+                raise
+            except Exception as exc:
+                log(f"ส่งใหม่บางช็อตยังไม่สำเร็จ: {str(exc)[:200]}")
+            ambiguous_timeouts.difference_update(job[0] for job in retry)
+
+        # A shot ChatGPT refuses even after the softened wording keeps the run going with its neighbour's
+        # picture (logged and marked on the shot), so one refused shot never stops a whole story.
+        for job in jobs:
+            i = job[0]
+            if image_saved(job) or not is_policy_refusal(scenes[i].get("error")):
+                continue
+            near = [j for j in sorted(range(len(scenes)), key=lambda j: (abs(j - i), j))
+                    if j != i and scenes[j].get("image") and os.path.isfile(scenes[j]["image"])]
+            if not near:
+                continue
+            target = Path(images_dir) / f"scene_{i + 1:03d}{Path(scenes[near[0]]['image']).suffix or '.png'}"
+            shutil.copyfile(scenes[near[0]]["image"], target)
+            with state["lock"]:
+                scenes[i]["image"] = str(target)
+                scenes[i]["image_fallback_from"] = near[0] + 1
+                save_project()
+            log(f"⚠ ช็อต {i + 1}: GPT ไม่ยอมวาด — ใช้รูปช็อต {near[0] + 1} แทนไปก่อนเพื่อให้ทำต่อจนจบ "
+                "(แก้ช็อตนี้ทีหลังได้ในตาราง)")
 
         missing = [job[0] + 1 for job in jobs if not image_saved(job)]
         if missing:
@@ -8232,6 +8335,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                             stage_characters(limit=character_limit)
                         else:
                             STAGE_FUNCS[key]()
+                    except ImageProviderError as exc:
+                        provider = image_provider_for(key)
+                        if (video_mode and key in ("storyboard", "images") and provider == "snapgen"
+                                and snapgen_temporarily_unavailable(exc)):
+                            if key == "storyboard":
+                                project["storyboard_provider"] = "gpt_web"
+                            else:
+                                project.setdefault("image_stage_providers", {})[key] = "gpt_web"
+                            save_project()
+                            log(f"SnapGen ไม่พร้อมให้บริการ — เปลี่ยน {key} ไปใช้ GPT Web และทำเฉพาะรูปที่ยังขาด")
+                            STAGE_FUNCS[key]()
+                        elif (video_mode and key in ("storyboard", "images") and provider == "gpt_web"
+                              and ask_image_limit_fallback(key, exc)):
+                            STAGE_FUNCS[key]()
+                        else:
+                            raise
                     if not (key == "characters" and character_limit):
                         project["done"][key] = True
                     save_project()
