@@ -2952,6 +2952,52 @@ def motion_request(items: list, era: str, horror: bool = False) -> str:
     )
 
 
+def compact_motion_request(items: list, era: str, horror: bool = False) -> str:
+    """Bounded retry payload when ChatGPT explicitly rejects the full motion request as too long."""
+    def cut(value, limit):
+        return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+    blocks = []
+    for item in items:
+        rows = [f"ช็อต {item['shot']} · {item.get('seconds') or '?'} วินาที",
+                f"คำบรรยาย: {cut(item.get('line'), 300) or '-'}",
+                f"ตัวละคร: {cut(item.get('characters'), 350) or '-'}",
+                f"แผนเดิม: {cut(item.get('planned'), 450) or '-'}",
+                f"ความต่อเนื่อง: {cut(item.get('continuity'), 250) or '-'}",
+                f"บทพูด: {cut(item.get('dialogue'), 250) or 'ไม่มี — ทุกคนปากปิด'}",
+                f"ร่างกาย: {cut(item.get('bodies'), 350) or '-'}"]
+        if item.get("notes"):
+            rows.append("ห้ามเกิดซ้ำ: " + cut(item["notes"], 150))
+        blocks.append("\n".join(rows))
+    return (
+        "ดูภาพแรกที่แนบของแต่ละช็อต แล้วเขียนคำสั่งวิดีโอภาษาไทยให้ตรงรูปและบท: "
+        "เริ่มจากตำแหน่ง/ทิศหน้าที่เห็นจริง, การกระทำหลัก 1 อย่างตามช่วงเวลา, สีหน้า, "
+        "กล้องนิ่ง, แสงและสิ่งแวดล้อมที่ขยับ. ห้ามเปลี่ยนตัวละคร สถานที่ ร่างกาย เสื้อผ้า "
+        "หรือให้คนที่หันหลังหันมาหากล้อง. ไม่มีบทพูดให้ทุกคนปากปิด; มีบทพูดให้พูดเฉพาะข้อความที่ให้. "
+        "ระบุเสียงเอฟเฟกต์ธรรมชาติ/การกระทำที่มีในฉาก และห้ามมีเพลงหรือดนตรีเด็ดขาด. "
+        f"ยุค/บรรยากาศ: {cut(era, 160) or '-'}; "
+        + (cut(HORROR_NOTE, 220) + "; " if horror else "")
+        + "ตอบ JSON เท่านั้น: {\"shots\":[{\"shot\":1,\"seen\":\"\",\"video_prompt\":\"\","
+          "\"sound_effects\":\"\",\"anatomy\":\"\",\"negative\":\"\","
+          "\"shot_type\":\"character\",\"has_people\":true}]}\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+def is_prompt_too_long_error(error) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        message = str(error)
+        if "prompt_too_long" in message or re.search(
+            r"ข้อความ(?:ที่คุณส่ง)?ยาวเกินไป|(?:your\s+)?message\s+(?:is|was)\s+too\s+long|message.{0,40}too\s+long",
+            message, re.IGNORECASE
+        ):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def base_looks_request(described: list) -> str:
     """Once per story: every character's look at their first appearance, without changes that come later."""
     lines = "\n".join(f"- {name}: {look}" for name, look in described)
@@ -4775,6 +4821,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         "กด Use บัญชีที่ใช้ได้ใน Bridge แล้วกด ▶ ทำต่อ เรื่องจะย้ายไปบัญชีนั้นเอง "
                         "(หรือล็อกอินบัญชีนี้ใหม่ถ้าอยากใช้ประวัติเดิม)") from exc
                 log(f"❌ {label} ครั้งที่ {attempt}: {error_cause(exc)[:240]}")
+                if is_prompt_too_long_error(exc):
+                    raise  # Replaying the same oversized payload cannot make it fit.
                 if "GPT said:" in str(exc) or "safety policy" in text:
                     # GPT refused this prompt: asking the same thing again only burns time.
                     raise
@@ -5976,19 +6024,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 parts.append("ตัวตนเดียวกันต่างร่าง: " + "; ".join(forms))
             return "\n".join(part for part in parts if part)
 
-        def is_prompt_too_long_error(error):
-            seen = set()
-            while error is not None and id(error) not in seen:
-                seen.add(id(error))
-                message = str(error)
-                if "prompt_too_long" in message or re.search(
-                    r"ข้อความ(?:ที่คุณส่ง)?ยาวเกินไป|(?:your\s+)?message\s+(?:is|was)\s+too\s+long|message.{0,40}too\s+long",
-                    message, re.IGNORECASE
-                ):
-                    return True
-                error = error.__cause__ or error.__context__
-            return False
-
         jobs = []
         for i in dict.fromkeys(todo):
             check_stop()
@@ -6792,16 +6827,32 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                     raise
                 except Exception as exc:
-                    # Pictures could not be sent: for the rest of this run write from the script and image prompt.
-                    state["motion_text_only"] = True
-                    if force:
-                        if use_planned_motion(todo, exc):
-                            return
-                        # A re-look only to describe the picture: without the picture keep the prompt
-                        # already written from it rather than rewriting it from planning text.
-                        log(f"ส่งรูปให้ GPT ดูไม่ได้ ({str(exc)[:120]}) — ใช้พรอมต์วิดีโอเดิมของช็อต {shots}")
-                        continue
-                    log(f"ส่งรูปให้ GPT ดูไม่ได้ ({str(exc)[:120]}) — เขียนพรอมต์วิดีโอจากบทและคำสั่งรูปแทน")
+                    if is_prompt_too_long_error(exc):
+                        request = compact_motion_request(motion_items(batch), era, horror)
+                        log(f"GPT ปฏิเสธพรอมต์วิดีโอช็อต {shots} ว่ายาวเกินไป — "
+                            f"ย่อเหลือ {len(request)} ตัวอักษรแล้วส่งพร้อมรูปเดิมอีกครั้ง")
+                        try:
+                            compact_content = [{"type": "text", "text": request}]
+                            compact_content += [
+                                {"type": "image_url", "image_url": {"url": image_data_url(scenes[i]["image"])}}
+                                for i in batch
+                            ]
+                            reply = parse_json_reply(chat(compact_content))
+                        except (Stopped, HistoryLost, RateLimited, ImageProviderError):
+                            raise
+                        except Exception as retry_exc:
+                            exc = retry_exc
+                    if reply is None:
+                        # Pictures could not be sent: for the rest of this run write from the script and image prompt.
+                        state["motion_text_only"] = True
+                        if force:
+                            if use_planned_motion(todo, exc):
+                                return
+                            # A re-look only to describe the picture: without the picture keep the prompt
+                            # already written from it rather than rewriting it from planning text.
+                            log(f"ส่งรูปให้ GPT ดูไม่ได้ ({str(exc)[:120]}) — ใช้พรอมต์วิดีโอเดิมของช็อต {shots}")
+                            continue
+                        log(f"ส่งรูปให้ GPT ดูไม่ได้ ({str(exc)[:120]}) — เขียนพรอมต์วิดีโอจากบทและคำสั่งรูปแทน")
             if reply is None:
                 text = request + "\n\n(ไม่มีรูปแนบ: ภาพแรกของแต่ละช็อตคือ) " + " | ".join(
                     f"ช็อต {i + 1}: {str(scenes[i].get('prompt') or '')[:300]}" for i in batch)

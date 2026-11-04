@@ -260,6 +260,21 @@ def test_narrate_chat_429_is_non_image_rate_limit_and_not_retried(monkeypatch):
     assert calls == ["POST"]
 
 
+def test_text_retry_does_not_replay_an_oversized_payload():
+    calls = []
+    scope = dict(vars(N), state={"project": {}}, check_stop=lambda: None,
+                 log=lambda *_: None, error_cause=str, runtime={}, g={})
+    with_retries = load(scope, "with_retries", parent="_build")
+
+    def rejected():
+        calls.append(1)
+        raise RuntimeError('Bridge HTTP 413: {"error":{"code":"prompt_too_long","send_state":"not_sent"}}')
+
+    with pytest.raises(RuntimeError, match="prompt_too_long"):
+        with_retries("พรอมต์วิดีโอ", rejected)
+    assert calls == [1]
+
+
 def test_motion_rate_limit_does_not_fallback_to_text_only(tmp_path):
     scope, scenes, questions, calls = motion_scope(tmp_path)
     before = json.loads(json.dumps(scenes))
@@ -325,6 +340,46 @@ def test_working_web_still_writes_and_checks_real_frames(tmp_path):
     assert all(scene["video_prompt"].startswith("new motion\n") and N.VIDEO_AUDIO_RULE in scene["video_prompt"]
                and scene["seen"] == "real frame"
                and scene["motion_image"] == "digest" for scene in scenes)
+
+
+def test_motion_prompt_too_long_retries_once_with_bounded_prompt_and_same_image(tmp_path):
+    scope, scenes, questions, calls = motion_scope(tmp_path)
+    scope["motion_items"] = lambda _batch: [{
+        "shot": 1, "seconds": 10, "line": "ลมพัด", "characters": "ชายหนึ่งคน",
+        "planned": "ยืนมอง", "continuity": "เสื้อผ้าเดิม", "dialogue": "", "bodies": "คนปกติ",
+        "notes": "",
+    }]
+
+    def chat(content):
+        calls.append(content)
+        if len(calls) == 1:
+            raise RuntimeError(
+                'Bridge HTTP 413: {"error":{"code":"prompt_too_long","send_state":"not_sent"}}'
+            )
+        return json.dumps({"shots": [{"shot": 1, "video_prompt": "small motion", "seen": "real frame"}]})
+
+    scope["chat"] = chat
+    scope["stage_motion"]([0])
+
+    assert len(calls) == 2
+    assert isinstance(calls[0], list) and isinstance(calls[1], list)
+    assert calls[0][1] == calls[1][1] == {"type": "image_url", "image_url": {"url": "image"}}
+    compact = calls[1][0]["text"]
+    assert len(compact) < 3500
+    assert "ห้ามมีเพลงหรือดนตรีเด็ดขาด" in compact
+    assert not questions and not scope["state"].get("motion_text_only")
+    assert scenes[0]["video_prompt"].startswith("small motion\n")
+    assert scenes[0]["seen"] == "real frame" and scenes[0]["motion_image"] == "digest"
+
+
+def test_compact_motion_request_bounds_untrusted_scene_fields():
+    huge = "ข้อมูลยาว " * 2000
+    request = N.compact_motion_request([{
+        "shot": 7, "seconds": 10, "line": huge, "characters": huge, "planned": huge,
+        "continuity": huge, "dialogue": huge, "bodies": huge, "notes": huge,
+    }], huge, horror=True)
+    assert len(request) < 3500
+    assert "ช็อต 7" in request and "ห้ามมีเพลงหรือดนตรีเด็ดขาด" in request
 
 
 def test_force_relook_failure_also_needs_current_run_consent(tmp_path):
