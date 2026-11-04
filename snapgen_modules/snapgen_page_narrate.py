@@ -8010,7 +8010,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     # ── control ──
     def ask_on_ui(title, message) -> bool:
-        """Ask a yes/no question from the worker thread and wait for the answer."""
+        """Ask a yes/no question from the worker thread and wait for the answer.
+
+        Once the user accepted this run's credit (or started it from the phone), later questions of the
+        same run are answered "yes" by themselves: one press of Start runs to the finished video."""
+        if state.get("auto_yes"):
+            log(f"⏩ {title} — ตอบ 'ใช่' ให้อัตโนมัติ (ยืนยันเครดิตของรอบนี้แล้ว)")
+            return True
         answer, event = {}, threading.Event()
 
         def ask():
@@ -8019,6 +8025,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         root.after(0, ask)
         event.wait()
         return bool(answer.get("yes"))
+
+    def consent(title, message) -> bool:
+        """The run's one credit question; a yes lets the rest of this run go on without more questions."""
+        accepted = ask_on_ui(title, message)
+        if accepted:
+            state["auto_yes"] = True
+        return accepted
 
     def snapgen_image_price_note(count=None):
         """Show the live account price-list value; never hardcode image credits."""
@@ -8063,7 +8076,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             image_stage_provider = (project.get("image_stage_providers") or {}).get("images")
             image_cost_line = (f"\nค่า API รูปฉาก: {snapgen_image_price_note(missing)}"
                                if image_stage_provider == "snapgen" and missing else "")
-            return ask_on_ui(
+            return consent(
                 "ออโต้ — ยืนยันใช้เครดิต",
                 f"วางแผนเสร็จแล้ว\n\nไฟล์แนบที่จะใช้ ({len(matched)}): {', '.join(matched[:15]) or '-'}\n"
                 + (f"สตอรี่ชีต {sheets} รูป (เรียงช็อต ชีตละ 9 ช่อง; ชีตสุดท้ายตามจำนวนที่เหลือ) + " if sheets else "")
@@ -8106,7 +8119,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             quota = ("\nเลือกผู้สร้างรูปแยกตามหัวข้อ: รูปตัวละคร / สตอรี่ชีต / รูปฉาก"
                      "\nเลือกได้ GPT Chrome / SnapGen API / Qwen ในเครื่อง"
                      f"\nSnapGen API: {snapgen_image_price_note()}; โปรแกรมบันทึกเครดิตจริงจาก History")
-        return ask_on_ui(
+        return consent(
             "เล่าภาพ — ยืนยันใช้เครดิต",
             f"วางแผนเสร็จแล้ว จะสร้างรูปทั้งหมด {total} รูป\n\n"
             f"รูปตัวละคร {len(new_refs)} รูป (เฉพาะตัวละครที่ปรากฏในฉาก):\n{people}\n"
@@ -8386,6 +8399,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             finally:
                 save_project()
                 state["busy"] = False
+                state.pop("auto_yes", None)  # the next run asks again before spending credit
                 state.pop("active_image_stage", None)
                 ui(lambda: start_btn.config(state="normal", text="▶ ทำต่อ"))
                 ui(refresh_all)
@@ -9221,6 +9235,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 raise ValueError("ออโต้กำลังทำงานอยู่แล้ว")
             if not state.get("project"):
                 raise ValueError("ยังไม่ได้เปิดเรื่อง — เลือกเรื่องก่อน")
+            state["auto_yes"] = True  # started from the phone: nobody is at the PC to answer questions
             if provider is None:
                 start_pipeline()
             else:
