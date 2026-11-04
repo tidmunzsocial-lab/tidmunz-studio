@@ -2259,7 +2259,7 @@ _UNSAFE_CAMERA_SIZE = re.compile(
     r"|ช็อตกว้าง(?:มาก|สุด)?|ช็อตมุมกว้าง|ภาพกว้างมาก|ภาพมุมกว้าง|ช็อตระยะไกล|มุมกล้องระยะไกล"
 )
 _SAFE_CAMERA_SIZE = re.compile(
-    r"(?i)\bmedium(?:\s+two)?(?:\s+close[- ]?up)?\s+shot\b"
+    r"(?i)\bmedium(?:[\s-]+two)?(?:[\s-]+close[- ]?up)?[\s-]+shot\b"
     r"|\bmedium\s+close[- ]?up\b|\bclose[- ]?up\b"
     r"|ช็อตกลาง|ช็อตใกล้|โคลสอัพ|ภาพครึ่งตัว"
 )
@@ -2301,6 +2301,89 @@ def enforce_face_safe_framing(scene: dict) -> bool:
     scene.setdefault("prompt_before_face_framing", original)
     scene["prompt"] = fixed
     return True
+
+
+# The one-click "GPT ช่วยแก้" button only changes the camera on existing pictures.
+# It must not accept a wholesale GPT rewrite of style, character, blocking, or story.
+_CAMERA_REPAIR_LABELS = {
+    "keep": None,
+    "medium": "Medium Shot",
+    "medium_two": "Medium Two-Shot",
+    "medium_close": "Medium Close-Up",
+    "close": "Close-Up",
+}
+
+
+def apply_camera_only_refinement(scene: dict, camera: str) -> bool:
+    """Apply a bounded camera change, preserving every other scene prompt detail."""
+    if camera not in _CAMERA_REPAIR_LABELS:
+        raise ValueError("GPT ไม่ได้เลือกระยะกล้องที่รู้จัก — ไม่บันทึกการแก้")
+    original = str(scene.get("prompt") or "").strip()
+    if not original:
+        return False
+    if (scene.get("shot_type") == "scenery" and scene.get("has_people") is False
+            and not scene.get("characters") and not scene.get("dialogue")):
+        return False  # Genuine establishing scenery can remain wide.
+    if not (scene.get("characters") or scene.get("has_people") is True
+            or scene.get("dialogue") or scene.get("shot_type") == "character"):
+        return False
+    if camera == "keep":
+        if not _UNSAFE_CAMERA_SIZE.search(original):
+            return False
+        camera = "medium"  # Never leave an explicitly unsafe character shot wide.
+    label = _CAMERA_REPAIR_LABELS[camera]
+    if _UNSAFE_CAMERA_SIZE.search(original):
+        fixed = _UNSAFE_CAMERA_SIZE.sub(label, original, count=1)
+    elif _SAFE_CAMERA_SIZE.search(original):
+        fixed = _SAFE_CAMERA_SIZE.sub(label, original, count=1)
+    else:
+        fixed = f"{label} เลนส์ 50mm. " + original
+    fixed = _UNSAFE_FACE_LENS.sub("50mm", fixed, count=1)
+    if fixed == original:
+        return False
+    fixed += (
+        " [ปรับเฉพาะระยะกล้อง: ให้เห็นใบหน้าตัวละครหลักชัดเจน; "
+        "คงตัวละครเดิม ใบหน้า ชุด สถานที่ เวลา แสง โทนสี สไตล์ภาพ "
+        "การกระทำ ทิศทางสายตา ตำแหน่งซ้ายขวา และความต่อเนื่องกับช็อตก่อนหลังทุกประการ.]"
+    )
+    scene.setdefault("prompt_before_refine", original)
+    scene["prompt"] = fixed
+    return True
+
+
+def backup_image_before_gpt_refine_redraw(scene: dict, folder, index: int) -> str:
+    """Save the original image before a confirmed paid redraw; media is never overwritten first."""
+    current = str(scene.get("image") or "")
+    if not current or not Path(current).is_file():
+        return ""
+    target_dir = Path(folder) / "_recovery" / "gpt_help_originals"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    original = Path(current)
+    target = target_dir / f"scene_{index + 1:03d}_{time.time_ns()}{original.suffix or '.png'}"
+    shutil.copy2(original, target)
+    scene.setdefault("image_history", []).append({
+        "image": str(target),
+        "clip": scene.get("clip"),
+        "prompt": scene.get("prompt_before_refine") or scene.get("prompt"),
+    })
+    return str(target)
+
+
+def camera_repair_request(scene: dict, story: str, style: str) -> str:
+    """GPT judges the camera only; it cannot replace the scene's visual style."""
+    return (
+        "คุณเป็นผู้ตรวจมุมกล้องของภาพยนตร์เรื่องเดิม ดูภาพช็อตปัจจุบันที่แนบ (ถ้ามี) "
+        "เทียบกับพรอมป์และข้อมูลฉาก แล้วตัดสินว่าใบหน้าตัวละครสำคัญเล็กเกินไปเพราะมุมกล้องหรือไม่. "
+        "เลือกเฉพาะระยะกล้องที่เหมาะ ไม่ต้องเขียนพรอมป์ใหม่ ไม่แก้ใบหน้าหรือสี/สไตล์ด้วยจินตนาการ. "
+        "ตอบ JSON เท่านั้น {\"camera\":\"keep|medium|medium_two|medium_close|close\",\"reason\":\"...\"}. "
+        "ถ้าเป็นฉากวิวล้วนไม่มีคนให้ตอบ keep. ถ้าช็อตมีคนและต้นฉบับเป็น extreme wide / "
+        "wide / long shot ให้เลือกระยะ medium หรือใกล้กว่านั้น. ถ้าภาพเดิมมีหน้าชัดอยู่แล้วให้ตอบ keep. "
+        "ถ้ามีหลายตัวละครให้พิจารณา medium_two เพื่อรักษาตำแหน่งทั้งสองคน. "
+        "ข้อห้ามเด็ดขาด: เปลี่ยนโทนสี สไตล์ เสื้อผ้า อายุ หน้าตา สถานที่ แสง เวลา เนื้อเรื่อง "
+        "จำนวนตัวละคร หรือตำแหน่งซ้ายขวา; ห้ามเปลี่ยน scene type เพื่อทำให้ภาพกว้าง. "
+        f"\nรูปแบบภาพและกฎของเรื่องที่ล็อกไว้: {style}"
+        f"\n{story}\nพรอมป์ภาพเดิม: {scene.get('prompt') or ''}"
+    )
 
 
 def cinematographer_request(rows: list, previous: str, era: str, horror: bool) -> str:
@@ -3924,7 +4007,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ("แก้รูปเดิม", lambda: edit_current_selected(), "แก้รายละเอียดจากภาพปัจจุบัน โดยรักษาส่วนที่ไม่ได้สั่งแก้"),
                 ("แก้ให้ตรงเรฟ", lambda: repair_identity_selected(), "เลือกตัวละคร รูปเรฟ และ Context แล้วแก้เฉพาะตัวละครนั้น"),
                 ("แก้พรอมต์", lambda: edit_prompt(), "เปิดข้อความพรอมต์ภาพให้แก้เอง ยังไม่สร้างรูปจนกดยืนยัน"),
-                ("GPT ช่วยแก้", lambda: refine_selected(), "ให้ GPT เขียนพรอมต์ภาพใหม่ แล้วถามก่อนสร้างรูป"),
+                ("GPT ช่วยแก้", lambda: refine_selected(), "มีรูปแล้ว: GPT ดูภาพและแก้แค่ระยะกล้อง ไม่เปลี่ยนสไตล์/ตัวละคร/เนื้อเรื่อง · รูปยังไม่ผ่าน: ซ่อมพรอมป์เดิม · ถามก่อนสร้างรูป"),
                 ("นำเข้ารูป", lambda: use_scene_image(), "เลือกไฟล์รูปสำเร็จมาแทนภาพของช็อตเดียว ไม่เสียเครดิตสร้างรูป"),
             )),
             ("วิดีโอ", (
@@ -6567,10 +6650,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if indices is None:
             verify_images()
 
-    def gpt_text(prompt: str) -> str:
-        """One question to GPT in a temporary chat (keeps the story history clean)."""
+    def gpt_text(prompt: str, image_path: str | None = None) -> str:
+        """One temporary GPT question; optional scene image supports camera-only diagnosis."""
+        content = prompt
+        if image_path and os.path.isfile(image_path):
+            content = [{"type": "text", "text": prompt},
+                       {"type": "image_url", "image_url": {
+                           "url": image_data_url(image_path, max_side=1024)}}]
         body = {"model": "auto", "temporary_chat": True, "chatgpt_image_intercept": False,
-                "messages": [{"role": "user", "content": prompt}]}
+                "messages": [{"role": "user", "content": content}]}
         request = urllib.request.Request(
             g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json; charset=utf-8"},
@@ -6580,28 +6668,64 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return str(message)
 
     def refine_scene_prompt(index) -> str:
-        """Ask GPT to rewrite one scene prompt so the image generator accepts it, keeping the story beat."""
+        """GPT helps only with camera on existing images; rejected prompts retain original story/style."""
         project = state["project"]
         scene = project["scenes"][index]
+        context = project.get("context") or {}
+        style_details = {
+            "style_mode": project.get("style_mode"),
+            "style_chosen": project.get("style_chosen"),
+            "visual_rules": context.get("visual_rules"),
+            "locked_identity_and_style": context.get("locks"),
+        }
+        style = json.dumps(style_details, ensure_ascii=False, default=str)[:3200]
+        anchor = story_anchor(index)  # Includes script, character looks, continuity and neighbours.
+        old = str(scene.get("prompt") or "").strip()
+        image = str(scene.get("image") or "")
+
+        if image and os.path.isfile(image):
+            # The scene already exists: GPT can inspect its framing but is NOT
+            # allowed to rewrite any visual content, style, character or story.
+            reply = parse_json_reply(gpt_text(
+                camera_repair_request(scene, anchor, style), image_path=image)) or {}
+            camera = str(reply.get("camera") or "").strip().lower()
+            if camera not in _CAMERA_REPAIR_LABELS:
+                raise RuntimeError("GPT เลือกมุมกล้องไม่ชัดเจน — เก็บพรอมป์และรูปเดิมไว้")
+            if not apply_camera_only_refinement(scene, camera):
+                log(f"ฉาก {index + 1}: มุมกล้องเดิมเหมาะแล้ว — ไม่เปลี่ยนพรอมป์หรือสไตล์")
+                return old
+            scene["camera_refine_reason"] = str(reply.get("reason") or "")[:300]
+            scene["refine_count"] = scene.get("refine_count", 0) + 1
+            save_project()
+            return scene["prompt"]
+
+        # No image was produced: preserve the original button's purpose of
+        # repairing rejected prompts, rather than inventing a new visual style.
         ensure_bodies()
         reply = gpt_text(
-            "prompt ภาพนี้ใช้สร้างรูปประกอบเรื่องเล่าไทยไม่ผ่าน (ตัวสร้างรูปปฏิเสธ หรือไม่ยอมวาด). "
-            "เขียน prompt ใหม่ภาษาไทยให้สร้างรูปได้ โดยยังเป็นช็อตเดิมของเรื่องเดิม: ตัวละครเดิม (หน้าตา รูปร่าง ชุด) "
-            "สถานที่เดิม เหตุการณ์เดิมตามคำบรรยาย และต่อเนื่องกับช็อตก่อน/หลัง — ห้ามเปลี่ยนเป็นเรื่องอื่น ห้ามแปลงร่างตัวละคร "
-            "ห้ามเพิ่มตัวละครใหม่ คงองค์ประกอบ มุมกล้อง และตำแหน่งตัวละครเดิม (ตามสตอรี่บอร์ด) "
-            "แก้เฉพาะวิธีเล่าภาพที่ทำให้ถูกปฏิเสธ. " + SCOPE_RULE + "หลักการ: "
-            "ถ้ามีเด็ก ห้ามให้เด็กดูตกอยู่ในอันตรายหรือถูกคุกคาม — ให้สิ่งน่ากลัวอยู่ห่าง เห็นแค่บางส่วน ถ่ายเด็กจากด้านหลังหรือไกลๆ "
-            "อารมณ์เด็กเป็นสงสัย/ชะงักแทนหวาดกลัว หรือทำเป็นภาพแทรกที่ไม่มีเด็กในเฟรม; "
-            "ความรุนแรง เลือด บาดแผล ให้เปลี่ยนเป็นนัยหรือเอฟเฟกต์ภาพยนตร์; ฉากและชุดเป็นแบบไทย; ภาพเดียวเต็มเฟรม ไม่มีตัวหนังสือ; "
-            "ถ้า prompt เดิมเป็นภาพคนเล่าเรื่อง/เจ้าของช่อง/ไมโครโฟน/ห้องอัด ให้เปลี่ยนเป็นภาพเหตุการณ์หรือสถานที่สำคัญจากในเรื่องแทน. "
-            "ตอบ JSON เท่านั้น {\"prompt\":\"...\"}\n\n"
-            f"{story_anchor(index)}\nprompt เดิม: {scene.get('prompt', '')}")
+            "รูปนี้ยังสร้างไม่ผ่าน จงซ่อมเฉพาะข้อความที่ทำให้ผู้สร้างรูปปฏิเสธ "
+            "โดยคงลักษณะภาพยนตร์ สไตล์ โทนสี แสงยุคสมัย องค์ประกอบ ตัวละคร ใบหน้า รูปร่าง ชุด "
+            "สถานที่ เวลา เหตุการณ์ ตำแหน่งซ้ายขวา และความต่อเนื่องกับช็อตก่อนหลังเหมือนเดิมทุกอย่าง. "
+            "ห้ามคิดคอนเซปต์ใหม่ ห้ามเปลี่ยนแนวเป็นการ์ตูน ห้ามสลับตัวละครหรือสถานที่. "
+            "หากมุมเดิมเป็น Wide/Extreme Wide และช็อตมีตัวละคร ให้ปรับเป็น Medium Shot "
+            "แต่ฉากวิวล้วนใช้มุมกว้างได้. "
+            + SCOPE_RULE +
+            "แก้เฉพาะความเสี่ยงที่อาจทำให้ GPT ไม่ยอมสร้างรูป เช่น ความรุนแรงให้เป็นนัยแทน "
+            "หรือหลีกเลี่ยงภาพเด็กในสถานการณ์อันตรายโดยไม่เพิ่มเหตุการณ์ใหม่. "
+            "ตอบ JSON เท่านั้น {\"prompt\":\"...\"}.\n"
+            f"กฎภาพ/ตัวละครของเรื่อง (ต้องรักษา): {style}\n{anchor}\nprompt เดิม: {old}")
         new = str((parse_json_reply(reply) or {}).get("prompt") or "").strip()
         if not new:
             raise RuntimeError("GPT ไม่ได้ส่ง prompt ใหม่กลับมา")
-        scene.setdefault("prompt_before_refine", scene.get("prompt", ""))
+        # Refuse broad rewrites which remove known people or the original location.
+        missing_names = [str(name) for name in scene.get("characters") or []
+                         if str(name) in old and str(name) not in new]
+        location = str(scene.get("location") or "").strip()
+        if missing_names or (location and location in old and location not in new):
+            raise RuntimeError("GPT เปลี่ยนตัวละครหรือสถานที่ — ไม่บันทึกพรอมป์ที่อาจทำให้เรื่องขาดความต่อเนื่อง")
+        scene.setdefault("prompt_before_refine", old)
         scene["prompt"] = new
-        enforce_face_safe_framing(scene)  # image regen must not reintroduce a tiny face
+        enforce_face_safe_framing(scene)
         scene["refine_count"] = scene.get("refine_count", 0) + 1
         save_project()
         return scene["prompt"]
@@ -6623,9 +6747,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             done = []
             try:
                 for i in selected:
-                    set_progress("images", 0, f"GPT กำลังแก้ prompt ฉาก {i + 1}")
-                    log(f"ฉาก {i + 1} prompt ใหม่: {refine_scene_prompt(i)}")
-                    done.append(i)
+                    set_progress("images", 0, f"GPT กำลังตรวจมุมกล้อง/พรอมป์ ฉาก {i + 1}")
+                    before = str(project["scenes"][i].get("prompt") or "").strip()
+                    updated = refine_scene_prompt(i)
+                    if updated != before:
+                        log(f"ฉาก {i + 1} ปรับพรอมป์เฉพาะจุด: {updated}")
+                        done.append(i)
+                    else:
+                        log(f"ฉาก {i + 1} ใช้พรอมป์เดิม — ไม่จำเป็นต้องสร้างภาพใหม่")
             except Exception as exc:
                 log(f"❌ GPT แก้ prompt ไม่สำเร็จ: {exc}")
             finally:
@@ -6633,7 +6762,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(refresh_all)
             if done:
                 def ask():
-                    if messagebox.askyesno("เล่าภาพ", f"แก้ prompt แล้ว {len(done)} ฉาก (ดูได้ในตาราง/ดับเบิลคลิก) — เจนรูปใหม่เลยไหม?", parent=page):
+                    if messagebox.askyesno("เล่าภาพ", f"GPT ปรับพรอมป์แล้ว {len(done)} ฉาก โดยคงสไตล์และเรื่องเดิม (ดูได้ในตาราง/ดับเบิลคลิก)\nต้องการสร้างภาพใหม่ไหม? การสร้างใหม่อาจใช้เครดิต และคลิปเดิมยังไม่ถูกแก้", parent=page):
+                        try:
+                            for i in done:
+                                backup = backup_image_before_gpt_refine_redraw(
+                                    project["scenes"][i], state["folder"], i)
+                                if backup:
+                                    log(f"สำรองภาพต้นฉบับช็อต {i + 1} ก่อนสร้างใหม่: {Path(backup).name}")
+                            save_project()
+                        except OSError as exc:
+                            messagebox.showerror("เล่าภาพ", f"สำรองภาพต้นฉบับไม่สำเร็จ — ยังไม่สร้างรูปใหม่: {exc}", parent=page)
+                            return
                         regenerate_selected(done, ask=False)
                 ui(ask)
         threading.Thread(target=worker, daemon=True).start()
