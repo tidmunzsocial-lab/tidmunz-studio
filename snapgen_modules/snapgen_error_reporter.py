@@ -14,6 +14,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -199,7 +200,7 @@ def _machine_id() -> str:
 
 def _machine_name() -> str:
     """Human-readable Windows PC name; machine_id remains permanent identity."""
-    value = str(platform.node() or os.environ.get("COMPUTERNAME") or "ไม่ทราบชื่อเครื่อง").strip()
+    value = str(os.environ.get("COMPUTERNAME") or socket.gethostname() or "ไม่ทราบชื่อเครื่อง").strip()
     return re.sub(r"[^0-9A-Za-zก-๙._ -]+", "-", value)[:80] or "ไม่ทราบชื่อเครื่อง"
 
 
@@ -259,12 +260,22 @@ def _report_specs() -> dict:
     """Never make a failing UI/worker wait for slow WMI hardware queries."""
     if _specs_cache is not None:
         return dict(_specs_cache)
+    if os.name == "nt":
+        try:
+            win = sys.getwindowsversion()
+            os_name = f"Windows {win.major}.{win.minor} build {win.build}"
+        except Exception:
+            os_name = "Windows"
+    else:
+        os_name = sys.platform
+    python_version = ".".join(str(part) for part in sys.version_info[:3])
+    processor = os.environ.get("PROCESSOR_IDENTIFIER") or os.environ.get("PROCESSOR_ARCHITECTURE") or "collecting"
     return {
         "machine_id": _machine_id(),
         "machine_name": _machine_name(),
-        "os": f"{platform.system()} {platform.release()} {platform.version()}",
-        "python": platform.python_version(),
-        "cpu": platform.processor() or os.environ.get("PROCESSOR_IDENTIFIER", "collecting"),
+        "os": os_name,
+        "python": python_version,
+        "cpu": processor,
         "ram_gb": "collecting",
         "gpu": "collecting",
         "app_version": "collecting",
