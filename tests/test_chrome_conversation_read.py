@@ -37,6 +37,47 @@ openPage(7,target).then(id=>console.log(JSON.stringify({id,checks,navigations}))
     assert data == {"id": 7, "checks": 1 if already_there else 2, "navigations": 0 if already_there else 1}
 
 
+def test_extension_attaches_real_text_file_before_sending():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    functions = source[source.index("async function pageSend(job)"):source.index("async function pagePoll(kind, state)")]
+    harness = r'''
+let attached=0, clicks=0, names=[];
+const messages=[{id:'old-user',role:'user',text:'old'},{id:'old-assistant',role:'assistant',text:'old reply'}];
+const nodes=()=>messages.map(m=>({innerText:m.text,textContent:m.text,
+ getAttribute:k=>k==='data-message-id'?m.id:m.role}));
+const removeButtons=()=>Array.from({length:attached},()=>({getAttribute:k=>k==='aria-label'?'Remove attachment':''}));
+const input={multiple:true,accept:'',files:[],dispatchEvent:()=>{attached=input.files.length;}};
+const editor={isConnected:true,innerText:'',textContent:'',closest:()=>form,focus(){}};
+const send={disabled:false,isConnected:true,click(){clicks++;messages.push({id:'new-user',role:'user',text:editor.innerText});}};
+const form={isConnected:true,querySelectorAll:s=>s==='button'?removeButtons():[],querySelector:s=>s==='button[type="submit"]'?send:null};
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+global.Event=class{constructor(type,opts){this.type=type;this.opts=opts;}};
+global.File=class{constructor(parts,name,opts){this.parts=parts;this.name=name;this.type=opts.type;names.push(name);}};
+global.DataTransfer=class{constructor(){const list=[];this.items={add:f=>list.push(f)};this.files=list;}};
+global.atob=s=>Buffer.from(s,'base64').toString('binary');
+global.document={body:{innerText:''},activeElement:editor,visibilityState:'visible',hasFocus:()=>true,
+ querySelectorAll:s=>s.includes('data-message-id')?nodes():(s==='input[type=file]'?[input]:[]),
+ querySelector:()=>editor,
+ execCommand:(cmd,_show,value)=>{if(cmd==='selectAll')editor.innerText='';if(cmd==='insertText')editor.innerText=value;return true;}
+};
+global.fetch=async()=>{throw Error('loaded chat must not use fetch');};
+const encoded=Buffer.from('story context','utf8').toString('base64');
+pageSend({type:'chat',conversation_id:'existing',prompt:'read attachment',images:[],
+ files:[{filename:'story_context.txt',mime_type:'text/plain',file_data:encoded}]}).then(result=>
+ console.log(JSON.stringify({result,attached,clicks,names})))
+ .catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["result"]["ok"] is True
+    assert data["attached"] == data["clicks"] == 1
+    assert data["names"] == ["story_context.txt"]
+
+
 @pytest.mark.parametrize("statuses,clicks,reads,not_found", [
     ([404, 200], 1, 2, False), ([404, 404, 404], 0, 3, True), ([403], 0, 1, False), ([429], 0, 1, False)])
 def test_extension_retries_reads_without_resending_or_mislabeling_403(statuses, clicks, reads, not_found):

@@ -42,9 +42,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
-def story_history_seed_messages(context, full_story: str, selected_part: str,
-                                fragment_chars: int = 3000):
-    """Build bounded, resumable messages that seed one story conversation."""
+def story_history_seed_document(context, full_story: str, selected_part: str):
+    """Return the stable story-history fingerprint and UTF-8 attachment text."""
     context_text = json.dumps(context or {}, ensure_ascii=False)
     selected_part = selected_part or ""
     full_story = full_story or ""
@@ -54,6 +53,13 @@ def story_history_seed_messages(context, full_story: str, selected_part: str,
     else:
         body = "CONTEXT:\n" + context_text + "\n\nFULL STORY:\n" + selected_part
     signature = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return signature, body
+
+
+def story_history_seed_messages(context, full_story: str, selected_part: str,
+                                fragment_chars: int = 3000):
+    """Build bounded fallback messages for browsers that cannot attach a file."""
+    signature, body = story_history_seed_document(context, full_story, selected_part)
     fragment_chars = max(500, int(fragment_chars))
     fragments = [body[pos:pos + fragment_chars]
                  for pos in range(0, len(body), fragment_chars)] or [""]
@@ -4318,11 +4324,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 pass
             raise RuntimeError(f"Bridge HTTP {exc.code}: {detail[:400]}") from exc
 
-    def chat(content: str) -> str:
+    def chat(content: str, files=None) -> str:
         project = state["project"]
         conversation = project.setdefault("conversation", {})
         body = {"model": "auto", "chatgpt_image_intercept": False, "temperature": 0.2,
                 "messages": [{"role": "user", "content": content}]}
+        if files:
+            body["input_files"] = files
         if conversation.get("conversation_id") and conversation.get("parent_message_id"):
             body["metadata"] = {"conversation_id": conversation["conversation_id"],
                                 "parent_message_id": conversation["parent_message_id"]}
@@ -4849,7 +4857,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         "กด Use บัญชีที่ใช้ได้ใน Bridge แล้วกด ▶ ทำต่อ เรื่องจะย้ายไปบัญชีนั้นเอง "
                         "(หรือล็อกอินบัญชีนี้ใหม่ถ้าอยากใช้ประวัติเดิม)") from exc
                 log(f"❌ {label} ครั้งที่ {attempt}: {error_cause(exc)[:240]}")
-                if is_prompt_too_long_error(exc):
+                if is_prompt_too_long_error(exc) or "file_upload_unavailable" in text:
                     raise  # Replaying the same oversized payload cannot make it fit.
                 if "GPT said:" in str(exc) or "safety policy" in text:
                     # GPT refused this prompt: asking the same thing again only burns time.
@@ -4914,16 +4922,49 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 full = read_script(project["full_script"])
             except Exception as exc:
                 log(f"อ่านบทเต็มไม่ได้ ({exc}) — ส่งเฉพาะช่วงที่ทำ")
-        signature, messages = story_history_seed_messages(project.get("context") or {}, full, part)
+        signature, document = story_history_seed_document(project.get("context") or {}, full, part)
+        _, messages = story_history_seed_messages(project.get("context") or {}, full, part)
         progress = project.get("history_seed_progress") or {}
+        progress_mode = progress.get("mode") or "chunks"
+        expected_total = 1 if progress_mode == "file" else len(messages)
         if (progress.get("signature") != signature
-                or int(progress.get("total") or 0) != len(messages)):
+                or int(progress.get("total") or 0) != expected_total):
             # Never append a changed story to a half-seeded conversation.
             if progress or (project.get("conversation") or {}).get("conversation_id"):
                 project["conversation"] = {}
-            progress = {"signature": signature, "next": 0, "total": len(messages)}
+            progress = {"signature": signature, "mode": "file", "next": 0, "total": 1}
             project["history_seed_progress"] = progress
             save_project()
+        if progress.get("mode") == "file":
+            conversation = project.get("conversation") or {}
+            if conversation.get("conversation_id") and conversation.get("parent_message_id"):
+                # chat() saves its cursor before returning. This is the restart window after
+                # ChatGPT accepted the file but before this function could mark seeding complete.
+                project["history_seeded"] = True
+                project.pop("history_seed_progress", None)
+                save_project()
+                return
+            set_progress("plan", 0.0, "แนบไฟล์บทและ Context เข้า GPT ...")
+            attachment = {"filename": "story_context.txt", "mime_type": "text/plain; charset=utf-8",
+                          "file_data": base64.b64encode(document.encode("utf-8")).decode("ascii")}
+            try:
+                with_retries("แนบไฟล์บทและ Context",
+                             lambda: chat("อ่านไฟล์บทและ Context ที่แนบให้ครบ เก็บไว้ใช้กับงานนี้ แล้วตอบ STORY_READY เท่านั้น",
+                                          files=[attachment]))
+            except Exception as exc:
+                if "file_upload_unavailable" not in str(exc).lower():
+                    raise
+                log("GPT Web แนบไฟล์ไม่ได้ — ใช้การแบ่งข้อความสั้นเป็นทางสำรอง")
+                project["conversation"] = {}
+                progress = {"signature": signature, "mode": "chunks", "next": 0,
+                            "total": len(messages)}
+                project["history_seed_progress"] = progress
+                save_project()
+            else:
+                project["history_seeded"] = True
+                project.pop("history_seed_progress", None)
+                save_project()
+                return
         next_part = max(0, min(int(progress.get("next") or 0), len(messages)))
         log(f"ส่งบทและ Context เข้า GPT แบบแบ่ง {len(messages)} ส่วน เริ่มที่ส่วน {next_part + 1}")
         for index in range(next_part, len(messages)):

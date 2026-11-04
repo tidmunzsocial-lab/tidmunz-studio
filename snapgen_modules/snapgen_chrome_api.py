@@ -114,6 +114,7 @@ def conversation_of(body: dict) -> str | None:
 def chat_job(body: dict) -> dict:
     """chat/completions or chatgpt/vision request -> chat job."""
     images: list[str] = []
+    files = []
     conversation_id = conversation_of(body)
     if body.get("messages"):
         messages = [m for m in body["messages"] if isinstance(m, dict)]
@@ -130,7 +131,16 @@ def chat_job(body: dict) -> dict:
         picture = data_url(item)
         if picture:
             images.append(picture)
-    return {"type": "chat", "prompt": prompt, "images": images, "conversation_id": conversation_id}
+    for item in list(body.get("files") or []) + list(body.get("input_files") or []):
+        if not isinstance(item, dict) or not item.get("file_data"):
+            continue
+        files.append({"filename": str(item.get("filename") or "attachment.txt"),
+                      "mime_type": str(item.get("mime_type") or "text/plain"),
+                      "file_data": str(item["file_data"])})
+    job = {"type": "chat", "prompt": prompt, "images": images, "conversation_id": conversation_id}
+    if files:
+        job["files"] = files
+    return job
 
 
 def image_job(body: dict) -> dict:
@@ -146,6 +156,9 @@ def error_reply(result: dict) -> tuple[int, dict]:
     if result.get("code") == "prompt_too_long":
         return 413, {"error": {"code": "prompt_too_long", "send_state": "not_sent",
                                 "message": "ChatGPT rejected the prompt because it was too long; no image was sent."}}
+    if result.get("code") == "file_upload_unavailable":
+        return 422, {"error": {"code": "file_upload_unavailable", "send_state": "not_sent",
+                                "message": error}}
     if result.get("provider_status") == 429:
         return 429, {"error": {"code": "rate_limited", "provider_status": 429,
                                 "send_state": result.get("send_state") or "unknown",
@@ -212,7 +225,7 @@ def handle(method: str, path: str, body: dict, run, status: dict) -> tuple[int, 
         return 404, {"error": {"code": "not_found", "message": f"ไม่มี {path} (ไม่ใช้ Bridge แล้ว)"}}
     if path in ("/v1/chat/completions", "/v1/chatgpt/vision"):
         job = chat_job(body)
-        if not job["prompt"] and not job["images"]:
+        if not job["prompt"] and not job["images"] and not job.get("files"):
             return 400, {"error": {"code": "empty", "message": "empty message"}}
         result = run(job)
         if result.get("error"):

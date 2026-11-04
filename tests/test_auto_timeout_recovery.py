@@ -30,6 +30,9 @@ def test_story_history_seed_is_bounded_and_keeps_all_content():
 
 def test_story_history_seed_resumes_after_last_saved_part():
     project = {"context": {"story": "CTX " * 1200}, "full_script": "full.txt"}
+    signature, expected = N.story_history_seed_messages(project["context"], "FULL " * 1600, "PART " * 900)
+    project["history_seed_progress"] = {"signature": signature, "mode": "chunks",
+                                        "next": 0, "total": len(expected)}
     state = {"project": project}
     saved, sent = [], []
     scope = dict(vars(N), state=state, story_script=lambda: "PART " * 900,
@@ -37,8 +40,6 @@ def test_story_history_seed_resumes_after_last_saved_part():
                  set_progress=lambda *args: None, log=lambda *args: None,
                  save_project=lambda: saved.append(json.loads(json.dumps(project))),
                  with_retries=lambda _label, fn: fn())
-    expected = N.story_history_seed_messages(project["context"], "FULL " * 1600, "PART " * 900)[1]
-
     def interrupted_chat(text):
         if len(sent) == 1:
             raise N.Stopped()
@@ -70,12 +71,49 @@ def test_changed_story_discards_half_seeded_conversation():
     scope = dict(vars(N), state={"project": project}, story_script=lambda: "new script",
                  read_script=lambda _path: "", set_progress=lambda *args: None,
                  log=lambda *args: None, save_project=lambda: None,
-                 with_retries=lambda _label, fn: fn(), chat=sent.append)
+                 with_retries=lambda _label, fn: fn(),
+                 chat=lambda text, files=None: sent.append((text, files)))
     load(scope, "ensure_story_in_history", "_build")()
 
-    assert sent and "ส่วน 1/" in sent[0]
+    assert sent and sent[0][1] and sent[0][1][0]["filename"] == "story_context.txt"
+    assert "อ่านไฟล์บทและ Context" in sent[0][0]
     assert project["conversation"] == {}
     assert project["history_seeded"] is True
+
+
+def test_story_history_file_upload_falls_back_only_when_explicitly_not_sent():
+    project = {"context": {"story": "context"}}
+    chunks = []
+    def chat(text, files=None):
+        if files:
+            raise RuntimeError('Bridge HTTP 422: {"error":{"code":"file_upload_unavailable","send_state":"not_sent"}}')
+        chunks.append(text)
+    scope = dict(vars(N), state={"project": project}, story_script=lambda: "story",
+                 read_script=lambda _path: "", set_progress=lambda *args: None,
+                 log=lambda *args: None, save_project=lambda: None,
+                 with_retries=lambda _label, fn: fn(), chat=chat)
+    load(scope, "ensure_story_in_history", "_build")()
+
+    assert chunks and "ส่วน 1/1" in chunks[0]
+    assert project["history_seeded"] is True
+
+
+def test_story_history_restart_after_accepted_file_does_not_upload_twice():
+    context = {"story": "context"}
+    signature, _document = N.story_history_seed_document(context, "", "story")
+    project = {"context": context,
+               "conversation": {"conversation_id": "accepted", "parent_message_id": "reply"},
+               "history_seed_progress": {"signature": signature, "mode": "file", "next": 0, "total": 1}}
+    calls = []
+    scope = dict(vars(N), state={"project": project}, story_script=lambda: "story",
+                 read_script=lambda _path: "", set_progress=lambda *args: None,
+                 log=lambda *args: None, save_project=lambda: None,
+                 with_retries=lambda _label, fn: fn(), chat=lambda *args, **kwargs: calls.append(args))
+    load(scope, "ensure_story_in_history", "_build")()
+
+    assert calls == []
+    assert project["history_seeded"] is True
+    assert "history_seed_progress" not in project
 
 
 def test_524_survives_restart_and_never_silently_resubmits(tmp_path, monkeypatch):

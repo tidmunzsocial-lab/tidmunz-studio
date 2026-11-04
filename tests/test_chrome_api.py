@@ -27,6 +27,17 @@ def test_chat_job_continued_story_sends_only_newest_user_text_and_pictures():
                    "conversation_id": "c1"}
 
 
+def test_chat_job_keeps_real_file_attachment_out_of_prompt_text():
+    encoded = base64.b64encode("บทและ Context".encode()).decode()
+    job = api.chat_job({"messages": [{"role": "user", "content": "อ่านไฟล์"}],
+                        "input_files": [{"filename": "story.txt", "mime_type": "text/plain",
+                                         "file_data": encoded}]})
+
+    assert job["prompt"] == "อ่านไฟล์"
+    assert job["files"] == [{"filename": "story.txt", "mime_type": "text/plain",
+                              "file_data": encoded}]
+
+
 def test_chat_job_new_chat_joins_system_and_user_and_reads_docx_as_text():
     import io
     import zipfile

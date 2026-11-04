@@ -575,10 +575,10 @@ async function pageVerifyDelivery(job, before) {
     /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((button.getAttribute("aria-label") || "").trim()));
   const uploading = Boolean(form && form.querySelector('[role="progressbar"], [aria-busy="true"], circle[stroke-dasharray]'));
   const attached = buttons.filter(button => /^(ลบ|remove)\s/i.test((button.getAttribute("aria-label") || "").trim())).length;
-  const expectedImages = (job.images || []).length;
+  const expectedAttachments = (job.images || []).length + (job.files || []).length;
   if (editor && editor.isConnected !== false && form && form.isConnected !== false &&
       send && send.isConnected !== false && !send.disabled && !busy && !uploading &&
-      draft === expected && attached >= expectedImages)
+      draft === expected && attached >= expectedAttachments)
     return {state: "not_sent"};
   return {state: "unknown"};
 }
@@ -655,16 +655,28 @@ async function pageSend(job) {
     return {error: "ChatGPT prompt box is still loading or changed — wait for the composer in the program's Chrome window, then retry",
             send_state: "not_sent"};
   const images = job.images || [];
-  if (images.length) {
-    const input = [...document.querySelectorAll('input[type=file]')].find(i => i.multiple && /image/.test(i.accept))
-      || [...document.querySelectorAll('input[type=file]')].find(i => i.multiple);
-    if (!input) return {error: "ChatGPT file input not found", send_state: "not_sent"};
+  const files = job.files || [];
+  const expectedAttachments = images.length + files.length;
+  if (expectedAttachments) {
+    const inputs = [...document.querySelectorAll('input[type=file]')];
+    const input = (files.length && inputs.find(i => i.multiple &&
+      (!i.accept || /text|json|pdf|doc|\.txt/i.test(i.accept))))
+      || inputs.find(i => i.multiple && /image/.test(i.accept))
+      || inputs.find(i => i.multiple);
+    if (!input) return {error: "ChatGPT file input not found", code: "file_upload_unavailable", send_state: "not_sent"};
     const dt = new DataTransfer();
     images.forEach((data, n) => {
       const [head, b64] = data.split(",");
       const mime = (head.match(/data:([^;]+)/) || [])[1] || "image/png";
       const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
       dt.items.add(new File([bytes], `ref_${n + 1}.${mime.split("/")[1] || "png"}`, {type: mime}));
+    });
+    files.forEach((item, n) => {
+      const b64 = String(item && item.file_data || "");
+      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const name = String(item && item.filename || `attachment_${n + 1}.txt`).replace(/[\\/:*?"<>|]/g, "_");
+      const mime = String(item && item.mime_type || "text/plain");
+      dt.items.add(new File([bytes], name, {type: mime}));
     });
     input.files = dt.files;
     input.dispatchEvent(new Event("change", {bubbles: true}));
@@ -683,13 +695,13 @@ async function pageSend(job) {
       /^(ลบ|remove)\s/i.test((b.getAttribute("aria-label") || "").trim())).length;
     const uploading = form.querySelector('[role="progressbar"], [aria-busy="true"], circle[stroke-dasharray]');
     send = form.querySelector('button[type="submit"]');
-    const ready = send && !send.disabled && attached >= images.length && !uploading;
+    const ready = send && !send.disabled && attached >= expectedAttachments && !uploading;
     settled = ready ? settled + 1 : 0;
     if (settled >= 2) break;  // ready twice in a row: the upload is really done
   }
-  if (images.length && attached < images.length)
-    return {error: `ChatGPT did not take the attached pictures (${attached}/${images.length} attached) — not sent`,
-            send_state: "not_sent"};
+  if (expectedAttachments && attached < expectedAttachments)
+    return {error: `ChatGPT did not take the attached files (${attached}/${expectedAttachments} attached) — not sent`,
+            code: "file_upload_unavailable", send_state: "not_sent"};
   if (!send || send.disabled)
     return {error: "ChatGPT did not accept the attachments / prompt in time", send_state: "not_sent"};
   // ChatGPT can replace the composer while attachments finish uploading. Resolve the live
@@ -708,7 +720,7 @@ async function pageSend(job) {
     /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((b.getAttribute("aria-label") || "").trim()));
   if (!latestEditor || latestEditor.isConnected === false || !latestForm || latestForm.isConnected === false ||
       !latestSend || latestSend.isConnected === false || latestSend.disabled || latestUploading || latestBusy ||
-      latestDraft !== expectedPrompt || latestAttached < images.length)
+      latestDraft !== expectedPrompt || latestAttached < expectedAttachments)
     return {error: "ChatGPT composer changed before Send — prompt not sent; retrying in a fresh tab is safe",
             send_state: "not_sent"};
   editor = latestEditor;
@@ -796,6 +808,7 @@ async function pageSend(job) {
                 role_only_users: document.querySelectorAll('[data-message-author-role="user"]').length,
                 text_content_matches: textMatches, active_response: activeResponse, upload_pending: uploadPending,
                 attached_images: attachedNow, expected_images: images.length,
+                expected_attachments: expectedAttachments,
                 send_button_found: Boolean(currentSend), send_disabled: Boolean(currentSend && currentSend.disabled),
                 send_is_expected: Boolean(currentSend && (currentSend.id === "composer-submit-button" ||
                   typeof currentSend.getAttribute === "function" && currentSend.getAttribute("data-testid") === "send-button")),
