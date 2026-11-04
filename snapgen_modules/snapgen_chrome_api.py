@@ -143,6 +143,9 @@ def image_job(body: dict) -> dict:
 
 def error_reply(result: dict) -> tuple[int, dict]:
     error = str(result.get("error") or "ChatGPT (Chrome) error")
+    if result.get("code") == "prompt_too_long":
+        return 413, {"error": {"code": "prompt_too_long", "send_state": "not_sent",
+                                "message": "ChatGPT rejected the prompt because it was too long; no image was sent."}}
     if result.get("provider_status") == 429:
         return 429, {"error": {"code": "rate_limited", "provider_status": 429,
                                 "send_state": result.get("send_state") or "unknown",

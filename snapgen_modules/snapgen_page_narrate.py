@@ -5945,6 +5945,50 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def run_gpt_scenes(todo, scenes, images_dir):
         """Run two independent chats; never duplicate an ambiguously timed-out submission."""
         project = state["project"]
+
+        def compact_prompt(scene):
+            base = str(scene.get("prompt") or "").strip()
+            folded = base.casefold()
+            parts = ["สร้างภาพนิ่งตามฉากนี้ ใช้เรฟรักษาหน้าตาตัวละครและสถานที่ ไม่ใส่ตัวอักษรหรือลายน้ำ", base]
+            names = [str(name).strip() for name in scene.get("characters") or [] if str(name).strip()]
+            missing_names = [name for name in names if name.casefold() not in folded]
+            if missing_names:
+                parts.append("ตัวละครหลัก: " + ", ".join(missing_names))
+            location = str(scene.get("location") or "").strip()
+            if location and location.casefold() not in folded:
+                parts.append("สถานที่หลัก: " + location)
+            continuity = str(scene.get("continuity") or "").strip()
+            if continuity and continuity.casefold() not in folded:
+                parts.append("ความต่อเนื่อง: " + continuity)
+            text = " ".join([base, " ".join(names), location, str(scene.get("text") or "")])
+            ghosts = find_ghosts(text, project.get("ghosts") or [])
+            if ghosts:
+                parts.append("ลักษณะผีตามความเชื่อไทย: " + "; ".join(look for _name, look in ghosts))
+            bodies, forbid = shot_bodies(scene)
+            if bodies:
+                parts.append("ลักษณะร่างกายที่ต้องถูกต้อง: " + bodies)
+            if forbid:
+                parts.append("ห้ามมี: " + forbid)
+            same = project.get("same_person") or {}
+            forms = [f"{name} คือคนเดียวกับ {same[name]['person']} ในร่าง {same[name].get('how') or 'ผี/วิญญาณ'}"
+                     for name in names if name in same]
+            if forms:
+                parts.append("ตัวตนเดียวกันต่างร่าง: " + "; ".join(forms))
+            return "\n".join(part for part in parts if part)
+
+        def is_prompt_too_long_error(error):
+            seen = set()
+            while error is not None and id(error) not in seen:
+                seen.add(id(error))
+                message = str(error)
+                if "prompt_too_long" in message or re.search(
+                    r"ข้อความ(?:ที่คุณส่ง)?ยาวเกินไป|(?:your\s+)?message\s+(?:is|was)\s+too\s+long|message.{0,40}too\s+long",
+                    message, re.IGNORECASE
+                ):
+                    return True
+                error = error.__cause__ or error.__context__
+            return False
+
         jobs = []
         for i in dict.fromkeys(todo):
             check_stop()
@@ -5990,9 +6034,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             with attempt_lock:
                 attempts[i] += 1
 
-            def send():
+            def send(current_prompt=prompt, current_paths=paths):
                 try:
-                    return make_image(prompt, paths, images_dir, f"scene_{i + 1:03d}", project["aspect"],
+                    return make_image(current_prompt, current_paths, images_dir, f"scene_{i + 1:03d}", project["aspect"],
                                       board=board, identity_repair=repair, fresh_chat=True, parallel_images=True)
                 except Exception as exc:
                     limited = image_rate_limit_from_error(exc)
@@ -6006,7 +6050,40 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 set_progress("images", saved / max(1, len(jobs)),
                              f"GPT สูงสุด 2 งาน · เสร็จ {saved}/{len(jobs)} · ช็อต {i + 1} รอ GPT {int(delay)} วินาที")
 
-            return run_bridge_with_cooldown(send, check_stop, time.sleep, cooldown)
+            try:
+                return run_bridge_with_cooldown(send, check_stop, time.sleep, cooldown)
+            except Exception as exc:
+                if not is_prompt_too_long_error(exc):
+                    raise
+                check_stop()
+                shorter_prompt = compact_prompt(scenes[i])
+                if len(shorter_prompt) >= len(prompt):
+                    shorter_prompt = str(scenes[i].get("prompt") or "").strip()
+                shorter_paths = paths
+                if len(paths) > 1:
+                    try:
+                        primary = primary_scene_references(scenes[i], paths, len(paths) - 1)
+                        if len(primary) < len(paths):
+                            shorter_paths = primary
+                    except ImageProviderError:
+                        pass  # Every attached file is a named character/place ref; keep them all.
+                if len(shorter_prompt) >= len(prompt) and len(shorter_paths) >= len(paths):
+                    raise ImageProviderError(
+                        f"ช็อต {i + 1}: ChatGPT ปฏิเสธข้อความว่ายาวเกินไป และไม่มีส่วนซ้ำหรือเรฟส่วนเกินให้ย่อโดยไม่เสียรายละเอียดฉาก"
+                    ) from exc
+                log(f"GPT ปฏิเสธพรอมต์ช็อต {i + 1} ว่ายาวเกินไป — ย่อเฉพาะคำสั่งซ้ำ/รายละเอียดเสริม "
+                    f"{len(prompt)}→{len(shorter_prompt)} ตัวอักษร และเลือกเรฟหลัก {len(shorter_paths)}/{len(paths)} รูป แล้วลองช็อตเดิมอีกครั้ง")
+                try:
+                    return run_bridge_with_cooldown(
+                        lambda: send(shorter_prompt, shorter_paths), check_stop, time.sleep, cooldown
+                    )
+                except Exception as retry_error:
+                    if is_prompt_too_long_error(retry_error):
+                        raise ImageProviderError(
+                            f"ช็อต {i + 1}: ChatGPT ยังปฏิเสธแม้ย่อพรอมต์และตัดเรฟที่ไม่ใช่ตัวละคร/สถานที่หลักแล้ว — "
+                            "เก็บรูปและช็อตอื่นไว้ครบ ไม่มีการวนส่งซ้ำ"
+                        ) from retry_error
+                    raise
 
         def completed(job, image, error):
             i = job[0]

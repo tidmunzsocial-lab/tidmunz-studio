@@ -182,6 +182,16 @@ def test_chrome_conversation_429_remains_rate_limited():
     assert payload["error"]["retry_after"] == 75
 
 
+def test_chrome_prompt_too_long_has_explicit_not_sent_response():
+    status, payload = C.error_reply({
+        "error": "ChatGPT rejected the prompt because it was too long",
+        "code": "prompt_too_long", "send_state": "not_sent",
+    })
+    assert status == 413
+    assert payload["error"]["code"] == "prompt_too_long"
+    assert payload["error"]["send_state"] == "not_sent"
+
+
 def test_auto_recovers_pre_send_429_with_backoff_and_same_request():
     calls, waits, notices = [], [], []
     error = N.bridge_rate_limit(429, json.dumps({"error": {

@@ -429,7 +429,7 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
   };
   await reconcileUnknownSend();
   if (cancelled) return {error: "ChatGPT operation cancelled"};
-  if (started && started.error && started.send_state === "not_sent") {
+  if (started && started.error && started.send_state === "not_sent" && started.code !== "prompt_too_long") {
     // Retry only after a failure before the click or an authoritative no-new-message check.
     try {
       await report("opening");
@@ -714,6 +714,25 @@ async function pageSend(job) {
   editor = latestEditor;
   form = latestForm;
   send = latestSend;
+  const tooLongSelectors = '[role="alert"], [role="status"], [aria-live], [data-sonner-toast], [data-testid*="toast"]';
+  const tooLongPattern = /ข้อความ(?:ที่คุณส่ง)?ยาวเกินไป|(?:your\s+)?message\s+(?:is|was)\s+too\s+long|message.{0,40}too\s+long/i;
+  const bodyBeforeSend = String(document.body && document.body.innerText || "");
+  const currentAlerts = () => typeof document.querySelectorAll === "function"
+    ? [...document.querySelectorAll(tooLongSelectors)] : [];
+  const oldAlerts = new Set(currentAlerts().map(node =>
+    String(node.innerText || node.textContent || "").trim()));
+  const promptTooLongNotice = () => {
+    for (const node of currentAlerts()) {
+      const text = String(node.innerText || node.textContent || "").trim();
+      if (text && !oldAlerts.has(text) && tooLongPattern.test(text)) return text;
+    }
+    const bodyText = String(document.body && document.body.innerText || "");
+    if (bodyText !== bodyBeforeSend && !tooLongPattern.test(bodyBeforeSend) && tooLongPattern.test(bodyText)) {
+      const match = bodyText.match(tooLongPattern);
+      return match ? match[0] : "ChatGPT rejected the message because it was too long";
+    }
+    return "";
+  };
   markSendAttempted(before, domBefore);
   send.click();
   let sendClicks = 1;
@@ -736,10 +755,16 @@ async function pageSend(job) {
     const waitForUserMessage = async () => {
       for (let attempt = 0; attempt < 60 && !userMessageId; attempt++) {
         await sleep(250);
+        const rejected = promptTooLongNotice();
+        if (rejected) return rejected;
         userMessageId = findUserMessage();
       }
+      return "";
     };
-    await waitForUserMessage();
+    const rejection = await waitForUserMessage();
+    if (!userMessageId && rejection)
+      return {error: "ChatGPT rejected the prompt because it was too long: " + rejection,
+              code: "prompt_too_long", send_state: "not_sent", before, dom_before: domBefore};
     if (!userMessageId) {
       // A failed confirmation after the click is ambiguous. Never click Send again here;
       // runJob may retry only if this function proved the prompt was never sent.

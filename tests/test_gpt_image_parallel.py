@@ -302,6 +302,56 @@ def test_gpt_scene_worker_submits_only_primary_refs_when_over_limit(tmp_path):
     assert Path(scene['image']).is_file()
 
 
+def test_gpt_scene_retries_only_explicit_too_long_rejection_with_compact_prompt_and_refs(tmp_path):
+    scene={'characters':['ท้าวธันตะรด'], 'location':'พระราชวังเมืองบาดาล', 'prompt':'รักษาฉากหลักและมุมกล้อง'}
+    refs=['ท้าวธันตะรด.png','พระราชวังเมืองบาดาล.png','ท้องพระโรง.png','ผู้เฝ้าประตู.png']
+    calls=[]
+    project={'scenes':[scene],'aspect':'16:9'}
+    long_prompt=scene['prompt']+'\n'+('รายละเอียดซ้ำ '*120)
+    too_long=RuntimeError('HTTP 413: {"error":{"code":"prompt_too_long","send_state":"not_sent"}}')
+
+    def make_image(prompt, paths, folder, name, aspect, **kwargs):
+        calls.append((prompt,list(paths),kwargs.copy()))
+        if len(calls)==1:
+            raise too_long
+        output=folder/(name+'.png');output.write_bytes(b'generated');return str(output)
+
+    noop=lambda *a,**k:None
+    scope=dict(vars(N),state={'project':project,'lock':threading.RLock()},
+        attachments_for=lambda _scene,limit=None:refs,scene_prompt=lambda _scene:long_prompt,
+        shot_bodies=lambda _scene:('', ''),make_image=make_image,check_stop=noop,save_project=noop,
+        log=noop,set_progress=noop,ui=noop,refresh_table=noop,follow_shot=noop)
+    load(scope,'run_gpt_scenes')([0],[scene],tmp_path)
+
+    assert len(calls)==2
+    assert calls[0][0]==long_prompt
+    assert len(calls[1][0])<len(calls[0][0]) and 'รักษาฉากหลักและมุมกล้อง' in calls[1][0]
+    assert calls[1][1]==refs[:2]
+    assert Path(scene['image']).is_file()
+    assert scene['prompt']=='รักษาฉากหลักและมุมกล้อง'
+
+
+def test_gpt_scene_stops_after_one_compact_retry_if_chatgpt_still_rejects_length(tmp_path):
+    scene={'characters':['ท้าวธันตะรด'], 'location':'พระราชวังเมืองบาดาล', 'prompt':'รักษาฉากหลัก'}
+    refs=['ท้าวธันตะรด.png','พระราชวังเมืองบาดาล.png','ท้องพระโรง.png']
+    calls=[]
+    project={'scenes':[scene],'aspect':'16:9'}
+    too_long=RuntimeError('HTTP 413: {"error":{"code":"prompt_too_long","send_state":"not_sent"}}')
+
+    def make_image(prompt, paths, folder, name, aspect, **kwargs):
+        calls.append((prompt,list(paths)))
+        raise too_long
+
+    noop=lambda *a,**k:None
+    scope=dict(vars(N),state={'project':project,'lock':threading.RLock()},
+        attachments_for=lambda _scene,limit=None:refs,scene_prompt=lambda _scene:'รักษาฉากหลัก '+'เพิ่มคำซ้ำ '*20,
+        shot_bodies=lambda _scene:('', ''),make_image=make_image,check_stop=noop,save_project=noop,
+        log=noop,set_progress=noop,ui=noop,refresh_table=noop,follow_shot=noop)
+    with pytest.raises(N.ImageProviderError,match='ยังปฏิเสธแม้ย่อพรอมต์'):
+        load(scope,'run_gpt_scenes')([0],[scene],tmp_path)
+    assert len(calls)==2
+
+
 def test_worker_tabs_allocate_distinct_ids_and_protect_both_lanes():
     code = SOURCE[SOURCE.index('function isWorkerTab('):SOURCE.index('async function waitLoaded(')]
     data = run_node(code + r'''

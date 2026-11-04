@@ -279,6 +279,60 @@ pageSend({type:'chat',conversation_id:'existing',prompt:'new plan prompt',images
     assert data["result"]["user_message_id"] == "sent-user"
 
 
+def test_oversized_prompt_toast_is_reported_as_definite_not_sent():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    functions = source[source.index("async function pageNodes("):source.index("async function pagePoll(")]
+    harness = r'''
+let clicks=0, bodyText='ChatGPT';
+const messages=['user','assistant'].map((role,i)=>({innerText:'old',getAttribute:k=>k==='data-message-id'?'old-'+i:role}));
+const alerts=[];
+const send={disabled:false,click(){clicks++;bodyText+='\nข้อความที่คุณส่งยาวเกินไป โปรดแก้ไขแล้วส่งอีกครั้ง';
+ alerts.push({innerText:'ข้อความที่คุณส่งยาวเกินไป โปรดแก้ไขแล้วส่งอีกครั้ง'});},getAttribute:()=>null};
+const form={isConnected:true,querySelectorAll:()=>[send],querySelector:s=>s==='button[type="submit"]'?send:null};
+const editor={isConnected:true,innerText:'',textContent:'',closest:()=>form,focus(){}};
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+global.document={body:{get innerText(){return bodyText;}},activeElement:null,visibilityState:'visible',hasFocus:()=>true,
+ querySelectorAll:s=>s.includes('data-message-id')?messages:s.includes('role="alert"')?alerts:[],
+ querySelector:()=>editor,execCommand:(cmd,_show,value)=>{if(cmd==='selectAll')editor.innerText='';if(cmd==='insertText')editor.innerText=value;}};
+global.fetch=async()=>{throw Error('loaded chat must use the DOM path');};
+pageSend({type:'chat',conversation_id:'existing',prompt:'large image prompt',images:[]}).then(result=>
+ console.log(JSON.stringify({result,clicks}))).catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["clicks"] == 1
+    assert data["result"]["code"] == "prompt_too_long"
+    assert data["result"]["send_state"] == "not_sent"
+
+
+def test_run_job_does_not_resend_a_prompt_rejected_as_too_long():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    run = source[source.index("async function runJob("):source.index("// ── functions below")]
+    harness = r'''
+let sends=0,fresh=0,polls=0;
+const JOB_LIMIT_MS=720000,sleep=async()=>{};
+const workerTab=async()=>7,freshTab=async()=>{fresh++;return 8;},openPage=async id=>id;
+function pageNodes(){} function pageSend(){} function pagePoll(){polls++;}
+async function inPage(_id,fn){if(fn.name==='pageNodes')return [];
+ if(fn.name==='pageSend'){sends++;return {error:'ChatGPT rejected the prompt because it was too long',
+ code:'prompt_too_long',send_state:'not_sent'};} return fn();}
+const relay=async()=>({active:true});
+runJob({id:'job',type:'chat',conversation_id:'existing',prompt:'oversized'}).then(result=>
+ console.log(JSON.stringify({result,sends,fresh,polls}))).catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", run + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["sends"] == 1 and data["fresh"] == 0 and data["polls"] == 0
+    assert data["result"]["code"] == "prompt_too_long"
+
+
 def test_text_send_confirmation_survives_chatgpt_replacing_old_message_dom():
     node = shutil.which("node")
     if not node:
