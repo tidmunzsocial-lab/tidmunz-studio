@@ -1,6 +1,62 @@
 """SnapGen Muse AI video API adapter."""
 
+import hashlib
+import tempfile
+import uuid
 from pathlib import Path
+
+
+# Hosted video APIs reject oversized frame and reference uploads.
+# Only upload copies are compressed: original PNG/JPEG and project paths are immutable.
+MAX_REFERENCE_BYTES = 9_500_000
+
+
+def upload_image(source):
+    source = Path(source)
+    stat = source.stat()
+    if stat.st_size <= MAX_REFERENCE_BYTES:
+        return source
+    from PIL import Image, ImageOps
+
+    fingerprint = hashlib.sha256(
+        (str(source.resolve()) + "|" + str(stat.st_size)
+         + "|" + str(stat.st_mtime_ns)).encode("utf-8")
+    ).hexdigest()[:24]
+    target_dir = Path(tempfile.gettempdir()) / "tidmunz_video_upload"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / (fingerprint + ".jpg")
+    if target.is_file() and 0 < target.stat().st_size <= MAX_REFERENCE_BYTES:
+        try:
+            with Image.open(target) as check:
+                check.verify()  # Never use a partial file left by an interrupted upload.
+            return target
+        except (OSError, ValueError):
+            pass
+
+    temporary = target_dir / (fingerprint + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with Image.open(source) as original:
+            frame = ImageOps.exif_transpose(original).convert("RGB")
+        try:
+            for _ in range(12):
+                for quality in (90, 82, 72, 60):
+                    frame.save(temporary, format="JPEG", quality=quality, optimize=True)
+                    if 0 < temporary.stat().st_size <= MAX_REFERENCE_BYTES:
+                        temporary.replace(target)
+                        return target
+                # Some noisy/very large images remain over 10 MB even as JPEG.
+                # Reduce the *upload copy* dimensions until they fit.
+                width, height = max(1, int(frame.width * 0.8)), max(1, int(frame.height * 0.8))
+                if min(width, height) < 128:
+                    break
+                smaller = frame.resize((width, height), Image.Resampling.LANCZOS)
+                frame.close()
+                frame = smaller
+            raise RuntimeError("รูปอ้างอิงใหญ่เกิน 10 MB แม้บีบอัดและย่อสำเนาแล้ว")
+        finally:
+            frame.close()
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 MODEL = "muse-ai-video"
@@ -23,6 +79,7 @@ def build_command(api_key, prompt, image, duration, aspect):
     source = Path(str(image or "").strip())
     if not source.is_file():
         raise RuntimeError("ไม่พบรูปเริ่มต้นสำหรับ Muse AI")
+    source = upload_image(source)
 
     return [
         "curl", "-sS", "-X", "POST", API_URL,

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from snapgen_muse_video import upload_image as _bounded_video_upload_image
+
 
 MODEL = "vela-ai-video"
 LABEL = "Vela AI Video"
@@ -23,6 +25,7 @@ def build_command(api_key, prompt, image, duration, aspect):
     source = Path(str(image or "").strip())
     if not source.is_file():
         raise RuntimeError("ไม่พบรูปเริ่มต้นสำหรับ Vela AI")
+    source = _bounded_video_upload_image(source)
 
     command = [
         "curl", "-sS", "-X", "POST", API_URL,

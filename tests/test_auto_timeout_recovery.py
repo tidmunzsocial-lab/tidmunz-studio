@@ -271,6 +271,46 @@ def motion_scope(tmp_path, accept=True):
     return scope, scenes, questions, calls
 
 
+def test_actual_chrome_twelve_minute_timeout_is_terminal():
+    assert N.gpt_relay_timed_out('Bridge HTTP 502: {"error":{"message":"ChatGPT (Chrome): ChatGPT took longer than 12 minutes"}}')
+    assert not N.gpt_relay_timed_out("Bridge HTTP 401: account rejected")
+
+
+def test_chrome_timeout_keeps_existing_motion_prompts_and_never_resends(tmp_path):
+    """Normal Auto (no developer switch) fails over after an accepted GPT timeout."""
+    scope, scenes, questions, calls = motion_scope(tmp_path)
+    before = json.loads(json.dumps(scenes))
+
+    def timeout(content):
+        calls.append(content)
+        raise RuntimeError(
+            'Bridge HTTP 502: {"error":{"code":"chrome_error",'
+            '"message":"ChatGPT (Chrome): ChatGPT took longer than 12 minutes"}}'
+        )
+
+    scope["chat"] = timeout
+    scope["stage_motion"]()
+    assert scenes == before
+    assert scope["state"]["motion_planned_only"]
+    assert scope["state"]["motion_text_only"]
+    assert not questions and len(calls) == 1
+    scope["stage_motion"]([1], force=True)
+    assert scenes == before and len(calls) == 1
+    assert not any("motion_image" in scene or "seen" in scene for scene in scenes)
+
+
+def test_chrome_timeout_with_missing_planned_prompt_stops_without_fabricating(tmp_path):
+    scope, scenes, questions, calls = motion_scope(tmp_path)
+    scenes[1]["video_prompt"] = ""
+    scope["chat"] = lambda content: (_ for _ in ()).throw(
+        RuntimeError("ChatGPT (Chrome): ChatGPT took longer than 12 minutes"))
+    with pytest.raises(RuntimeError, match="longer than 12 minutes"):
+        scope["stage_motion"]()
+    assert not scope["state"].get("motion_planned_only")
+    assert not questions
+    assert not any("motion_image" in scene for scene in scenes)
+
+
 def test_chrome_conversation_429_remains_rate_limited():
     status, payload = C.error_reply({
         "error": "ChatGPT conversation read failed: HTTP 429 — message not sent",

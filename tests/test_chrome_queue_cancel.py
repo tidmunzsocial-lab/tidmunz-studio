@@ -11,14 +11,18 @@ from test_video_auto_scene_provider import N, load, Widget
 import snapgen_chrome_relay as chrome
 
 
-def test_source_extension_bump_reloads_v1_0_31_worker(tmp_path, monkeypatch):
+def test_source_extension_bump_reloads_previous_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(chrome, "data_dir", lambda: tmp_path)
     target = tmp_path / "chrome_extension"
     target.mkdir()
     source = Path(chrome.__file__).with_name("chrome_ext") / "manifest.json"
     (target / "manifest.json").write_bytes(source.read_bytes())
-    assert chrome._newer_on_disk("1.0.31")
-    assert not chrome._newer_on_disk("1.0.32")
+    current = json.loads(source.read_text(encoding="utf-8"))["version"]
+    major, minor, patch = (int(part) for part in current.split("."))
+    assert patch > 0
+    previous = f"{major}.{minor}.{patch - 1}"
+    assert chrome._newer_on_disk(previous)
+    assert not chrome._newer_on_disk(current)
 
 
 def test_stop_cancels_http_wait_and_next_auto_run_takes_the_same_queue(monkeypatch):

@@ -1253,6 +1253,16 @@ def bridge_rate_limit(status, detail):
     return limited
 
 
+def gpt_relay_timed_out(error):
+    """Recognize terminal relay waits so Auto does not replay a sent GPT request."""
+    text = str(error).casefold()
+    return any(marker in text for marker in (
+        "chrome did not finish the chatgpt job in time",
+        "chatgpt job waited too long in the queue and was not sent",
+        "chatgpt took longer than 12 minutes",
+    ))
+
+
 def image_rate_limit_from_error(error):
     """Recover explicit pre-send metadata from the image bridge's HTTPError string."""
     match = re.search(r"HTTP\s*429:\s*(\{.*\})", str(error), re.DOTALL)
@@ -4905,6 +4915,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 if any(marker in text for marker in ("no assistant text came back", "no message reached the chat",
                                                      "chatgpt page did not answer")):
                     raise  # Replaying an unanswered Web request does not repair the provider.
+                if gpt_relay_timed_out(exc):
+                    raise  # The sent request may still finish in GPT; never duplicate it.
                 if "conversation_not_found" in text or ("conversation" in text and ("not found" in text or "404" in text)):
                     # The chat is gone from the account Chrome is logged into (chats deleted, or another
                     # account). Nothing is lost: the story and Context live in files, so a new chat in the
@@ -6935,15 +6947,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return items
 
     def use_planned_motion(indices, exc):
-        """Explicit, current-run fallback; never mark planned text as visually checked."""
+        """Use the planned prompts after an explicit GPT delivery failure; never mark them visually checked."""
         if not video_mode or not any(marker in str(exc).lower() for marker in (
-                "no assistant text came back", "no message reached the chat", "chatgpt page did not answer")):
+                "no assistant text came back", "no message reached the chat", "chatgpt page did not answer",
+                "chrome did not finish the chatgpt job in time",
+                "chatgpt job waited too long in the queue and was not sent",
+                "chatgpt took longer than 12 minutes")):
             return False
         scenes = state["project"]["scenes"]
         if any(not str(scenes[i].get("video_prompt") or "").strip() for i in indices):
             return False
         if not state.get("motion_planned_only"):
-            if not ask_on_ui("GPT Web ไม่ตอบ — ใช้พรอมต์เดิมไหม?",
+            timed_out = gpt_relay_timed_out(exc)
+            if not timed_out and not ask_on_ui("GPT Web ไม่ตอบ — ใช้พรอมต์เดิมไหม?",
                     "GPT Web ไม่ส่งคำตอบกลับมา แต่ช็อตที่เหลือมีพรอมต์วิดีโอจากแผนอยู่แล้ว\n\n"
                     "ใช้พรอมต์เหล่านั้นต่อในรอบนี้ โดยข้ามการเขียนและตรวจคำสั่งด้วย GPT Web ไหม?\n"
                     "ยังไม่ได้ตรวจว่าคำสั่งตรงกับรูปจริง คุณควรตรวจรูปและคำสั่งก่อน\n"
@@ -6953,7 +6969,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             check_stop()
             state["motion_planned_only"] = True
             state["motion_text_only"] = True
-            log("ใช้พรอมต์วิดีโอเดิมตามที่ยืนยันเฉพาะรอบนี้ — ไม่ได้ตรวจรูป/คำสั่งด้วย GPT Web; ตรวจคลิปในเครื่อง")
+            if timed_out:
+                log("⏳ GPT ไม่ตอบภายในเวลาจำกัด — ใช้พรอมต์วิดีโอที่วางแผนไว้กับรูปที่มีต่ออัตโนมัติ; ไม่ส่งคำขอ GPT ซ้ำ")
+            else:
+                log("ใช้พรอมต์วิดีโอเดิมตามที่ยืนยันเฉพาะรอบนี้ — ไม่ได้ตรวจรูป/คำสั่งด้วย GPT Web; ตรวจคลิปในเครื่อง")
         return True
 
     def stage_motion(indices=None, force=False, *, prepared=False, lookahead=False):
@@ -7020,6 +7039,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                             exc = retry_exc
                     if reply is None:
                         # Pictures could not be sent: for the rest of this run write from the script and image prompt.
+                        if gpt_relay_timed_out(exc):
+                            if use_planned_motion(todo, exc):
+                                return
+                            raise exc
                         state["motion_text_only"] = True
                         if force:
                             if use_planned_motion(todo, exc):

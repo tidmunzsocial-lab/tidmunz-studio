@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from snapgen_muse_video import upload_image as _bounded_video_upload_image
+
 
 MODEL = "grok-lower"
 LABEL = "Grok Lower — เสียเครดิต 50%"
@@ -31,6 +33,8 @@ def build_command(api_key, prompt, image, resolution, duration, aspect, mode, mo
     source = Path(str(image or "").strip())
     if not source.is_file():
         raise RuntimeError("ไม่พบรูปเริ่มต้นสำหรับ Grok")
+    # Hosted video APIs have strict per-file limits; never alter the source PNG.
+    source = _bounded_video_upload_image(source)
     return [
         "curl", "-sS", "-N", "--max-time", "45", "-X", "POST", api_url,
         "-H", "x-api-key: " + key,

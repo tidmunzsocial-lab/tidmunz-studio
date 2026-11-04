@@ -59,6 +59,25 @@ def test_curl_sends_complete_literal_prompt_and_reference(tmp_path, model, promp
         thread.join(timeout=5)
 
 
+def test_grok_oversize_source_is_uploaded_as_bounded_copy(tmp_path, monkeypatch):
+    import hashlib
+    import os
+    import snapgen_muse_video as M
+    from PIL import Image
+
+    image = tmp_path / "scene_large.png"
+    Image.frombytes("RGB", (2000, 1800), os.urandom(2000 * 1800 * 3)).save(image, compress_level=0)
+    original_hash = hashlib.sha256(image.read_bytes()).hexdigest()
+    assert image.stat().st_size > M.MAX_REFERENCE_BYTES
+    monkeypatch.setattr(M.tempfile, "gettempdir", lambda: str(tmp_path))
+    command = G.build_command("test-key", "slow camera", image, "720p", "10", "landscape", "custom",
+                              G.GROK_LITE_MODEL)
+    uploaded = Path(command[command.index("--form") + 1].split("@", 1)[1])
+    assert uploaded != image and uploaded.suffix == ".jpg"
+    assert uploaded.stat().st_size <= M.MAX_REFERENCE_BYTES
+    assert hashlib.sha256(image.read_bytes()).hexdigest() == original_hash
+
+
 def test_auto_slot_dialogue_follows_each_scene_after_silent_scene():
     class Value:
         def __init__(self, value=""):

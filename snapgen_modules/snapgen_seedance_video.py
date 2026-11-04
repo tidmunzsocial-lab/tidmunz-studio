@@ -7,6 +7,8 @@ ref_images for reference uploads, rather than Grok's files field.
 from pathlib import Path
 import json
 
+from snapgen_muse_video import upload_image as _bounded_video_upload_image
+
 MODELS = {
     "sd-2-lower": "Seedance 2.0 - Lower",
     "sd-2-5-lower": "Seedance 2.5 - Lower",
@@ -104,7 +106,9 @@ def build_command(api_key, model, prompt, image, resolution, duration, aspect, r
         "--form-string", "mode_image=ingredient",
     ]
     for path in paths:
-        command.extend(["--form", "ref_images=@" + str(path)])
+        # Compress the upload copy of *each* frame/Ref without changing @imageN order
+        # or the original reference files stored with the project.
+        command.extend(["--form", "ref_images=@" + str(_bounded_video_upload_image(path))])
     return command
 
 
