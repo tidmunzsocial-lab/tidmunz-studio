@@ -1823,22 +1823,8 @@ def clip_limit(scene: dict) -> float:
     return 20.0 if scene.get("slow") else SHOT_LIMIT
 
 
-def is_muse_scenery(scene: dict) -> bool:
-    """Use Muse only for an explicitly classified empty establishing view."""
-    return (scene.get("shot_type") == "scenery" and scene.get("has_people") is False
-            and not scene.get("characters") and not scene.get("dialogue")
-            and float(scene.get("shot_seconds") or 0) <= VIDEO_MUSE_SECONDS * CLIP_STRETCH)
-
-
-def muse_scenery_price_allowed(data, max_credits=1) -> bool:
-    if snapgen_prices is None or not data or data.get("stale"):
-        return False
-    price = snapgen_prices.cost(data.get("rows") or [], VIDEO_MUSE_MODEL, None, VIDEO_MUSE_SECONDS)
-    return price is not None and 0 <= price <= max_credits
-
-
 def assign_clips(scenes: list, duration: float, economy: bool = False, clip_choice: int = 0,
-                 video_model: str | None = None, scenery_muse: bool = False) -> None:
+                 video_model: str | None = None) -> None:
     """Store each shot's model, clip length and Slow 2x choice from its narration length.
 
     ``economy``: every shot without a spoken line buys a short clip and plays it Slow 2x
@@ -1867,8 +1853,6 @@ def assign_clips(scenes: list, duration: float, economy: bool = False, clip_choi
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS, False
         elif video_model in SEEDANCE_MODELS:
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = auto_clip_settings(video_model, scene)
-        if scenery_muse and is_muse_scenery(scene):
-            scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = VIDEO_MUSE_MODEL, VIDEO_MUSE_SECONDS, False
 
 
 def clip_label(scene: dict) -> str:
@@ -2532,7 +2516,7 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
                progress=None, out: list | None = None, batch: int = 20, script: str = "",
                direction: dict | None = None, refs: list | None = None, aspect: str = "16:9",
                economy: bool = False, clip_choice: int = 0,
-               video_model: str | None = None, scenery_muse: bool = True) -> list:
+               video_model: str | None = None) -> list:
     """Video mode plan: program-cut shots, GPT writes each one, every shot gets a clip choice.
 
     ``ask(prompt) -> dict`` talks to GPT.  Shots GPT skipped are asked again
@@ -2551,10 +2535,11 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
         shots = video_shots(lines, ECONOMY_TARGET, ECONOMY_LIMIT) if economy else video_shots(lines)
     if economy:
         era = era + ECONOMY_NOTE
+    model_rule = ("โหมดอัตโนมัติเลือกเฉพาะ Grok/Vela ตามฉาก ห้ามใช้ Muse AI โดยอัตโนมัติ"
+                  if video_model in (None, "auto") else
+                  "ทุกช็อตรวมถึงช็อตวิวหรือเมืองต้องใช้โมเดลที่เลือก ห้ามสลับโมเดลเองเพื่อประหยัดเครดิต")
     era += (f". โมเดลวิดีโอที่ผู้ใช้เลือก: {VIDEO_MODEL_LABELS.get(video_model or 'auto', SEEDANCE_MODELS.get(video_model, video_model))}"
-            f"; ความยาวที่เลือก: {clip_choice or 'อัตโนมัติ'} วินาที. "
-            + ("เฉพาะช็อตวิว/เมืองที่ไม่มีคน ไม่มีตัวละคร และไม่มีบทพูด ใช้ Muse AI 10 วินาที เล่นปกติ"
-               if scenery_muse else "ช็อตวิวใช้รุ่นที่เลือกเช่นกัน เพราะยังไม่มีราคา Muse ที่อยู่ในวงเงินยอมรับ"))
+            f"; ความยาวที่เลือก: {clip_choice or 'อัตโนมัติ'} วินาที. {model_rule}")
     scenes = out if out is not None else []
     # Director pass first: the whole story as film sequences, so shots are directed, not illustrated.
     # ``direction`` is filled in place (the page saves it); a filled one is reused.
@@ -2614,10 +2599,9 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
         for scene in scenes:
             scene["slow"] = not scene.get("dialogue")
     split = split_long_scenes(scenes, duration, 0, limit_for=lambda scene:
-                              VIDEO_MUSE_SECONDS * CLIP_STRETCH if scenery_muse and is_muse_scenery(scene) else
                               float(clip_choice) * CLIP_STRETCH if clip_choice else clip_limit(scene))
     scenes[:] = split
-    assign_clips(scenes, duration, economy, clip_choice, video_model, scenery_muse=scenery_muse)
+    assign_clips(scenes, duration, economy, clip_choice, video_model)
     return scenes
 
 
@@ -3407,10 +3391,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return bool(video_mode and (state.get("project") or {}).get("economy", economy_var.get()))
 
     def apply_selected_video_model(project):
+        # The selected model is authoritative for every unfinished shot, including scenery.
+        # Existing completed clips are preserved to avoid consuming credits twice.
         assign_clips(project.get("scenes") or [], float(project.get("duration") or 0),
                      bool(project.get("economy", True)), int(project.get("clip_choice") or 0),
-                     project.get("video_model"), scenery_muse=muse_scenery_price_allowed(
-                         prices.get("data"), float(project.get("scenery_muse_max_credits", 1))))
+                     project.get("video_model"))
     detail_var = tk.StringVar(value="")
     credit_warning_var = tk.StringVar(value="")
 
@@ -3531,9 +3516,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         elif selected == VIDEO_MUSE_MODEL:
             model_info = video_model_var.get() + " · 10 วิ · ดูราคาปัจจุบันด้านล่าง"
         elif selected in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL):
-            model_info = video_model_var.get() + " · ตามความยาวที่เลือก · วิวไม่มีคนใช้ Muse 10 วิเมื่อราคาไม่เกิน 1 เครดิต"
+            model_info = video_model_var.get() + " · ทุกฉาก รวมถึงวิวและเมือง ใช้โมเดลที่เลือก ไม่สลับไป Muse"
         else:
-            model_info = "อัตโนมัติ: GPT เลือก Grok/Vela ตามช็อต"
+            model_info = "อัตโนมัติ: เลือก Grok/Vela ตามช็อต ไม่ใช้ Muse AI"
         clip_info_var.set(f"ไฟล์แนบ: {Path(folder).name if folder else 'ยังไม่ได้เลือก (เลือกที่หน้ารูป AI)'} · "
                           + model_info
                           + (f" → ประมาณ {count} คลิป" if count else ""))
@@ -3607,7 +3592,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                             previous, VIDEO_MODEL_LABELS["auto"])))
                         return
                 project["video_model"] = chosen
-                state["_video_model_manual"] = True
                 apply_selected_video_model(project)
                 save_project()
                 refresh_table()
@@ -3675,21 +3659,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tk.Label(settings_parent, textvariable=price_line_var, bg=bg, fg="#475569", anchor="w", justify="left",
                  wraplength=1100).pack(fill="x", padx=10, pady=(0, 3))
 
-        def auto_select_cheapest_grok(project, data):
-            if snapgen_prices is None or not data or data.get("stale"):
-                return False
-            fresh = not project.get("scenes") and not (project.get("done") or {}).get("plan")
-            current = str(project.get("video_model") or "")
-            if current not in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) and not (
-                    fresh and current in ("", "auto")):
-                return False
-            cheapest = snapgen_prices.cheapest_grok_720p_10s(data.get("rows") or [])
-            if not cheapest or current == cheapest[0]:
-                return False
-            project["video_model"] = cheapest[0]
-            video_model_var.set(VIDEO_MODEL_LABELS[cheapest[0]])
-            return True
-
         def remember_video_prices(data):
             if snapgen_prices is None or not data or data.get("stale"):
                 state.pop("_video_best_grok_price", None)
@@ -3749,10 +3718,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 def apply_current_prices():
                     remember_video_prices(prices["data"])
                     project = state.get("project")
-                    if (project is not None and not state.get("_video_model_manual")
-                            and auto_select_cheapest_grok(project, prices["data"])):
-                        save_project()
-                        refresh_clip_info()
+                    # Price information is advisory, never silently changes the selected model.
                     update_price_line()
                     if project is not None and not state.get("busy"):
                         apply_selected_video_model(project)
@@ -3764,7 +3730,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def apply_price_default_on_open(project):
             remember_video_prices(prices.get("data"))
-            auto_select_cheapest_grok(project, prices.get("data"))
             update_price_line()
 
         state["_video_price_default_on_open"] = apply_price_default_on_open
@@ -4033,7 +3998,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def show_project(folder, project):
         state.pop("snapgen_credit_acceptance", None)
-        state.pop("_video_model_manual", None)
         for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(transient, None)
         state["folder"] = str(folder)
@@ -5551,8 +5515,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                        horror=project.get("style_mode") == "เรื่องผี", progress=progress, out=scenes_so_far,
                        script=story_script(), direction=project.setdefault("direction", {}),
                        refs=attachment_names(), aspect=desired_aspect(), economy=economy_on(),
-                       clip_choice=int(project.get("clip_choice") or 0), video_model=project.get("video_model") or VIDEO_AUTO_MODEL,
-                       scenery_muse=muse_scenery_price_allowed(prices.get("data"), float(project.get("scenery_muse_max_credits", 1))))
+                       clip_choice=int(project.get("clip_choice") or 0),
+                       video_model=project.get("video_model") or VIDEO_AUTO_MODEL)
             project["planned_clip_choice"] = int(project.get("clip_choice") or 0)
             if project["direction"]:
                 (folder / "director_plan.json").write_text(

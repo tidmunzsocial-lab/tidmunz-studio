@@ -6,7 +6,7 @@ from test_auto_video_merge import Value
 from test_video_auto_scene_provider import N, load
 
 
-def test_planner_uses_selected_model_and_routes_only_confirmed_empty_views_to_muse():
+def test_planner_uses_selected_model_on_all_shots_even_empty_scenery():
     requests = []
 
     def ask(prompt):
@@ -21,7 +21,8 @@ def test_planner_uses_selected_model_and_routes_only_confirmed_empty_views_to_mu
 
     segments = [{"start": i * 10, "end": (i + 1) * 10, "text": str(i)} for i in range(3)]
     scenes = N.plan_video(segments, 30, ["king"], "", ask, clip_choice=10, video_model=N.VIDEO_GROK_LITE_MODEL)
-    assert [s["clip_model"] for s in scenes] == [N.VIDEO_GROK_LITE_MODEL, N.VIDEO_MUSE_MODEL, N.VIDEO_GROK_LITE_MODEL]
+    assert [s["clip_model"] for s in scenes] == [N.VIDEO_GROK_LITE_MODEL] * 3
+    assert any("ห้ามสลับโมเดลเอง" in request for request in requests)
     assert all(s["clip_seconds"] == 10 and not s["clip_slow"] for s in scenes)
     assert any("Grok Lite" in request and "10" in request for request in requests)
 
@@ -35,12 +36,12 @@ def test_dialogue_unknown_people_and_completed_paid_clips_are_protected(tmp_path
         {"start": 20, "shot_type": "scenery", "has_people": False, "characters": ["snake"]},
         {"start": 30, "clip": str(clip), "clip_model": "original", "clip_seconds": 15, "clip_slow": True},
     ]
-    N.assign_clips(scenes, 40, True, 10, N.VIDEO_GROK_LITE_MODEL, scenery_muse=True)
+    N.assign_clips(scenes, 40, True, 10, N.VIDEO_GROK_LITE_MODEL)
     assert all(s["clip_model"] == N.VIDEO_GROK_LITE_MODEL for s in scenes[:3])
     assert scenes[0]["clip_seconds"] == 10 and scenes[0]["clip_slow"] is False
     assert (scenes[3]["clip_model"], scenes[3]["clip_seconds"], scenes[3]["clip_slow"]) == ("original", 15, True)
     long_line = [{"start": 0, "dialogue": "king", "slow": True}]
-    N.assign_clips(long_line, 14, True, 10, N.VIDEO_GROK_LITE_MODEL, scenery_muse=True)
+    N.assign_clips(long_line, 14, True, 10, N.VIDEO_GROK_LITE_MODEL)
     assert long_line[0]["clip_seconds"] == 15 and not long_line[0]["clip_slow"]
 
 
@@ -65,7 +66,7 @@ def test_ui_model_duration_save_and_restart_reapply_the_same_policy(tmp_path):
     ns["clip_choice_changed"]()
     saved = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
     assert saved["video_model"] == N.VIDEO_GROK_LITE_MODEL and saved["clip_choice"] == 10
-    assert [s["clip_model"] for s in saved["scenes"]] == [N.VIDEO_GROK_LITE_MODEL, N.VIDEO_MUSE_MODEL]
+    assert [s["clip_model"] for s in saved["scenes"]] == [N.VIDEO_GROK_LITE_MODEL] * 2
     # Reproduce an old saved plan mislabeled Lower while its owner setting is Lite.
     saved["scenes"][0]["clip_model"] = N.VIDEO_GROK_LOWER_MODEL
     ns["show_project"](tmp_path, saved)
@@ -79,11 +80,69 @@ def test_ui_model_duration_save_and_restart_reapply_the_same_policy(tmp_path):
     assert reloaded["scenes"][1]["clip_model"] == N.VIDEO_GROK_LITE_MODEL
 
 
-def test_scenery_muse_never_exceeds_accepted_live_price():
+def test_price_refresh_does_not_rewrite_chosen_grok_model_or_scenery():
+    project = {"video_model": N.VIDEO_GROK_LITE_MODEL, "duration": 20, "clip_choice": 10,
+               "scenes": [{"start": 0, "shot_type": "scenery", "has_people": False},
+                          {"start": 10, "shot_type": "character", "has_people": True}],
+               "done": {"plan": True}}
+    calls = []
+    scope = dict(vars(N), state={"project": project, "busy": False},
+                 prices={"data": {"rows": [
+                     {"model_name": N.VIDEO_MUSE_MODEL, "video_duration": 10, "effective_price": 0},
+                     {"model_name": N.VIDEO_GROK_LOWER_MODEL, "video_duration": 10, "effective_price": 1},
+                     {"model_name": N.VIDEO_GROK_LITE_MODEL, "video_duration": 10, "effective_price": 8}]}},
+                 remember_video_prices=lambda data: calls.append("prices"),
+                 update_price_line=lambda: calls.append("price_line"),
+                 save_project=lambda: calls.append("save"),
+                 refresh_table=lambda: calls.append("table"))
+    load(scope, "apply_selected_video_model")
+    load(scope, "apply_price_default_on_open")
+    load(scope, "apply_current_prices")
+    scope["apply_price_default_on_open"](project)
+    scope["apply_current_prices"]()
+    assert project["video_model"] == N.VIDEO_GROK_LITE_MODEL
+    assert [s["clip_model"] for s in project["scenes"]] == [N.VIDEO_GROK_LITE_MODEL] * 2
+    assert "prices" in calls and "table" in calls
+
+
+def test_existing_paid_muse_clip_is_preserved_but_unfinished_muse_is_migrated(tmp_path):
+    paid = tmp_path / "clip_001.mp4"
+    paid.write_bytes(b"already paid")
+    scenes = [{"start": 0, "shot_type": "scenery", "has_people": False,
+               "clip_model": N.VIDEO_MUSE_MODEL, "clip": str(paid), "clip_seconds": 10},
+              {"start": 10, "shot_type": "scenery", "has_people": False,
+               "clip_model": N.VIDEO_MUSE_MODEL, "video_prompt": "pan across skyline"}]
+    N.assign_clips(scenes, 20, video_model=N.VIDEO_GROK_LITE_MODEL)
+    assert scenes[0]["clip_model"] == N.VIDEO_MUSE_MODEL
+    assert scenes[0]["clip"] == str(paid)
+    assert scenes[1]["clip_model"] == N.VIDEO_GROK_LITE_MODEL
+    assert scenes[1]["video_prompt"] == "pan across skyline"
+
+
+def test_no_implicit_muse_even_for_an_empty_scenery_in_auto_mode():
     import snapgen_muse_video as muse
+
     assert "ฟรี" not in muse.LABEL and "ฟรี" not in N.VIDEO_MUSE_LABEL
-    row = {"model_name": N.VIDEO_MUSE_MODEL, "video_duration": 10, "effective_price": 1}
-    assert N.muse_scenery_price_allowed({"rows": [row], "stale": False})
-    assert not N.muse_scenery_price_allowed({"rows": [dict(row, effective_price=2)], "stale": False})
-    assert not N.muse_scenery_price_allowed({"rows": [row], "stale": True})
-    assert not N.muse_scenery_price_allowed(None)
+    scenery = lambda: [{"start": 0, "shot_type": "scenery", "has_people": False,
+                         "characters": [], "dialogue": ""}]
+    for selected in ("auto", N.VIDEO_GROK_LITE_MODEL, N.VIDEO_GROK_LOWER_MODEL):
+        scenes = scenery()
+        N.assign_clips(scenes, 10, video_model=selected)
+        assert scenes[0]["clip_model"] != N.VIDEO_MUSE_MODEL
+        if selected != "auto":
+            assert scenes[0]["clip_model"] == selected
+    # The standalone Muse option remains available only when the user chooses Muse.
+    scenes = scenery()
+    N.assign_clips(scenes, 10, video_model=N.VIDEO_MUSE_MODEL)
+    assert scenes[0]["clip_model"] == N.VIDEO_MUSE_MODEL
+
+
+def test_grok_lower_and_seedance_do_not_get_overridden_by_scenery():
+    scenery = [{"start": 0, "shot_type": "scenery", "has_people": False,
+                "characters": [], "dialogue": ""}]
+    N.assign_clips(scenery, 10, video_model=N.VIDEO_GROK_LOWER_MODEL)
+    assert scenery[0]["clip_model"] == N.VIDEO_GROK_LOWER_MODEL
+    if N.SEEDANCE_MODELS:
+        selected = next(iter(N.SEEDANCE_MODELS))
+        N.assign_clips(scenery, 10, video_model=selected)
+        assert scenery[0]["clip_model"] == selected
