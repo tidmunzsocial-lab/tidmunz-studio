@@ -2240,15 +2240,78 @@ def analysis_request(script: str) -> str:
     )
 
 
+FACE_SAFE_CAMERA_RULE = (
+    "กฎป้องกันหน้าเพี้ยนสำหรับภาพที่มีตัวละคร: ถ้ามีตัวละครหรือมีคนในเฟรม "
+    "ต้องใช้ Medium Shot, Medium Two-Shot, Medium Close-Up หรือ Close-Up "
+    "ให้ใบหน้าตัวละครสำคัญใหญ่พอมองเห็นตา จมูก และปากชัด โดยให้ตัวละครอยู่ด้านหน้า "
+    "ห้ามใช้ Extreme Wide, Wide Shot, Long Shot หรือเลนส์มุมกว้าง 24mm/28mm กับช็อตที่มีตัวละคร; "
+    "อนุญาตมุมกว้างเฉพาะภาพตั้งสถานที่/วิวที่ไม่มีตัวละครจริง (shot_type=scenery, has_people=false, characters=[]). "
+    "ถ้าต้องแสดงวิวหรือสิ่งมีชีวิตไกลร่วมกับคน ให้คนอยู่ foreground ขนาดกลาง "
+    "และให้วิว/สิ่งมีชีวิตอยู่ background โดยรักษาตำแหน่งซ้ายขวา ห้ามลบหรือสลับตัวละคร "
+    "ไม่ต้องเปลี่ยนมุมภาพเพียงเพราะช็อตก่อนหน้าเป็นขนาดเดียวกัน; สลับแสง มุมสายตา "
+    "หรือภาพแทรกแทนได้. "
+)
+_UNSAFE_CAMERA_SIZE = re.compile(
+    r"(?i)\bextreme\s+wide(?:\s+establishing)?\s+shot\b"
+    r"|\bwide(?:\s+establishing)?\s+shot\b"
+    r"|\b(?:extreme\s+)?long\s+shot\b|\bestablishing\s+shot\b"
+    r"|\bmedium\s+wide\s+shot\b|\bextreme\s+wide\s+angle\s+shot\b"
+    r"|ช็อตกว้าง(?:มาก|สุด)?|ช็อตมุมกว้าง|ภาพกว้างมาก|ภาพมุมกว้าง|ช็อตระยะไกล|มุมกล้องระยะไกล"
+)
+_SAFE_CAMERA_SIZE = re.compile(
+    r"(?i)\bmedium(?:\s+two)?(?:\s+close[- ]?up)?\s+shot\b"
+    r"|\bmedium\s+close[- ]?up\b|\bclose[- ]?up\b"
+    r"|ช็อตกลาง|ช็อตใกล้|โคลสอัพ|ภาพครึ่งตัว"
+)
+_UNSAFE_FACE_LENS = re.compile(r"(?i)\b(?:18|20|21|24|28)\s*mm\b")
+
+
+def enforce_face_safe_framing(scene: dict) -> bool:
+    """Normalize camera size for character shots *before* generating any images.
+
+    Keep pure scenery untouched; do not modify existing media, refs, motion or scene blocking.
+    Return whether this changed the planned still-image prompt.
+    """
+    people = scene.get("has_people") is True
+    characters = bool(scene.get("characters"))
+    if (scene.get("shot_type") == "scenery" and scene.get("has_people") is False
+            and not characters and not scene.get("dialogue")):
+        return False
+    if not (people or characters or scene.get("dialogue") or scene.get("shot_type") == "character"):
+        return False
+    original = str(scene.get("prompt") or "").strip()
+    if not original:
+        return False
+    fixed = _UNSAFE_CAMERA_SIZE.sub("Medium Shot", original)
+    fixed = _UNSAFE_FACE_LENS.sub("50mm", fixed)
+    if not _SAFE_CAMERA_SIZE.search(fixed):
+        fixed = "ภาพยนตร์ช็อตกลาง Medium Shot เลนส์ 50mm เห็นใบหน้าตัวละครชัดเจน. " + fixed
+    if fixed == original:
+        return False
+    # The director may also say "keep the original composition". Explicitly
+    # preserve blocking while changing *camera distance*, so the old wide
+    # instruction cannot win over the corrected shot size.
+    fixed += (
+        " [กำหนดระยะภาพใหม่ให้มีลำดับความสำคัญสูงกว่าระยะกล้องเดิม: "
+        "ตัวละครหลักอยู่ด้านหน้าและมีใบหน้าใหญ่พอเห็นดวงตา จมูก ปากอย่างชัดเจน "
+        "ห้ามทำตัวละครเป็นร่างเล็กในภูมิทัศน์. หากมีทะเล เมือง หรือสัตว์ขนาดใหญ่ "
+        "ให้สิ่งเหล่านั้นอยู่ด้านหลังในเฟรมแทนการถอยกล้องออกไกล "
+        "รักษาตำแหน่งซ้าย-ขวา ตัวละคร ชุด สีหน้า และเหตุการณ์เดิม.]"
+    )
+    scene.setdefault("prompt_before_face_framing", original)
+    scene["prompt"] = fixed
+    return True
+
+
 def cinematographer_request(rows: list, previous: str, era: str, horror: bool) -> str:
     """เล่าภาพ: the director of photography reworks planned shots into movie frames."""
     return (
         "คุณคือผู้กำกับภาพ (Director of Photography) ของภาพยนตร์ไทยเรื่องนี้. ด้านล่างคือแผนช็อตที่ผู้เขียนบทวางไว้ "
         "(ตามลำดับ พร้อมคำบรรยายที่ช็อตนั้นต้องเล่า). ปรับ prompt ของแต่ละช็อตให้ภาพดูเป็นฉากหนังจริง: "
-        "เลือกขนาดภาพ (extreme wide / wide / medium / close-up / extreme close-up) และมุมกล้อง (eye level, low angle, high angle, "
-        "over-the-shoulder, POV, top shot) ที่ส่งอารมณ์ของคำบรรยาย, ระบุเลนส์ (เช่น 24mm กว้าง, 50mm, 85mm ละลายหลัง), "
-        "แสง (ทิศทาง ความแรง สี เวลา แหล่งแสงในฉาก), องค์ประกอบ (rule of thirds, foreground ที่บังบางส่วน, leading lines, ความลึกของฉาก), "
-        "และไม่ให้ช็อตติดกันซ้ำขนาดภาพหรือมุมเดิม (สลับ wide → medium → close-up ให้มีจังหวะแบบตัดต่อหนัง). "
+        "กำหนดมุมกล้อง (eye level, low angle, high angle, over-the-shoulder, POV) และเลนส์ 50mm/85mm เมื่อเห็นใบหน้าตัวละคร, "
+        "แสง (ทิศทาง ความแรง สี เวลา แหล่งแสงในฉาก), องค์ประกอบ (rule of thirds, foreground, leading lines, ความลึกของฉาก), "
+        "เปลี่ยนมุม/แสง/ภาพแทรกเพื่อให้ช็อตติดกันมีจังหวะ โดยไม่ต้องสลับเป็นช็อตกว้างเมื่อมีตัวละคร. "
+        + FACE_SAFE_CAMERA_RULE
         + ("เรื่องผี: ใช้แสงน้อย เงา พื้นที่ว่างในเฟรม มุมแอบมอง และสิ่งที่เห็นไม่ชัดเพื่อความน่ากลัว ไม่ใช้เลือดหรือความรุนแรง. " if horror else "")
         + f"ยุคของเรื่อง: {era}. "
         "ห้ามเปลี่ยนเหตุการณ์ ตัวละคร (ชื่อเดิม) สถานที่ หรือสิ่งที่คำบรรยายบอก; ห้ามเพิ่มตัวละครหรือเหตุการณ์ใหม่; "
@@ -2591,6 +2654,7 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
                 scene.update(dialogue=shot["dialogue"], line=shot["line"], slow=False, cheap=False)
                 if shot.get("speech_end") is not None and shot["speech_end"] > shot["start"]:
                     scene["speech_seconds"] = round(shot["speech_end"] - shot["start"], 1)
+            enforce_face_safe_framing(scene)  # guard the GPT director's first draft
             scenes.append(scene)
         if progress:
             progress(min(len(shots), first + batch), len(shots), group[0]["start"])
@@ -2850,8 +2914,9 @@ def director_request(shots: list, names: list, era: str, horror: bool = False, r
         + CONTINUITY_RULES +
         "look = โทนหนังทั้งเรื่อง (แนว โทนสี แสง สไตล์กล้อง) ใช้คงที่ทุกช็อต. "
         "shots = ช็อตแรกและช็อตสุดท้ายของซีเควนซ์. blocking = ตำแหน่งและทิศทางของตัวละครในฉาก (ใครอยู่ซ้าย/ขวาจอ หันไปทางไหน). "
-        "visual_plan = ลำดับภาพของซีเควนซ์แบบผู้กำกับ: เปิดด้วยช็อตกว้างสร้างสถานที่ → ขยับเข้ามาระดับกลาง → โคลสอัพอารมณ์ "
-        "→ ภาพแทรกรายละเอียด/ปฏิกิริยา และบอกว่าช็อตไหนควรเป็นภาพแบบไหน. "
+        "visual_plan = ลำดับภาพของซีเควนซ์แบบผู้กำกับ: ถ้าไม่มีตัวละคร เปิดด้วยภาพกว้างสร้างสถานที่ได้; "
+        "ถ้ามีตัวละครให้เริ่มระดับกลางและสลับภาพใกล้/ภาพแทรกอารมณ์ โดยเห็นใบหน้าชัด. "
+        + FACE_SAFE_CAMERA_RULE +
         "abstract_lines = วิธีเล่าประโยคนามธรรมในซีเควนซ์นี้ด้วยภาพ (ว่างได้)."
         "\n\n" + _shot_lines(list(enumerate(shots, 1)))
     )
@@ -2882,9 +2947,10 @@ def video_plan_request(numbered: list, names: list, previous: str, era: str, hor
         "เขียนให้ครบทุกช็อต ช็อตละ 1 รายการ ห้ามรวม ห้ามข้าม. "
         "หลักการทำให้เป็นหนัง ไม่ใช่ภาพประกอบคำ: "
         "1) แต่ละช็อตเล่าเหตุการณ์/อารมณ์ของคำบรรยายช็อตนั้นด้วยการกระทำที่เห็นได้ ประโยคนามธรรมให้ใช้ภาพรูปธรรมตามแผนผู้กำกับ. "
-        "2) ภาษากล้องชัด: ทุก prompt ระบุขนาดภาพ (ช็อตกว้างมาก/กว้าง/กลาง/ใกล้/โคลสอัพ/ภาพแทรก) มุมกล้อง (ระดับสายตา/มุมต่ำ/มุมสูง/ข้ามไหล่) และเลนส์. "
-        "3) ตัดต่อแบบหนัง: ช็อตติดกันต้องเปลี่ยนขนาดภาพหรือมุมกล้อง เปิดซีเควนซ์ใหม่ด้วยช็อตสร้างสถานที่ "
-        "ใช้ภาพปฏิกิริยาและภาพแทรกรายละเอียดสลับ รักษาทิศทางจอ (ใครอยู่ซ้าย/ขวา ทิศการเคลื่อนที่) และเส้นสายตาให้ต่อเนื่อง. "
+        "2) ภาษากล้องชัด: ทุก prompt ระบุขนาดภาพ มุมกล้อง เลนส์ โดยเฉพาะช็อตมีตัวละครให้ใบหน้าใหญ่พอเห็นรายละเอียด. "
+        "3) ตัดต่อแบบหนัง: สลับมุมสายตา แสง และภาพแทรกได้ แต่ห้ามบังคับเปลี่ยนขนาดภาพจนตัวละครไกล; "
+        "ถ้าต้องเปิดซีเควนซ์ด้วยสถานที่ให้เป็นภาพวิวไม่มีคนต่างหาก รักษาทิศทางจอและเส้นสายตาให้ต่อเนื่อง. "
+        + FACE_SAFE_CAMERA_RULE +
         "4) ช็อตต่อเนื่อง: ช็อตถัดไปต่อจากจุดที่คลิปก่อนจบ (การเคลื่อนไหว ตำแหน่ง แสง สภาพตัวละคร เช่น บาดแผล ความเปียก). "
         "5) คลิป AI ทำได้ดีเมื่อมีการกระทำหลักเดียวที่ชัด: ช็อตละ 1 การกระทำ ตัวละครหลักในเฟรมไม่เกิน 2 ตน "
         "ตัวละครที่ไม่ใช่คน (เช่น พญานาค สัตว์ ผี) ต้องบอกรูปร่างให้ชัดทุก prompt และ video_prompt "
@@ -5611,6 +5677,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     log(f"ผู้กำกับภาพปรับฉาก {b + 1}-{b + len(rows)} ครั้งที่ {attempt} ไม่ได้: {error_cause(exc)[:240]}")
             if reply is None:
                 log(f"ผู้กำกับภาพข้ามฉาก {b + 1}-{b + len(rows)} — ใช้แผนเดิม")
+                # The first GPT director pass can also have selected an unsafe wide shot.
+                for scene in scenes[b:b + len(rows)]:
+                    if enforce_face_safe_framing(scene):
+                        changed += 1
+                save_project()
+                ui(refresh_table)
                 continue
             for item in reply.get("scenes") or []:
                 try:
@@ -5621,6 +5693,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 if b <= i < b + len(rows) and len(new) > 20:
                     scenes[i].setdefault("prompt_before_dop", scenes[i].get("prompt", ""))
                     scenes[i]["prompt"] = new
+                    changed += 1
+            # Guard the *final* DOP prompt as well; never trust the camera language
+            # from either GPT pass when a face must remain recognisable.
+            for scene in scenes[b:b + len(rows)]:
+                if enforce_face_safe_framing(scene):
                     changed += 1
             save_project()
             ui(refresh_table)
@@ -6524,9 +6601,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             raise RuntimeError("GPT ไม่ได้ส่ง prompt ใหม่กลับมา")
         scene.setdefault("prompt_before_refine", scene.get("prompt", ""))
         scene["prompt"] = new
+        enforce_face_safe_framing(scene)  # image regen must not reintroduce a tiny face
         scene["refine_count"] = scene.get("refine_count", 0) + 1
         save_project()
-        return new
+        return scene["prompt"]
 
     def refine_selected():
         project = state["project"]
