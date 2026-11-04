@@ -6996,7 +6996,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 content = [{"type": "text", "text": request}]
                 content += [{"type": "image_url", "image_url": {"url": image_data_url(scenes[i]["image"])}} for i in batch]
                 try:
-                    reply = parse_json_reply(chat(content))
+                    # Through with_retries: a lost story chat (404) is rebuilt first and the pictures are sent
+                    # again, instead of writing every video prompt of the run without looking at the pictures.
+                    reply = with_retries(f"พรอมต์วิดีโอ (ดูรูป) ช็อต {shots}",
+                                         lambda content=content: parse_json_reply(chat(content)))
                 except (Stopped, HistoryLost, RateLimited, ImageProviderError):
                     raise
                 except Exception as exc:
