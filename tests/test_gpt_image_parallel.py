@@ -47,7 +47,8 @@ loop().then(()=>console.log(JSON.stringify({peak,events,lanes,active})));
 
 
 @pytest.mark.parametrize('stop', [False, True])
-def test_auto_two_jobs_preserve_out_of_order_results_and_drain(tmp_path, stop):
+@pytest.mark.parametrize('redraw', [False, True])
+def test_auto_two_jobs_preserve_out_of_order_results_and_drain(tmp_path, stop, redraw):
     scenes = [dict(prompt=f'shot {i}', characters=[f'person{i}']) for i in range(4)]
     lock = threading.RLock()
     entered = threading.Barrier(2)
@@ -80,10 +81,10 @@ def test_auto_two_jobs_preserve_out_of_order_results_and_drain(tmp_path, stop):
     run = load(scope, 'run_gpt_scenes')
     if stop:
         with pytest.raises(RuntimeError, match='stopped'):
-            run(range(4), scenes, tmp_path)
+            run(range(4), scenes, tmp_path, selected_redraw=redraw)
         assert sorted(started) == [0, 1]
     else:
-        run(range(4), scenes, tmp_path)
+        run(range(4), scenes, tmp_path, selected_redraw=redraw)
     restored = json.loads(disk.read_text())
     for i in started:
         assert Path(restored['scenes'][i]['image']).read_text() == f'shot {i}'

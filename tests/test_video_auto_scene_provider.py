@@ -153,19 +153,19 @@ def batch_scope(tmp_path, count=12):
     return scope, paths
 
 
-def test_video_auto_uses_five_api_workers_and_only_unfinished_scenes(tmp_path):
+def test_video_auto_uses_two_api_workers_and_only_unfinished_scenes(tmp_path):
     scope, paths = batch_scope(tmp_path)
     scenes = scope["state"]["project"]["scenes"]
     for i in range(2):
         old = tmp_path / f"existing-{i}.png"; old.write_bytes(b"existing"); scenes[i]["image"] = str(old)
     calls, active, peak = [], 0, 0
-    lock, first_five = threading.Lock(), threading.Event()
+    lock, first_two = threading.Lock(), threading.Event()
     def make_image(prompt, refs, folder, name, aspect, board=None, api_context=None):
         nonlocal active, peak
         with lock:
             active += 1; peak = max(peak, active); calls.append(name)
-            if len(calls) >= 5: first_five.set()
-        assert first_five.wait(5)
+            if len(calls) >= 2: first_two.set()
+        assert first_two.wait(5)
         assert refs == paths[:2] and board == paths[2] and aspect == "9:16"
         assert api_context == {"api_key": "test-key"}
         target = folder / (name + ".png"); target.write_bytes(b"generated")
@@ -173,7 +173,7 @@ def test_video_auto_uses_five_api_workers_and_only_unfinished_scenes(tmp_path):
         return str(target)
     scope["make_image"] = make_image
     scope["stage_images"]()
-    assert peak == 5
+    assert peak == 2
     assert sorted(calls) == [f"scene_{i + 1:03d}" for i in range(2, 12)]
     assert all(Path(scene["image"]).is_file() for scene in scenes)
     assert (tmp_path / "existing-0.png").read_bytes() == b"existing"

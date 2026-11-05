@@ -6501,7 +6501,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 return None
 
         before = balance()
-        log(f"SnapGen API: สร้างรูปฉากพร้อมกันสูงสุด 5 งาน · รอทำ {len(jobs)} ฉาก"
+        log(f"SnapGen API: สร้างรูปฉากพร้อมกันสูงสุด 2 งาน · รอทำ {len(jobs)} ฉาก"
             " · เครดิตต่อรูปตรวจจาก History (ยอดบัญชีเปลี่ยนพร้อมกัน)")
         finished = 0
         started = time.time()
@@ -6549,7 +6549,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 raise error
 
         try:
-            _run_image_jobs(jobs, work, completed, check_batch_stop)
+            _run_image_jobs(jobs, work, completed, check_batch_stop, max_workers=2)
         finally:
             after = balance()
             measured = before - after if before is not None and after is not None else None
@@ -6557,9 +6557,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 project["last_snapgen_batch_credit"] = {"before": before, "after": after, "balance_change": measured}
                 save_project()
             if measured is not None:
-                log(f"คิว API 5 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
+                log(f"คิว API 2 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
 
-    def run_gpt_scenes(todo, scenes, images_dir):
+    def run_gpt_scenes(todo, scenes, images_dir, *, selected_redraw=False):
         """Run two independent chats; never duplicate an ambiguously timed-out submission."""
         project = state["project"]
 
@@ -6599,6 +6599,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             scene = scenes[i]
             paths = attachments_for(scene, limit=None)
             board = scene.get("board") if os.path.isfile(scene.get("board") or "") else None
+            if selected_redraw:
+                board = None
             repair = scene.get("identity_repair")
             face = (repair or {}).get("face_reference")
             capacity = 6 - bool(board) - bool(face and Path(face).is_file())
@@ -6851,8 +6853,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if indices is None:
                 verify_images()
             return
-        if video_mode and image_provider_for("images") == "gpt_web" and not selected_redraw:
-            run_gpt_scenes(todo, scenes, images_dir)
+        if video_mode and image_provider_for("images") == "gpt_web":
+            if selected_redraw:
+                run_gpt_scenes(todo, scenes, images_dir, selected_redraw=True)
+            else:
+                run_gpt_scenes(todo, scenes, images_dir)
             log(f"✓ สร้างรูปที่ขอครบ {len(todo)} ฉาก")
             return
         started, failures_in_row = time.time(), 0
@@ -9258,6 +9263,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         log("เริ่มประวัติ GPT ใหม่แล้ว — กดเริ่มเพื่อทำต่อ (จะส่งบทและ Context เข้าประวัติใหม่ก่อน)")
 
     def request_stop():
+        state["redraw_queue"] = []
+        state["clip_redo_queue"] = []
         if state["busy"]:
             state["stop"] = True
             log("กำลังหยุดหลังขั้นตอนย่อยที่ทำอยู่ ...")
@@ -9527,20 +9534,41 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(finish_ui)
         threading.Thread(target=worker, daemon=True).start()
 
+    def reserve_manual_lane(kind, selected):
+        """Two independent cloud lanes; reserve shots until their entire job settles."""
+        with state["lock"]:
+            lanes = state.setdefault("manual_lanes", {})
+            if state["busy"] and not lanes:
+                return False
+            if kind in lanes or any(set(selected) & set(shots) for shots in lanes.values()):
+                return False
+            lanes[kind] = list(selected)
+            state["busy"] = True
+            if len(lanes) == 1:
+                state["stop"] = False
+            return True
+
+    def release_manual_lane(kind):
+        with state["lock"]:
+            state.setdefault("manual_lanes", {}).pop(kind, None)
+            state["busy"] = bool(state["manual_lanes"])
+
     def regenerate_selected(only=None, ask=True):
         project = state["project"]
         selected = sorted(only if only is not None else (int(i) for i in table.selection()))
         if not project or not selected:
             messagebox.showinfo("เล่าภาพ", "เลือกฉากในตารางก่อน (คลิกแถว กด Ctrl เพื่อเลือกหลายฉาก)", parent=page)
             return
-        if state["busy"]:
+        if state["busy"] and (not state.get("manual_lanes") or "images" in state["manual_lanes"]
+                or any(set(selected) & set(shots) for shots in state["manual_lanes"].values())):
             state.setdefault("redraw_queue", []).extend(selected)
             log(f"รอคิว: ฉาก {', '.join(str(i + 1) for i in selected)} จะเจนรูปใหม่ทันทีที่งานปัจจุบันเสร็จ")
             return
         if ask and not messagebox.askyesno("เล่าภาพ", f"สร้างรูปใหม่ {len(selected)} ฉาก (ใช้เครดิต {len(selected)} รูป)?", parent=page):
             return
         follow_active_account()
-        state["busy"], state["stop"] = True, False
+        if not reserve_manual_lane("images", selected):
+            return
         for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(transient, None)
 
@@ -9556,14 +9584,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 stage_images(selected, selected_redraw=video_mode)
                 if video_mode:
                     for i in selected:
-                        project["scenes"][i].pop("clip", None)
+                        if (project["scenes"][i].get("image"), _mtime(project["scenes"][i].get("image"))) != before[i]:
+                            project["scenes"][i].pop("clip", None)
                     project["done"].pop("clips", None)
             except Exception as exc:
                 log(f"❌ {exc}")
             finally:
                 project["done"].pop("video", None)
                 save_project()
-                state["busy"] = False
+                release_manual_lane("images")
                 ui(refresh_all)
                 # Only say "done" for shots that really got a new picture.
                 made = [i + 1 for i in selected
@@ -9697,15 +9726,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         stage_clips(selected)
         log(f"✓ เจนวิดีโอใหม่เสร็จ: ช็อต {shots}")
 
-    def remake_clips_selected():
+    def remake_clips_selected(only=None):
         """Button: make the video of the selected shots again (custom redo, nothing else changes)."""
         project = state["project"]
-        selected = sorted(int(i) for i in table.selection())
+        selected = sorted(only if only is not None else (int(i) for i in table.selection()))
         if not project or not selected:
             messagebox.showinfo("เจนวิดีโอใหม่", "เลือกช็อตในตารางก่อน (Ctrl+คลิก เลือกได้หลายช็อต)", parent=page)
             return
-        if state["busy"]:
-            messagebox.showinfo("เจนวิดีโอใหม่", "กำลังทำงานอยู่ — กดหยุด หรือรอให้เสร็จก่อน", parent=page)
+        if state["busy"] and (not state.get("manual_lanes") or "videos" in state["manual_lanes"]
+                or any(set(selected) & set(shots) for shots in state["manual_lanes"].values())):
+            state.setdefault("clip_redo_queue", []).extend(selected)
+            log("รอคิววิดีโอ: รอช่องวิดีโอหรือรูปของช็อตเดียวกัน ไม่ขวางงานรูปช็อตอื่น")
             return
         missing = [i + 1 for i in selected if not (project["scenes"][i].get("image") and os.path.isfile(project["scenes"][i]["image"]))]
         if missing:
@@ -9715,7 +9746,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                    f"({len(selected)} คลิป ใช้เครดิตวิดีโอ)?", parent=page):
             return
         follow_active_account()
-        state["busy"], state["stop"] = True, False
+        if not reserve_manual_lane("videos", selected):
+            return
         for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(transient, None)
 
@@ -9729,7 +9761,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             finally:
                 project["done"].pop("video", None)
                 save_project()
-                state["busy"] = False
+                release_manual_lane("videos")
                 ui(refresh_all)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -9954,9 +9986,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     def run_redraw_queue():
         queue = state.get("redraw_queue") or []
-        if queue and not state["busy"] and state["project"]:
+        lanes = state.get("manual_lanes") or {}
+        if queue and state["project"] and (not state["busy"] or (lanes and "images" not in lanes
+                and not any(set(queue) & set(shots) for shots in lanes.values()))):
             state["redraw_queue"] = []
-            regenerate_selected(sorted(set(queue)), ask=False)
+            regenerate_selected(sorted(set(queue)), ask=True)
+        clips = state.get("clip_redo_queue") or []
+        lanes = state.get("manual_lanes") or {}
+        if clips and state["project"] and (not state["busy"] or (lanes and "videos" not in lanes
+                and not any(set(clips) & set(shots) for shots in lanes.values()))):
+            state["clip_redo_queue"] = []
+            remake_clips_selected(sorted(set(clips)))
         page.after(2000, run_redraw_queue)
     page.after(2000, run_redraw_queue)
 
