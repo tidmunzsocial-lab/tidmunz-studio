@@ -12,6 +12,27 @@ import snapgen_updater as updater
 
 
 class UpdaterInstallIntegrityTests(unittest.TestCase):
+    def test_startup_migrated_aliases_keep_integrity_and_detect_damage(self):
+        aliases = {
+            "snapgen_core.cpython-312.pyc": "__pycache__/snapgen_core.cpython-312.pyc",
+            "INSTALL_OTHER_MACHINE.md": "docs/INSTALL_OTHER_MACHINE.md",
+            "snapgen_version.json": "snapgen_data/meta/snapgen_version.json",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = []
+            for alias, canonical in aliases.items():
+                content = canonical.encode()
+                target = root / canonical
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                files.append({"path": alias, "sha256": hashlib.sha256(content).hexdigest()})
+            (root / "snapgen_update_last.json").write_text(
+                json.dumps({"version": "2.0.2", "files": files}), encoding="utf-8")
+            self.assertEqual((True, ""), updater.verify_installed_files(root))
+            (root / aliases["snapgen_core.cpython-312.pyc"]).write_bytes(b"damaged")
+            self.assertFalse(updater.verify_installed_files(root)[0])
+
     def test_completed_receipt_wins_over_misleading_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

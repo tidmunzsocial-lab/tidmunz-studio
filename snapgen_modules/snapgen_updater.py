@@ -108,6 +108,15 @@ def verify_installed_files(project_root):
         try:
             rel = _safe_relative(item["path"])
             target = root / Path(*PurePosixPath(rel).parts)
+            # Startup migrates these legacy aliases to canonical paths.
+            if not target.exists():
+                canonical = {
+                    "snapgen_core.cpython-312.pyc": "__pycache__/snapgen_core.cpython-312.pyc",
+                    "INSTALL_OTHER_MACHINE.md": "docs/INSTALL_OTHER_MACHINE.md",
+                    "snapgen_version.json": "snapgen_data/meta/snapgen_version.json",
+                }.get(rel)
+                if canonical:
+                    target = root / canonical
             if (not target.is_file()
                     or hashlib.sha256(target.read_bytes()).hexdigest()
                     != str(item["sha256"]).lower()):
