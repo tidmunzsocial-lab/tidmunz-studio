@@ -703,6 +703,16 @@ async function pageSend(job) {
     });
     input.files = dt.files;
     input.dispatchEvent(new Event("change", {bubbles: true}));
+    // Newer ChatGPT builds can ignore the hidden input: no chip appears and Send waits forever.
+    // Fall back to pasting the same files into the composer, which ChatGPT always accepts.
+    const chips = () => [...form.querySelectorAll("button")].filter(b =>
+      /^(ลบ|remove)\s/i.test((b.getAttribute("aria-label") || "").trim())).length;
+    const pasteBy = Date.now() + 8000;
+    while (!chips() && Date.now() < pasteBy) await sleep(500);
+    if (!chips()) {
+      editor.focus();
+      editor.dispatchEvent(new ClipboardEvent("paste", {clipboardData: dt, bubbles: true, cancelable: true}));
+    }
   }
   editor.focus();
   document.execCommand("selectAll", false, null);

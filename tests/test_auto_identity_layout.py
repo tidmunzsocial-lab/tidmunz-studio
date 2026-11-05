@@ -92,7 +92,7 @@ def check_groups(hidden_tk):
     events = []
     scope = dict(vars(N), tk=tk, box=box, table_tools=tools, bg="white", video_mode=True, state={"project": {}})
     names = ["regenerate_selected", "edit_current_selected", "repair_identity_selected", "edit_prompt", "refine_selected",
-             "use_scene_image", "remake_clips_selected", "fix_problem_selected", "review_clips_selected",
+             "use_scene_image", "remake_clips_selected", "fix_problem_selected", "edit_video_prompt",
              "reslow_selected", "start_pipeline", "open_path"]
     for name in names: scope[name] = lambda *a, name=name, **kw: events.append((name, kw))
     node = next(n for n in ast.walk(TREE) if isinstance(n, ast.If) and any(
@@ -113,7 +113,7 @@ def check_groups(hidden_tk):
     # Invoke the registered Tk callback without mapping a window on the desktop.
     command = button.bind("<FocusIn>").split("[", 1)[1].split()[0]
     button.tk.call(command, *(button._w if key == "%W" else "0" for key in button._subst_format))
-    assert "ไม่ใช่ตรวจหน้าตาตรงเรฟ" in scope["action_hint"].get()
+    assert "GPT ช่วยแก้" in scope["action_hint"].get()
 
 
 def check_folding(hidden_tk):

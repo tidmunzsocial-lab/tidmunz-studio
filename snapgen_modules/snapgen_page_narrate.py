@@ -4257,7 +4257,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             ("วิดีโอ", (
                 ("สร้างคลิป", lambda: remake_clips_selected(), "สร้างวิดีโอใหม่เฉพาะช็อตที่เลือกจากภาพปัจจุบัน ใช้เครดิตวิดีโอ"),
                 ("แจ้งปัญหาคลิป", lambda: fix_problem_selected(), "บอกปัญหาคลิปให้ GPT แก้คำสั่ง ไม่แก้ภาพแรก และถามก่อนสร้างคลิป"),
-                ("ตรวจคลิป", lambda: review_clips_selected(), "ตรวจรอยตัดหรือฉากกระโดดในคลิป และให้ GPT ช่วยดูเมื่อจำเป็น ไม่ใช่ตรวจหน้าตาตรงเรฟ"),
+                ("แก้พรอมต์", lambda: edit_video_prompt(), "พิมพ์/แก้พรอมต์วิดีโอเอง หรือกด 'GPT ช่วยแก้' ให้ GPT ดูรูปแล้วเขียนให้ ยังไม่สร้างคลิป"),
                 ("ทำสโลว์", lambda: reslow_selected(), "ทำสโลว์ 2× จากคลิปที่มีอยู่ ไม่ส่งสร้างวิดีโอใหม่"),
                 ("รวมวิดีโอ", lambda: start_pipeline(only="video"), "รวมคลิปที่มีอยู่กับเสียงเป็นวิดีโอ ไม่สร้างรูปหรือคลิปใหม่"),
                 ("เปิดวิดีโอ", lambda: open_path((state["project"] or {}).get("last_video")), "เปิดวิดีโอที่รวมเสร็จล่าสุด"),
@@ -9774,6 +9774,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         log(f"🎬 กำลังเจนวิดีโอใหม่: ช็อต {shots}")
         ui(stage_var.set, f"กำลังเจนวิดีโอใหม่ ช็อต {shots}")
         for i in selected:
+            scene = project["scenes"][i]
+            if scene.get("clip_uuid"):
+                # The user pressed make-again on purpose: an old unresolved receipt must not block it forever.
+                scene.setdefault("clip_failed_jobs", []).append({"uuid": scene.pop("clip_uuid"),
+                                                                 "error": "replaced by a manual remake"})
+                scene.pop("clip_terminal_error", None)
             for key in ("clip", "clip_normal", "clip_error", "clip_review", "clip_use_until", "clip_use_from", "clip_cuts"):
                 project["scenes"][i].pop(key, None)
         project["done"].pop("clips", None)
@@ -9887,6 +9893,65 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 log(f"❌ แก้ฉาก {index + 1} ไม่สำเร็จ: {exc}")
             finally:
                 project["done"].pop("video", None)
+                save_project()
+                state["busy"] = False
+                ui(refresh_all)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def edit_video_prompt():
+        selection = table.selection()
+        if not state["project"] or len(selection) != 1:
+            messagebox.showinfo("พรอมต์วิดีโอ", "เลือกช็อตเดียวในตารางก่อน", parent=page)
+            return
+        scene = state["project"]["scenes"][int(selection[0])]
+        win = tk.Toplevel(page)
+        win.title(f"พรอมต์วิดีโอ ช็อต {int(selection[0]) + 1}")
+        win.geometry("980x380")
+        buttons = tk.Frame(win)
+        buttons.pack(side="bottom", anchor="e", padx=8, pady=(0, 8))
+        text = tk.Text(win, wrap="word", height=12)
+        text.pack(fill="both", expand=True, padx=8, pady=8)
+        text.insert("1.0", scene.get("video_prompt", ""))
+
+        def save():
+            scene["video_prompt"] = text.get("1.0", tk.END).strip()
+            if scene.get("image") and os.path.isfile(scene["image"]):
+                scene["motion_image"] = file_digest(scene["image"])  # typed by hand: Auto keeps it
+            save_project()
+            refresh_table()
+            win.destroy()
+        def ask_gpt():
+            save()
+            gpt_video_prompt_selected()
+        make_styled_button(buttons, "SECONDARY", "GPT ช่วยแก้ (ดูรูป)", command=ask_gpt).pack(side="left", padx=4)
+        make_styled_button(buttons, "PRIMARY", "บันทึก", command=save).pack(side="left", padx=4)
+
+    def gpt_video_prompt_selected():
+        project = state["project"]
+        selected = sorted(int(i) for i in table.selection())
+        if not project or not selected:
+            messagebox.showinfo("พรอมต์วิดีโอ", "เลือกช็อตในตารางก่อน", parent=page)
+            return
+        if state["busy"]:
+            messagebox.showinfo("พรอมต์วิดีโอ", "กำลังทำงานอยู่ — กดหยุด หรือรอให้เสร็จก่อน", parent=page)
+            return
+        missing = [i + 1 for i in selected if not (project["scenes"][i].get("image")
+                                                  and os.path.isfile(project["scenes"][i]["image"]))]
+        if missing:
+            messagebox.showinfo("พรอมต์วิดีโอ", f"ช็อต {', '.join(map(str, missing))} ยังไม่มีรูป — สร้างหรือนำเข้ารูปก่อน", parent=page)
+            return
+        follow_active_account()
+        state["busy"], state["stop"] = True, False
+        for transient in ("motion_planned_only", "motion_text_only"):
+            state.pop(transient, None)
+
+        def worker():
+            try:
+                stage_motion(selected, force=True)
+                log(f"✓ GPT เขียนพรอมต์วิดีโอใหม่แล้ว: ช็อต {', '.join(str(i + 1) for i in selected)} — กด 'สร้างคลิป' เมื่อพร้อม")
+            except Exception as exc:
+                log(f"❌ GPT แก้พรอมต์วิดีโอไม่สำเร็จ: {exc}")
+            finally:
                 save_project()
                 state["busy"] = False
                 ui(refresh_all)
