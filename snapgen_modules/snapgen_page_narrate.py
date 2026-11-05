@@ -1260,6 +1260,7 @@ def gpt_relay_timed_out(error):
         "chrome did not finish the chatgpt job in time",
         "chatgpt job waited too long in the queue and was not sent",
         "chatgpt took longer than 12 minutes",
+                "chatgpt response timed out after 3 minutes",
     ))
 
 
@@ -7394,7 +7395,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not ready:
             return
         ffmpeg = ffmpeg_path()
-        width, height = SIZES.get(project.get("aspect"), SIZES["16:9"])
+        width, height = (AUTO_VIDEO_SIZES if video_mode else SIZES).get(project.get("aspect"), (AUTO_VIDEO_SIZES if video_mode else SIZES)["16:9"])
         lengths = segment_durations([s["start"] for s in scenes], float(project["duration"]))
         encode = [*video_encoder(ffmpeg)[1], "-pix_fmt", "yuv420p", "-r", str(FPS)]
         work = folder / "_preview"
@@ -7492,7 +7493,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 "no assistant text came back", "no message reached the chat", "chatgpt page did not answer",
                 "chrome did not finish the chatgpt job in time",
                 "chatgpt job waited too long in the queue and was not sent",
-                "chatgpt took longer than 12 minutes")):
+                "chatgpt took longer than 12 minutes",
+                "chatgpt response timed out after 3 minutes")):
             return False
         scenes = state["project"]["scenes"]
         if any(not str(scenes[i].get("video_prompt") or "").strip() for i in indices):
@@ -7529,6 +7531,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 and not (not force and operator_visual_review_valid(scenes[i]))
                 and (force or scenes[i].get("motion_image") != file_digest(scenes[i]["image"]))]
         if not todo:
+            return
+        # Local recovery: saved prompts only; never claim visual GPT review.
+        if project.get("use_saved_video_prompts") and not force and all(str(scenes[i].get("video_prompt") or "").strip() for i in todo):
+            state["motion_planned_only"] = True
+            state["motion_text_only"] = True
+            log("Using saved video prompts; skipping unavailable GPT review without resubmitting.")
             return
         if state.get("motion_planned_only") and use_planned_motion(todo, "no assistant text came back"):
             return
@@ -8150,6 +8158,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             "slow": bool(scene.get("clip_slow")), "target_4k": True}
         runtime.setdefault("_auto_video_errors_by_slot", {})[active_slot] = errors
 
+        def provider_accepted():
+            """Persist the exact paid task before allowing the second Slot."""
+            receipt = (runtime.get("_auto_video_receipt_by_slot") or {}).get(active_slot) or {}
+            uuid = str(receipt.get("uuid") or "")
+            if not uuid or receipt.get("scene_number") != index + 1:
+                raise RuntimeError(f"Slot {active_slot + 1}: API receipt does not match shot {index + 1}")
+            with state["lock"]:
+                scene["clip_uuid"] = uuid
+                state["project"]["scenes"][index]["clip_uuid"] = uuid
+                save_project()
+            if on_submitted:
+                on_submitted()
+
+        if runtime.get("_auto_video_receipt_protocol"):
+            runtime.setdefault("_auto_video_accepted_callbacks_by_slot", {})[active_slot] = provider_accepted
+
         def submit():
             # Per-slot error sinks avoid replacing the GUI-wide show_error handler.
             # This shot's own model / length / Slow 2x (chosen at planning time).
@@ -8176,13 +8200,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             runtime.get("_seedance_reference_overrides", {}).pop(active_slot, None)
             runtime.get("_auto_video_options_by_slot", {}).pop(active_slot, None)
             runtime.get("_auto_video_errors_by_slot", {}).pop(active_slot, None)
+            runtime.get("_auto_video_accepted_callbacks_by_slot", {}).pop(active_slot, None)
             if (runtime.get("_auto_video_scene_number_by_slot") or {}).get(active_slot) == index + 1:
                 runtime["_auto_video_scene_number_by_slot"].pop(active_slot, None)
         try:
             if not run_on_ui(submit):
                 raise RuntimeError("Slot ไม่รับงาน: " + ("; ".join(errors) or "ตรวจรูป/พรอมต์/โมเดลใน Slot"))
-            if on_submitted:
-                on_submitted()
+            if on_submitted and not runtime.get("_auto_video_receipt_protocol"):
+                on_submitted()  # legacy test/Slot does not expose provider receipts
             waited = 0
             while busy[active_slot]:
                 time.sleep(3)
@@ -8195,17 +8220,30 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             run_on_ui(restore)
         if errors:
             raise RuntimeError("; ".join(errors)[:400])
+        receipt = (runtime.get("_auto_video_receipt_by_slot") or {}).get(active_slot) or {}
+        if runtime.get("_auto_video_receipt_protocol") and not receipt.get("uuid"):
+            raise RuntimeError(
+                f"Slot {active_slot + 1}: ยังไม่มี UUID ยืนยันจาก API — ไม่ถือว่าสร้างสำเร็จ "
+                "และห้ามส่งสร้างซ้ำโดยไม่ตรวจประวัติ")
         downloaded_by_slot = runtime.get("_auto_video_downloaded_by_slot") or {}
         downloaded = Path(downloaded_by_slot.pop(active_slot)) if downloaded_by_slot.get(active_slot) else None
         if downloaded and downloaded.is_file():
             # Concurrent post-processing for the previous shot can also create
             # newer files in export/video; bind this slot to its actual download.
             new_files = [downloaded]
+        elif runtime.get("_auto_video_receipt_protocol"):
+            # Two Slot operations may finish in either order. A "newest file"
+            # scan can attach the other Slot's completed paid video. The modern
+            # pipeline requires its exact UUID's download receipt.
+            new_files = []
         else:
             new_files = [f for f in out_dir.glob("*.mp4")
                          if f.stat().st_mtime >= started - 1 and before.get(str(f)) != f.stat().st_mtime]
         if not new_files:
-            raise RuntimeError("Slot ทำงานเสร็จแต่ไม่พบไฟล์วิดีโอใหม่")
+            uuid = str(receipt.get("uuid") or "")
+            raise RuntimeError(
+                f"Slot {active_slot + 1}: API รับงาน {uuid or 'ไม่มี UUID'} แต่ไม่มีไฟล์วิดีโอของงานนี้ "
+                "ต้องกู้จากประวัติงานก่อน ห้ามยิงสร้างซ้ำ")
         newest = max(new_files, key=lambda f: f.stat().st_mtime)  # post-processed version is written last
         # The provider may mark the download done before the MP4 is fully flushed.
         # Do not record a 0-byte clip; await a readable, stable local asset instead.
@@ -8307,7 +8345,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         runtime["_auto_video_pipeline_async"] = True
         runtime["_auto_video_progress"] = show_auto_upscale_progress
         try:
-            finalize_auto_video_postprocesses()  # drain restored local work before submitting another cloud clip
+            finalize_auto_video_postprocesses(wait_for_completion=False)  # enqueue restored upscale without blocking video submissions
             run_clips(project, scenes, todo)
         finally:
             try:
@@ -8506,6 +8544,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     scene = scenes[index]
                     if not (scene.get("image") and os.path.isfile(scene["image"])):
                         raise RuntimeError(f"ฉาก {index + 1} ยังไม่มีรูป")
+                    # If an accepted paid UUID survived but the MP4 did not,
+                    # never resubmit this scene until its provider receipt is
+                    # reconciled. Re-running Auto otherwise spends credits twice.
+                    if scene.get("clip_uuid") and not (
+                            scene.get("clip") and os.path.isfile(scene["clip"])):
+                        # Quarantine an unresolved paid job instead of aborting
+                        # independent shots. Its receipt stays persisted for recovery.
+                        scene["clip_error"] = (
+                            f"รอกู้ผล API เดิม UUID {scene['clip_uuid']} — ไม่ส่งสร้างซ้ำ")
+                        save_project()
+                        log(f"ช็อต {index + 1}: {scene['clip_error']}; ข้ามไปช็อตอื่น")
+                        continue
                     state["clip_fraction"] = n / max(1, len(todo))
                     state["clip_label"] = f"ช็อต {index + 1} ({n + 1}/{len(todo)})"
                     stage_motion([index], prepared=True, lookahead=True)
@@ -8595,7 +8645,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             save_project()
             ui(refresh_table)
 
-    def finalize_auto_video_postprocesses():
+    def finalize_auto_video_postprocesses(*, wait_for_completion=True):
         """Wait for queued local work and link only its verified output before merging."""
         pending = state.setdefault("auto_video_postprocess_pending", [])
         queued_scenes = {id(item["scene"]) for item in pending}
@@ -8623,6 +8673,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             pending.append({"scene": scene, "index": index, "target": str(target),
                             "source": str(source), "job": job})
             queued_scenes.add(id(scene))
+        if not wait_for_completion:
+            return  # restored upscales remain on the single background worker
         while pending:
             item = pending[0]
             scene, index, job = item["scene"], item["index"], item["job"]

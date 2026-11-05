@@ -133,6 +133,9 @@ def diagnose(s):
     if s["next_shot_has_provider_receipt"]:
         return {"diagnosis": "provider_task_may_be_pending", "reason":
                 "A provider receipt exists; verify its final state before a paid retry"}
+    if "model_under_maintenance" in str(s.get("next_shot_error") or "").lower():
+        return {"diagnosis": "provider_maintenance", "next_action": "Wait for provider recovery; retry only with explicit authorization"}
+
     if any(term in error for term in ("timeout", "timed out", "http 502", "http 504", "unknown", "pending")):
         return {"diagnosis": "ambiguous_cloud_result", "reason":
                 "Previous provider request may have been accepted; do not resubmit blindly"}
@@ -198,48 +201,46 @@ def execute(action, data=None):
 
 
 def handle(args):
-    if args.command == "projects":
+    if args.command == 'projects':
         items = []
         if STORIES.is_dir():
-            for path in sorted(STORIES.glob("*/project.json"),
-                               key=lambda item: item.stat().st_mtime, reverse=True)[:30]:
+            for path in sorted(STORIES.glob('*/project.json'), key=lambda item: item.stat().st_mtime, reverse=True)[:30]:
                 data = project_for(path.parent.name)
                 if data:
-                    scenes = data.get("scenes") or []
-                    items.append({"title": path.parent.name, "total": len(scenes),
-                                  "clips": sum(clip_exists(sc.get("clip")) for sc in scenes)})
-        return {"projects": items}
-    s = summarize(request("/api/status"))
-    if args.command == "status":
+                    scenes = data.get('scenes') or []
+                    items.append({'title': path.parent.name, 'total': len(scenes), 'clips': sum((clip_exists(sc.get('clip')) for sc in scenes))})
+        return {'projects': items}
+    s = summarize(request('/api/status'))
+    if args.command == 'status':
         return s
-    if args.command == "diagnose":
-        return {"status": s, **diagnose(s)}
-    if args.command == "stop":
-        if not s["auto_busy"]:
-            return {"status": s, "note": "Already idle; no command sent"}
-        return execute("auto_stop")
-    if args.command == "open":
-        if s["auto_busy"]:
-            raise OperatorError("Cannot switch projects while Auto is running")
+    if args.command == 'diagnose':
+        return {'status': s, **diagnose(s)}
+    if args.command == 'stop':
+        if not s['auto_busy']:
+            return {'status': s, 'note': 'Already idle; no command sent'}
+        return execute('auto_stop')
+    if args.command == 'open':
+        if s['auto_busy']:
+            raise OperatorError('Cannot switch projects while Auto is running')
         if not project_for(args.title):
-            raise OperatorError("That exact existing project cannot be found")
-        if args.title == s["story"]:
-            return {"status": s, "note": "Already open"}
-        return execute("auto_open", {"name": args.title})
-    if args.command == "resume":
+            raise OperatorError('That exact existing project cannot be found')
+        if args.title == s['story']:
+            return {'status': s, 'note': 'Already open'}
+        return execute('auto_open', {'name': args.title})
+    if args.command == 'resume':
         if not args.authorize_paid:
-            raise OperatorError("Paid Auto resume needs explicit user authorization (--authorize-paid)")
-        if not s["story"] or not s["total"]:
-            raise OperatorError("Open an existing story first")
-        if s["auto_busy"]:
-            return {"status": s, "note": "Already running; did not submit a second job"}
-        if any(slot not in ("Idle", "ว่าง", "", "พร้อม") for slot in s["slots"]):
-            raise OperatorError("Another video slot is active or uncertain")
-        classification = diagnose(s)["diagnosis"]
-        if classification in ("provider_task_may_be_pending", "ambiguous_cloud_result", "provider_capacity"):
-            raise OperatorError(f"{classification}: inspect provider receipts before retry")
-        return execute("auto_start")
-    raise OperatorError("Unsupported command")
+            raise OperatorError('Paid Auto resume needs explicit user authorization (--authorize-paid)')
+        if not s['story'] or not s['total']:
+            raise OperatorError('Open an existing story first')
+        if s['auto_busy']:
+            return {'status': s, 'note': 'Already running; did not submit a second job'}
+        if any((slot not in ('Idle', 'ว่าง', '', 'พร้อม') for slot in s['slots'])) and (not (getattr(args, 'retry_maintenance', False) and diagnose(s)['diagnosis'] == 'provider_maintenance' and (not any((slot.get('busy') for slot in request('/api/status').get('slots', [])))))):
+            raise OperatorError('Another video slot is active or uncertain')
+        classification = diagnose(s)['diagnosis']
+        if classification in ('provider_task_may_be_pending', 'ambiguous_cloud_result', 'provider_capacity'):
+            raise OperatorError(f'{classification}: inspect provider receipts before retry')
+        return execute('auto_start')
+    raise OperatorError('Unsupported command')
 
 
 def watch(interval):

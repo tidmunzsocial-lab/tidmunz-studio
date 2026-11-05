@@ -132,7 +132,7 @@ def test_extension_429_after_send_waits_and_reads_same_reply_without_sending_aga
     harness = r'''
 let now=100000, sends=0, reads=0, heartbeats=0;
 Date.now=()=>now;
-const JOB_LIMIT_MS=720000;
+const JOB_LIMIT_MS=720000; const CHAT_JOB_LIMIT_MS=180000;
 const sleep=async ms=>{now+=ms;};
 const workerTab=async()=>7, openPage=async id=>id;
 function pageNodes(){} function pageSend(){}
@@ -157,9 +157,10 @@ runJob({id:'job',type:'chat',conversation_id:'test-chat'}).then(result=>
 '''
     result = subprocess.run([node, "-e", run + poll + harness], capture_output=True, text=True, check=True)
     data = json.loads(result.stdout)
-    assert data["result"]["text"] == "recovered"
-    assert data["sends"] == 1 and data["reads"] == 2
-    assert data["elapsed"] >= 900000 and data["heartbeats"] >= 180
+    assert 'timed out after 3 minutes' in data['result']['error']
+    assert data['sends'] == 1 and data['reads'] == 1
+    assert data['elapsed'] <= 186000
+    assert data['heartbeats'] > 0
 
 
 def test_relay_heartbeat_keeps_existing_job_alive_without_requeue(monkeypatch):
@@ -358,7 +359,7 @@ def test_run_job_does_not_resend_a_prompt_rejected_as_too_long():
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
 let sends=0,fresh=0,polls=0;
-const JOB_LIMIT_MS=720000,sleep=async()=>{};
+const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000,sleep=async()=>{};
 const workerTab=async()=>7,freshTab=async()=>{fresh++;return 8;},openPage=async id=>id;
 function pageNodes(){} function pageSend(){} function pagePoll(){polls++;}
 async function inPage(_id,fn){if(fn.name==='pageNodes')return [];
@@ -413,7 +414,7 @@ def test_run_job_does_not_poll_gpt_after_an_unconfirmed_send():
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
 let polls=0;
-const JOB_LIMIT_MS=720000, sleep=async()=>{};
+const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000, sleep=async()=>{};
 const workerTab=async()=>7, openPage=async id=>id;
 function pageNodes(){} function pageSend(){} function pagePoll(){polls++;}
 async function inPage(_id,fn){
@@ -532,7 +533,7 @@ def test_unknown_existing_chat_retries_only_after_verified_no_delivery(verificat
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
 let sends=0,polls=0,fresh=0,verifies=0,reads=0;
-const JOB_LIMIT_MS=720000,sleep=async()=>{};
+const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000,sleep=async()=>{};
 const workerTab=async()=>7, freshTab=async()=>{fresh++;return 8;}, openPage=async id=>id;
 global.chrome={tabs:{get:async()=>({status:'complete'})}};
 function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
@@ -572,7 +573,7 @@ def test_run_job_retries_proven_unsent_prompt_once_in_fresh_worker_tab():
     harness = r'''
 let sends=0,polls=0,fresh=0;
 const opened=[];
-const JOB_LIMIT_MS=720000,sleep=async()=>{};
+const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000,sleep=async()=>{};
 const workerTab=async()=>7;
 const freshTab=async(id,url,key)=>{fresh++;if(id!==7||key!=='workerTabId')throw Error('wrong worker');return 8;};
 const openPage=async(id,url)=>{opened.push({id,url});return id;};
@@ -607,7 +608,7 @@ def test_run_job_recovers_unknown_send_when_existing_chat_gains_messages():
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
 let sends=0, polls=0, reads=0;
-const JOB_LIMIT_MS=720000, sleep=async()=>{};
+const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000, sleep=async()=>{};
 const workerTab=async()=>7, openPage=async id=>id;
 global.chrome={tabs:{get:async()=>({status:'complete'})}};
 function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
@@ -642,7 +643,7 @@ def test_unknown_new_chat_recovers_created_conversation_without_resending(locati
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
 let sends=0, polls=0, polledCid=null;
-const JOB_LIMIT_MS=720000, sleep=async()=>{}, workerTab=async()=>7, openPage=async id=>id;
+const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000, sleep=async()=>{}, workerTab=async()=>7, openPage=async id=>id;
 global.chrome={tabs:{get:async()=>({status:'complete',url:LOCATION})}};
 function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
 async function inPage(_id,fn,args){

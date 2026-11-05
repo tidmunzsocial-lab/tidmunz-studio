@@ -76,7 +76,7 @@ def test_cancel_aborts_the_dedicated_in_page_wait_without_replaying_send():
     data = run_node(code + r'''
 let heartbeat, cleared=false, active=true, sends=0, reloads=0, releaseSend, notify;
 const ready=new Promise(resolve=>{notify=resolve;});
-const JOB_LIMIT_MS=720000, sleep=async()=>{};
+const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000, sleep=async()=>{};
 global.setInterval=fn=>{heartbeat=fn;return 7;};
 global.clearInterval=()=>{cleared=true;};
 global.chrome={tabs:{reload:async()=>{reloads++;releaseSend();}}};
@@ -106,7 +106,7 @@ def test_late_heartbeat_from_finished_job_cannot_reload_the_next_jobs_tab():
     code = SOURCE[SOURCE.index("async function runJob("):SOURCE.index("// ── functions below")]
     data = run_node(code + r'''
 let heartbeat, pendingBeat, finishBeat, reloads=0;
-const JOB_LIMIT_MS=720000;
+const JOB_LIMIT_MS=720000; const CHAT_JOB_LIMIT_MS=180000;
 global.setInterval=fn=>{heartbeat=fn;return 1;};global.clearInterval=()=>{};
 global.chrome={tabs:{get:async()=>({status:'complete'}),reload:async()=>{reloads++;}}};
 const sleep=async()=>{if(!pendingBeat)pendingBeat=heartbeat();};

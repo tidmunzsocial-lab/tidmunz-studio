@@ -8,6 +8,7 @@ try { importScripts("config.js"); } catch (e) { self.TZ_CONFIG = null; }
 
 const PORTS = [8766, 8767, 8768];
 const JOB_LIMIT_MS = 12 * 60 * 1000;
+const CHAT_JOB_LIMIT_MS = 3 * 60 * 1000;
 let running = false;
 let link = self.TZ_CONFIG || null;  // {port, token}
 
@@ -473,7 +474,7 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
                  cid: started.conversation_id || job.conversation_id || null, idle: 0,
                  dom_before: started.dom_before || [], dom_mode: Boolean(started.dom_mode),
                  user_message_id: started.user_message_id || null};
-  let deadline = Date.now() + JOB_LIMIT_MS;
+  let deadline = Date.now() + (job.type === "chat" ? CHAT_JOB_LIMIT_MS : JOB_LIMIT_MS);
   let throttles = 0;
   while (Date.now() < deadline) {
     if (cancelled) return {error: "ChatGPT operation cancelled"};
@@ -497,8 +498,8 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
       // A prompt already went out: wait and read this same conversation, never call pageSend again.
       const seconds = Math.max(Number(result.retry_after) || 0, Math.min(300, 30 * 2 ** Math.min(throttles++, 4)));
       if (job.type === "image") onRateLimit(seconds);
-      deadline += seconds * 1000;
-      let left = seconds * 1000;
+      // ponytail: fixed wall-clock limit; 429 backoff must not extend a sent job.
+      let left = Math.min(seconds * 1000, Math.max(0, deadline - Date.now()));
       while (left > 0) {
         if (cancelled) return {error: "ChatGPT operation cancelled"};
         let progress = null;
@@ -514,7 +515,7 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
     throttles = 0;
     if (result.done || result.error) return result;
   }
-  return {error: "ChatGPT took longer than 12 minutes"};
+  return {error: job.type === "chat" ? "ChatGPT response timed out after 3 minutes; original prompt may have been sent; do not resend" : "ChatGPT took longer than 12 minutes"};
   } finally {
     finished = true;
     clearInterval(heartbeat);
