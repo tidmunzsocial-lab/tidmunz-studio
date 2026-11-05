@@ -3554,6 +3554,15 @@ def operator_visual_review_valid(scene: dict) -> bool:
     return False
 
 
+def clip_ambience_selected(scene, index):
+    """ponytail: prompt heuristic, not audio separation; add separation only if needed."""
+    if str(scene.get("dialogue") or "").strip():
+        return False
+    text = " ".join(str(scene.get(k) or "") for k in ("sound_effects", "seen", "video_prompt" )).lower()
+    return index % 3 == 0 and any(word in text for word in
+        ("น้ำ", "ลม", "คลื่น", "ฝน", "เดิน", "ช้าง", "นก", "water", "wind", "wave", "rain", "footstep"))
+
+
 def parse_json_reply(text: str) -> dict:
     text = str(text or "").strip()
     for candidate in [text] + re.findall(r"```(?:json)?\s*([\s\S]*?)```", text):
@@ -7313,6 +7322,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         # Merging consumes the completed clips; image review can regenerate paid assets.
         project, folder = state["project"], Path(state["folder"])
+        choice = run_on_ui(lambda: messagebox.askyesnocancel(
+            "เลือกรูปแบบตัดต่อ",
+            "ใช่ = แบบ 2 เพิ่มเสียงคลิปบางจุดตามพรอมต์ (ไม่เกิน 4 วินาที เว้นช็อตมีบทพูด)\n"
+            "ไม่ = แบบ 1 เสียงเดิมเหมือนก่อน\nยกเลิก = ไม่เรนเดอร์\n\n"
+            "แบบ 2 ไม่แยกเสียง: หากต้นฉบับมีเพลงหรือเสียงพูด อาจติดมาด้วย",
+            parent=page))
+        if choice is None:
+            raise Stopped()
+        project["clip_ambience"] = bool(choice)
+        save_project()
         finish_postprocess = state.get("_auto_video_postprocess_finalizer")
         if callable(finish_postprocess):
             finish_postprocess()
@@ -7346,6 +7365,33 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                   creationflags=LOW_PRIORITY)
             if proc.returncode != 0:
                 raise RuntimeError("FFmpeg: " + (proc.stderr or "").strip()[-500:])
+
+        if project.get("clip_ambience"):
+            audio_parts = []
+            for i, (scene, duration) in enumerate(zip(scenes, durations)):
+                check_stop()
+                part = work / f"ambience_{i:04d}.wav"
+                selected = clip_ambience_selected(scene, i)
+                if selected:
+                    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", scene["clip"]],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=LOW_PRIORITY)
+                    selected = "Audio:" in probe.stderr
+                if selected:
+                    # Short accents only. No looping or time stretching of source sound.
+                    span = min(4.0, duration)
+                    run(["-i", scene["clip"], "-vn", "-af",
+                         f"atrim=duration={span},asetpts=PTS-STARTPTS,afade=t=out:st={max(0, span-0.5)}:d=0.5,volume=0.22,apad",
+                         "-t", str(duration), "-ar", "48000", "-ac", "2", str(part)])
+                    log(f"เสียงคลิปช็อต {i + 1}: เปิด {span:.1f} วินาที")
+                else:
+                    run(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", str(duration), str(part)])
+                audio_parts.append(part)
+            listing = work / "ambience.txt"
+            listing.write_text("".join(f"file '{p.name}'\n" for p in audio_parts), encoding="utf-8")
+            run(["-f", "concat", "-safe", "0", "-i", str(listing), "-c:a", "pcm_s16le", str(work / "ambience.wav")])
+            run(["-i", project["audio"], "-i", str(work / "ambience.wav"), "-filter_complex",
+                 "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]", "-map", "[a]",
+                 "-c:a", "pcm_s16le", str(work / "mixed.wav")])
 
         def render_one(i, scene, length):
             check_stop()
@@ -7405,7 +7451,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         set_progress("video", 0.92, "ใส่เสียงบรรยาย" + (" และซับไตเติล" if project.get("subtitles") else "") + " ...")
         final = folder / f"{safe_name(Path(project['script']).stem)}_{work_dir_name}_{time.strftime('%Y%m%d-%H%M')}.mp4"
-        audio_args = ["-i", project["audio"], "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "192k", "-shortest",
+        audio_source = str(work / "mixed.wav") if project.get("clip_ambience") else project["audio"]
+        audio_args = ["-i", audio_source, "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "192k", "-shortest",
                       "-movflags", "+faststart"]
         if project.get("subtitles"):
             segments = json.loads((folder / "transcript.json").read_text(encoding="utf-8"))

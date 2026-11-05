@@ -151,6 +151,13 @@ def test_manual_video_prompt_skips_gpt_only_while_request_unchanged(tmp_path):
         review(scene, 113)
 
 
+def test_sparse_clip_ambience_never_uses_dialogue_shots():
+    assert N.clip_ambience_selected({"sound_effects": "เสียงคลื่นทะเล"}, 0)
+    assert not N.clip_ambience_selected({"sound_effects": "เสียงคลื่นทะเล"}, 1)
+    assert not N.clip_ambience_selected({"dialogue": "สวัสดี", "sound_effects": "เสียงลม"}, 0)
+    assert not N.clip_ambience_selected({}, 0)
+
+
 def check_folding(hidden_tk):
     tk, root = hidden_tk
     box = tk.Frame(root); box.pack()
