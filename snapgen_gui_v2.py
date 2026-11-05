@@ -1916,6 +1916,7 @@ try:
     _current_video_slot = [0]  # tracks which slot is processing video
     _orig_download_video = g.get("download_video")
     _video_prompt_names = g.setdefault("_video_prompt_names", {})
+    _video_uuid_slots = g.setdefault("_video_uuid_slots", {})  # exact UUID -> submitting slot
 
     def _mute_download_enabled():
         try:
@@ -2344,7 +2345,7 @@ try:
 
     def _snapgen_download_video_to_export(url, uuid, _slot_index=None):
         if _slot_index is None:
-            _slot_index = _current_video_slot[0]
+            _slot_index = _video_uuid_slots.get(str(uuid), _current_video_slot[0])
         """Download a completed provider video without shell/curl URL parsing."""
         from urllib.request import Request, urlopen
 
@@ -2408,8 +2409,10 @@ try:
                     print(f"[slot {_slot_index+1}] {msg}")
             else:
                 print(f"[video] {msg}")
-        slow_enabled = _ai_slow2x_enabled()
-        target_4k = bool(g.get("_auto_video_upscale_4k_override"))
+        slot_options = (g.get("_auto_video_options_by_slot") or {}).get(_slot_index) or {}
+        slow_enabled = (bool(slot_options["slow"]) if "slow" in slot_options else _ai_slow2x_enabled())
+        target_4k = (bool(slot_options["target_4k"]) if "target_4k" in slot_options
+                     else bool(g.get("_auto_video_upscale_4k_override")))
         upscale_enabled = _upscale_1080_enabled()
         mute_enabled = _mute_download_enabled()
         scene_number = (g.get("_auto_video_scene_number_by_slot") or {}).get(_slot_index)
@@ -4483,6 +4486,13 @@ def _install_actual_video_credit():
             g["append_log"](i, "generate ignored: slot busy")
             return
         auto_pipeline = bool(g.get("_auto_video_pipeline_async"))
+        auto_options = dict((g.get("_auto_video_options_by_slot") or {}).get(i) or {}) if auto_pipeline else {}
+        def report_slot_error(title, message):
+            errors = (g.get("_auto_video_errors_by_slot") or {}).get(i) if auto_pipeline else None
+            if errors is not None:
+                errors.append(f"{title}: {message}")
+            else:
+                g["show_error"](title, message)
         img = g["slot_images"][i].get().strip()
         prompt = g["slot_prompts"][i].get("1.0", tk.END).strip()
         voice_cfg = (g.get("_veo3_voice_state") or {}).get(i, {})
@@ -4505,13 +4515,13 @@ def _install_actual_video_credit():
                 str(voice_cfg.get("profile") or "เสียงกลาง"), prompt, _video_expression_for_slot(i)
             )
         if not img and not veo3_voice_dialogue:
-            g["show_error"]("Error", f"Slot {i+1}: missing image")
+            report_slot_error("Error", f"Slot {i+1}: missing image")
             return
         if img and not os.path.exists(img):
-            g["show_error"]("Error", f"Slot {i+1}: image file not found")
+            report_slot_error("Error", f"Slot {i+1}: image file not found")
             return
         if not prompt:
-            g["show_error"]("Error", f"Slot {i+1}: missing prompt")
+            report_slot_error("Error", f"Slot {i+1}: missing prompt")
             return
         _sanitize_video_slot_model(i, log_fn=lambda m: g["append_log"](i, m))
         cfg = g["slot_cfg_vars"][i]
@@ -4606,8 +4616,10 @@ def _install_actual_video_credit():
                         scene_number = (g.get("_auto_video_scene_number_by_slot") or {}).get(i)
                         g.setdefault("_auto_video_downloaded_by_slot", {})[i] = str(local_result)
                         _queue_auto_video_postprocess(
-                            str(local_result), i, scene_number, _ai_slow2x_enabled(),
-                            bool(g.get("_auto_video_upscale_4k_override")), _upscale_1080_enabled(),
+                            str(local_result), i, scene_number,
+                            bool(auto_options.get("slow", _ai_slow2x_enabled())),
+                            bool(auto_options.get("target_4k", g.get("_auto_video_upscale_4k_override"))),
+                            _upscale_1080_enabled(),
                             _mute_download_enabled(), log_fn=lambda m: g["append_log"](i, m),
                         )
                         g["slot_busy"][i] = False
@@ -4650,6 +4662,7 @@ def _install_actual_video_credit():
                     detail = json.dumps(resp, ensure_ascii=False)[:1000]
                     raise RuntimeError(f"API ไม่คืน UUID — {detail}")
                 _video_prompt_names[str(uuid)] = prompt
+                _video_uuid_slots[str(uuid)] = i  # bind download to the originating slot even while two poll
                 g["append_log"](i, "polling uuid: " + str(uuid))
                 _current_video_slot[0] = i
                 g["poll_and_download"](i, str(uuid), model_for_job)
@@ -4706,7 +4719,7 @@ def _install_actual_video_credit():
             except Exception as e:
                 g["append_log"](i, "submit/poll error: " + str(e))
                 _snapgen_after(0, lambda: g["set_slot_state"](i, "error", "Video failed"))
-                _snapgen_after(0, lambda msg=str(e): g["show_error"]("สร้างวิดีโอไม่สำเร็จ", msg))
+                _snapgen_after(0, lambda msg=str(e): report_slot_error("สร้างวิดีโอไม่สำเร็จ", msg))
             finally:
                 if g.get("_slot_job_tokens", {}).get(i) is slot_job_token:
                     g["slot_busy"][i] = False

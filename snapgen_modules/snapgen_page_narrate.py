@@ -3419,6 +3419,39 @@ def file_digest(path) -> str:
     return hashlib.md5(Path(path).read_bytes()).hexdigest()
 
 
+def operator_visual_review_key(scene: dict) -> str:
+    """Fingerprint the actual first frame and every motion-relevant field.
+
+    An AI Operator visual inspection never masquerades as GPT Web's own
+    image-review result. Changing the still, prompt, dialogue, model or rules
+    invalidates this approval and restores the ordinary GPT verification.
+    """
+    import hashlib
+    image = str(scene.get("image") or "")
+    if not image or not Path(image).is_file():
+        return ""
+    try:
+        payload = {field: scene.get(field) for field in (
+            "prompt", "dialogue", "line", "clip_model", "clip_seconds", "forbid",
+            "fix_forbid", "continuity", "characters", "sound_effects", "seen",
+            "clip_no_dialogue")}
+        payload["video_prompt"] = with_video_audio(str(scene.get("video_prompt") or ""), scene)
+        payload["image_md5"] = file_digest(image)
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                         default=str).encode("utf-8")).hexdigest()
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
+def operator_visual_review_valid(scene: dict) -> bool:
+    review = scene.get("operator_visual_review") or {}
+    return bool(review.get("reviewed_by") == "ChatGPT AI Operator"
+                and review.get("key")
+                and review["key"] == operator_visual_review_key(scene)
+                and str(scene.get("seen") or "").strip()
+                and str(scene.get("video_prompt") or "").strip())
+
+
 def parse_json_reply(text: str) -> dict:
     text = str(text or "").strip()
     for candidate in [text] + re.findall(r"```(?:json)?\s*([\s\S]*?)```", text):
@@ -7402,6 +7435,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         pool = indices if indices is not None else [
             i for i, sc in enumerate(scenes) if not (sc.get("clip") and os.path.isfile(sc["clip"]))]
         todo = [i for i in pool if scenes[i].get("image") and os.path.isfile(scenes[i]["image"])
+                and not (not force and operator_visual_review_valid(scenes[i]))
                 and (force or scenes[i].get("motion_image") != file_digest(scenes[i]["image"]))]
         if not todo:
             return
@@ -7523,9 +7557,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if anatomy:  # stated early: video models weigh the opening words most
             prompt = f"ร่างกายที่ต้องคงไว้ตลอดคลิป: {anatomy}\n{prompt}"
         # Speech is stated at the top of every request, both ways: video models weigh the opening lines most.
+        should_speak = bool(scene.get("dialogue")) and not scene.get("clip_no_dialogue")
         speech = (f"[บทพูด] มีบทพูด: {scene['dialogue']} พูดว่า “{scene.get('line', '')}” ขยับปากพูดด้วยความเร็วปกติ "
                   + (speech_note(scene) + " " if speech_note(scene) else "")
-                  + "คนอื่นในเฟรมไม่พูด" if scene.get("dialogue") else f"[บทพูด] {NO_TALK_LINE}")
+                  + "คนอื่นในเฟรมไม่พูด" if should_speak else f"[บทพูด] {NO_TALK_LINE}")
         # The user's 🛠 fix of this shot ("it walked into the house by itself") is its own section, read first:
         # never mixed into the shot's main forbidden list. Whoever the fix keeps from leaving their spot is
         # told positively to stay in place (naming the walk only invites it).
@@ -7556,7 +7591,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if continuity:  # wounds, blood, wet, transformed ... carried from earlier shots
             prompt += f"\nความต่อเนื่อง (สภาพที่เห็นบนตัว คงไว้ตลอดคลิป): {continuity}"
         # Negative prompt: this shot's (GPT + 🛠 problems seen) + each body's + what AI video always breaks.
-        silent = "" if scene.get("dialogue") else NO_TALK_NEGATIVE
+        silent = "" if should_speak else NO_TALK_NEGATIVE
         turned = "คนที่หันหลังหันหน้ามาทางกล้อง" if any(word in opening for word in BACK_TURNED_WORDS) else ""
         main = compact_forbid(scene.get("forbid"), body_forbid, silent, turned, VIDEO_NEGATIVE)
         prompt += "\nNegative — ห้ามปรากฏเด็ดขาดตลอดทั้งคลิป: " + merge_forbid(fix_forbid, main)
@@ -7587,6 +7622,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         """Checker 1, before credits: a separate GPT reads the whole request + the start frame and passes or fixes it."""
         if state.get("motion_planned_only"):
             return  # User explicitly accepted the current-run fallback; no false review pass is saved.
+        if operator_visual_review_valid(scene):
+            log(f"✓ ช็อต {index + 1}: AI Operator ตรวจภาพแรกและพรอมป์แล้ว — ไม่ต้องส่ง GPT ซ้ำ")
+            return
         import hashlib
         key = hashlib.md5((clip_prompt(scene) + str(scene.get("image"))).encode("utf-8")).hexdigest()
         if (scene.get("prompt_review") or {}).get("key") == key:
@@ -7960,16 +7998,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(refresh_all)
         threading.Thread(target=worker, daemon=True).start()
 
-    def make_clip(scene, index, *, prepared=False, on_submitted=None):
-        """Generate one clip by driving the Slot exactly like pressing its Generate button."""
+    def make_clip(scene, index, *, prepared=False, on_submitted=None, slot_override=None):
+        """Generate one clip through its assigned Slot, keeping concurrent shots isolated."""
+        active_slot = slot_index if slot_override is None else slot_override
         busy = runtime["slot_busy"]
         waited = 0
-        while busy[slot_index]:
+        while busy[active_slot]:
             check_stop()
             time.sleep(2)
             waited += 2
             if waited > 1800:
-                raise RuntimeError(f"Slot {slot_index + 1} ไม่ว่างนานเกินไป")
+                raise RuntimeError(f"Slot {active_slot + 1} ไม่ว่างนานเกินไป")
         out_dir = video_output_dir()
         before = {str(f): f.stat().st_mtime for f in out_dir.glob("*.mp4")} if out_dir.is_dir() else {}
         started = time.time()
@@ -8014,49 +8053,47 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             log(f"ช็อต {index + 1}: ส่งคำสั่งภาษาอังกฤษให้โมเดลวิดีโอ (ฉบับไทยดูได้ในตาราง)")
 
         prompt = with_video_audio(prompt, scene)  # retain the audio rule even if a cached English review omitted it
-        runtime.setdefault("_auto_video_scene_number_by_slot", {})[slot_index] = index + 1
-        runtime.setdefault("_auto_video_downloaded_by_slot", {}).pop(slot_index, None)
+        runtime.setdefault("_auto_video_scene_number_by_slot", {})[active_slot] = index + 1
+        runtime.setdefault("_auto_video_downloaded_by_slot", {}).pop(active_slot, None)
+        runtime.setdefault("_auto_video_options_by_slot", {})[active_slot] = {
+            "slow": bool(scene.get("clip_slow")), "target_4k": True}
+        runtime.setdefault("_auto_video_errors_by_slot", {})[active_slot] = errors
 
         def submit():
-            state["show_error_backup"] = runtime.get("show_error")
-            runtime["show_error"] = lambda title, msg="", *a, **k: errors.append(f"{title}: {msg}")
+            # Per-slot error sinks avoid replacing the GUI-wide show_error handler.
             # This shot's own model / length / Slow 2x (chosen at planning time).
-            cfg = runtime["slot_cfg_vars"][slot_index]
+            cfg = runtime["slot_cfg_vars"][active_slot]
             clip_model = scene.get("clip_model") or VIDEO_AUTO_MODEL
             set_slot_config(cfg, clip_model,
                             str(scene.get("clip_seconds") or GROK_CLIP_SECONDS[0]),
                             state["project"].get("aspect") or "16:9",
                             (state["project"].get("video_resolution") or "720p")
                             if clip_model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else None)
-            runtime["_ai_slow2x_override"] = bool(scene.get("clip_slow"))
-            runtime["_auto_video_upscale_4k_override"] = True
             dialogue_var = cfg.get("dialogue")
             if hasattr(dialogue_var, "set"):
                 # The Slot appends dialogue direction after the reviewed prompt.
-                dialogue_var.set("มีบทพูด" if scene.get("dialogue") else "ไม่มีบทพูด")
-            runtime["slot_images"][slot_index].set(scene["image"])
-            runtime.setdefault("_seedance_reference_overrides", {})[slot_index] = seedance_refs
-            box = runtime["slot_prompts"][slot_index]
+                dialogue_var.set("มีบทพูด" if scene.get("dialogue") and not scene.get("clip_no_dialogue") else "ไม่มีบทพูด")
+            runtime["slot_images"][active_slot].set(scene["image"])
+            runtime.setdefault("_seedance_reference_overrides", {})[active_slot] = seedance_refs
+            box = runtime["slot_prompts"][active_slot]
             box.delete("1.0", tk.END)
             box.insert("1.0", prompt)
-            runtime["on_generate_slot"](slot_index)
-            return bool(runtime["slot_busy"][slot_index])
+            runtime["on_generate_slot"](active_slot)
+            return bool(runtime["slot_busy"][active_slot])
 
         def restore():
-            runtime.get("_seedance_reference_overrides", {}).pop(slot_index, None)
-            runtime["_ai_slow2x_override"] = None  # back to the Slow 2x checkbox
-            runtime["_auto_video_upscale_4k_override"] = False
-            if (runtime.get("_auto_video_scene_number_by_slot") or {}).get(slot_index) == index + 1:
-                runtime["_auto_video_scene_number_by_slot"].pop(slot_index, None)
-            if "show_error_backup" in state:
-                runtime["show_error"] = state.pop("show_error_backup")
+            runtime.get("_seedance_reference_overrides", {}).pop(active_slot, None)
+            runtime.get("_auto_video_options_by_slot", {}).pop(active_slot, None)
+            runtime.get("_auto_video_errors_by_slot", {}).pop(active_slot, None)
+            if (runtime.get("_auto_video_scene_number_by_slot") or {}).get(active_slot) == index + 1:
+                runtime["_auto_video_scene_number_by_slot"].pop(active_slot, None)
         try:
             if not run_on_ui(submit):
                 raise RuntimeError("Slot ไม่รับงาน: " + ("; ".join(errors) or "ตรวจรูป/พรอมต์/โมเดลใน Slot"))
             if on_submitted:
                 on_submitted()
             waited = 0
-            while busy[slot_index]:
+            while busy[active_slot]:
                 time.sleep(3)
                 waited += 3
                 if waited % 30 == 0:
@@ -8068,7 +8105,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if errors:
             raise RuntimeError("; ".join(errors)[:400])
         downloaded_by_slot = runtime.get("_auto_video_downloaded_by_slot") or {}
-        downloaded = Path(downloaded_by_slot.pop(slot_index)) if downloaded_by_slot.get(slot_index) else None
+        downloaded = Path(downloaded_by_slot.pop(active_slot)) if downloaded_by_slot.get(active_slot) else None
         if downloaded and downloaded.is_file():
             # Concurrent post-processing for the previous shot can also create
             # newer files in export/video; bind this slot to its actual download.
@@ -8154,8 +8191,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             stage_motion(todo)
         assign_clips(scenes, float(project["duration"]), economy_on())
         apply_selected_video_model(project)
-        cfg = runtime["slot_cfg_vars"][slot_index]
-        saved_slot = run_on_ui(lambda: (cfg["model"].get(), cfg["duration"].get(), cfg["aspect"].get(), cfg["resolution"].get()))
+        slot_configs = runtime["slot_cfg_vars"]
+        dual_slots = [slot_index] + ([0 if slot_index != 0 else 1] if video_mode and len(slot_configs) >= 2 else [])
+        saved_slots = {}
+        for slot_id in dual_slots:
+            cfg = slot_configs[slot_id]
+            saved_slots[slot_id] = run_on_ui(lambda c=cfg: (c["model"].get(), c["duration"].get(), c["aspect"].get(), c["resolution"].get()))
         old_async = runtime.get("_auto_video_pipeline_async")
         old_progress = runtime.get("_auto_video_progress")
 
@@ -8183,8 +8224,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 else:
                     runtime["_auto_video_progress"] = old_progress
                 def put_back():
-                    set_slot_config(cfg, *saved_slot[:3])
-                    cfg["resolution"].set(saved_slot[3])
+                    for slot_id, old_cfg in saved_slots.items():
+                        cfg = slot_configs[slot_id]
+                        set_slot_config(cfg, *old_cfg[:3])
+                        cfg["resolution"].set(old_cfg[3])
                     save_slots = runtime.get("save_slot_configs")
                     if callable(save_slots):
                         save_slots()
@@ -8196,11 +8239,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             raise RuntimeError(f"ยังขาดคลิปฉาก {', '.join(map(str, missing[:15]))} — กดเริ่มอีกครั้งเพื่อลองใหม่")
         log(f"✓ คลิปครบ {len(wanted)} ฉาก" if indices is None else f"✓ เจนคลิปเสร็จ: ช็อต {', '.join(str(i + 1) for i in wanted)}")
 
-    def make_scene_clip(scene, i, *, prepared=False, on_submitted=None):
+    def make_scene_clip(scene, i, *, prepared=False, on_submitted=None, slot_override=None):
         """vela first when the plan says cheap; if vela can't make it, the same shot goes to grok-lower."""
         try:
-            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i, prepared=prepared, on_submitted=on_submitted),
-                                attempts=1 if scene.get("clip_model") in (VIDEO_CHEAP_MODEL, VIDEO_MUSE_MODEL) else 2)
+            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i, prepared=prepared, on_submitted=on_submitted,
+                                                                       slot_override=slot_override),
+                                attempts=1 if prepared or scene.get("clip_model") in (VIDEO_CHEAP_MODEL, VIDEO_MUSE_MODEL) else 2)
         except (Stopped, HistoryLost, RateLimited, ImageProviderError):
             raise
         except Exception as exc:
@@ -8212,7 +8256,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
                 float(scene.get("shot_seconds") or VIDEO_AUTO_AVG_SECONDS), bool(scene.get("slow")))
             log(f"ฉาก {i + 1}: vela เจนไม่ได้ ({error_reason(str(exc))}) → ใช้ {clip_label(scene)}")
-            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i, prepared=prepared, on_submitted=on_submitted), attempts=2)
+            return with_retries(f"คลิปฉาก {i + 1}", lambda: make_clip(scene, i, prepared=prepared,
+                                                                       on_submitted=on_submitted, slot_override=slot_override),
+                                attempts=1 if prepared else 2)
 
     def run_clips_lookahead(project, scenes, todo):
         """One cloud/local clip pipeline plus at most the next shot's prompt."""
@@ -8249,7 +8295,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 state["clip_label"] = f"ช็อต {index + 1} ({n + 1}/{len(todo)})"
                 stage_motion([index], prepared=True, lookahead=True)
                 apply_selected_video_model(project)
-                if not scene.get("seen") and not state.get("motion_text_only"):
+                if not scene.get("seen") and not state.get("motion_text_only") and not operator_visual_review_valid(scene):
                     scene.pop("prompt_review", None)
                     stage_motion([index], force=True, prepared=True, lookahead=True)
                     apply_selected_video_model(project)
@@ -8298,8 +8344,120 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 except Exception as exc:
                     log(f"ทำตัวอย่างไม่ได้: {str(exc)[:200]}")
 
+    def run_clips_dual(project, scenes, todo):
+        """Run at most two charged video submissions; isolate each shot by Slot and UUID.
+
+        The GPT author remains serial.  A stop never interrupts an accepted provider
+        request; every in-flight result is saved before leaving the executor.
+        """
+        if not todo:
+            return
+        from copy import deepcopy
+        from collections import deque
+        ensure_story_in_history()
+        ensure_continuity()
+        ensure_bodies()
+        slots = (slot_index, 0 if slot_index != 0 else 1)
+        inflight = deque()
+
+        def render(scene, index, submitted, assigned_slot):
+            work = deepcopy(scene)
+            work["clip"] = make_scene_clip(
+                work, index, prepared=True, on_submitted=submitted.set,
+                slot_override=assigned_slot)
+            work.pop("clip_error", None)
+            with state["lock"]:
+                for key in tuple(scene):
+                    if key not in work:
+                        scene.pop(key, None)
+                scene.update(work)
+                for item in state.get("auto_video_postprocess_pending") or []:
+                    if item["scene"] is work:
+                        item["scene"] = scene
+            save_project()
+
+        def finish(record):
+            scene, index, future = record
+            try:
+                future.result()
+            except Exception as exc:
+                with state["lock"]:
+                    scene["clip_error"] = str(exc)[:300]
+                save_project()
+                raise
+            # All downloaded files/receipts must reach the project before review.
+            finalize_auto_video_postprocesses()
+            try:
+                review_clip(scene, index)
+            except (Stopped, HistoryLost, RateLimited, ImageProviderError):
+                raise
+            except Exception as exc:
+                log(f"ตรวจคลิปช็อต {index + 1} ไม่ได้: {str(exc)[:200]}")
+            save_project()
+            ui(refresh_table)
+            ui(follow_shot, index)
+            try:
+                update_preview()
+            except Exception as exc:
+                log(f"ทำตัวอย่างไม่ได้: {str(exc)[:200]}")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                for n, index in enumerate(todo):
+                    if len(inflight) >= 2:
+                        finish(inflight.popleft())
+                    check_stop()
+                    scene = scenes[index]
+                    if not (scene.get("image") and os.path.isfile(scene["image"])):
+                        raise RuntimeError(f"ฉาก {index + 1} ยังไม่มีรูป")
+                    state["clip_fraction"] = n / max(1, len(todo))
+                    state["clip_label"] = f"ช็อต {index + 1} ({n + 1}/{len(todo)})"
+                    stage_motion([index], prepared=True, lookahead=True)
+                    apply_selected_video_model(project)
+                    if not scene.get("seen") and not state.get("motion_text_only") and not operator_visual_review_valid(scene):
+                        scene.pop("prompt_review", None)
+                        stage_motion([index], force=True, prepared=True, lookahead=True)
+                        apply_selected_video_model(project)
+                    scene["video_prompt"] = with_video_audio(
+                        str(scene.get("video_prompt") or ""), scene)
+                    review_clip_prompt(scene, index)
+                    save_project()
+                    check_stop()
+                    state["clip_label"] = (
+                        f"สร้างคลิป {n + 1}/{len(todo)} (ฉากที่ {index + 1}) "
+                        f"ด้วย {clip_label(scene)} · 2 Slot")
+                    set_progress("clips", state["clip_fraction"], state["clip_label"])
+                    submitted = threading.Event()
+                    assigned_slot = slots[n % 2]
+                    future = pool.submit(render, scene, index, submitted, assigned_slot)
+                    inflight.append((scene, index, future))
+                    # Do not prepare the next prompt until this request is accepted
+                    # by its own Slot.  A failed submission is never retried blindly.
+                    while not submitted.wait(0.1):
+                        if future.done():
+                            future.result()
+                            break
+                        check_stop()
+                while inflight:
+                    finish(inflight.popleft())
+            finally:
+                # Even when GPT fails or the user presses Stop, allow both
+                # accepted jobs to finish and persist before exiting the run.
+                while inflight:
+                    item = inflight.popleft()
+                    try:
+                        item[2].result()
+                    except Exception as exc:
+                        with state["lock"]:
+                            item[0]["clip_error"] = str(exc)[:300]
+                        save_project()
+
     def run_clips(project, scenes, todo):
         if video_mode:
+            slots_ready = (len(runtime.get("slot_cfg_vars") or []) >= 2
+                           and len(runtime.get("slot_busy") or []) >= 2)
+            if slots_ready:
+                return run_clips_dual(project, scenes, todo)
             return run_clips_lookahead(project, scenes, todo)
         started, failures_in_row = time.time(), 0
         for n, i in enumerate(todo, 1):

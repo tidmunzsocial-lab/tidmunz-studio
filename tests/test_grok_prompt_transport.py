@@ -102,7 +102,7 @@ def test_auto_slot_dialogue_follows_each_scene_after_silent_scene():
                    slot_busy=[False, True])
     runtime["on_generate_slot"] = lambda index: captured.append((dialogue.get(), box.text))
     scope = dict(runtime=runtime, state={"project": {"aspect": "16:9"}}, slot_index=1,
-                 scene={}, seedance_refs=[], prompt="reviewed prompt", errors=[],
+                 active_slot=1, scene={}, seedance_refs=[], prompt="reviewed prompt", errors=[],
                  set_slot_config=lambda *args: None, VIDEO_AUTO_MODEL="grok-lower",
                  VIDEO_GROK_LITE_MODEL=G.GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL=G.MODEL,
                  GROK_CLIP_SECONDS=(6, 10, 15), tk=SimpleNamespace(END="end"))
