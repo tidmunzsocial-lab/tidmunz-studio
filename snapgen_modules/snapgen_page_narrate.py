@@ -7387,6 +7387,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         Each fitted clip is rendered once and kept; joining them is a stream
         copy, so this takes seconds. Plain cuts here; the final video crossfades.
         """
+        if video_mode:
+            return  # Merge only when explicitly requested; keep shot edits independent.
         project, folder = state["project"], Path(state["folder"])
         scenes = project["scenes"]
         ready = 0
@@ -7533,7 +7535,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not todo:
             return
         # Local recovery: saved prompts only; never claim visual GPT review.
-        if project.get("use_saved_video_prompts") and not force and all(str(scenes[i].get("video_prompt") or "").strip() for i in todo):
+        if not force and all(str(scenes[i].get("video_prompt") or "").strip() for i in todo):
             state["motion_planned_only"] = True
             state["motion_text_only"] = True
             log("Using saved video prompts; skipping unavailable GPT review without resubmitting.")
@@ -8133,7 +8135,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             # look at this shot's real first frame once, so the checker can compare against it.
             log(f"ช็อต {index + 1}: เขียนพรอมต์วิดีโอใหม่จากรูปจริงของช็อตนี้ก่อนตรวจ")
             scene.pop("prompt_review", None)
-            stage_motion([index], force=True)
+            stage_motion([index], force=not bool(str(scene.get("video_prompt") or "").strip()))
         if not prepared:
             review_clip_prompt(scene, index)  # checker 1: a second GPT passes or rewrites the request first
         prompt = clip_prompt(scene)

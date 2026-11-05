@@ -289,7 +289,7 @@ def test_chrome_timeout_keeps_existing_motion_prompts_and_never_resends(tmp_path
         )
 
     scope["chat"] = timeout
-    scope["stage_motion"]()
+    scope["stage_motion"](force=True)
     assert scenes == before
     assert scope["state"]["motion_planned_only"]
     assert scope["state"]["motion_text_only"]
@@ -429,7 +429,7 @@ def test_motion_rate_limit_does_not_fallback_to_text_only(tmp_path):
 
     scope["chat"] = blocked
     with pytest.raises(N.RateLimited, match="HTTP 429"):
-        scope["stage_motion"]()
+        scope["stage_motion"](force=True)
     assert len(calls) == 1
     assert not questions and not scope["state"].get("motion_text_only")
     assert scenes == before
@@ -438,22 +438,22 @@ def test_motion_rate_limit_does_not_fallback_to_text_only(tmp_path):
 def test_motion_fallback_requires_consent_and_keeps_plan_and_images(tmp_path):
     scope, scenes, questions, calls = motion_scope(tmp_path)
     before = json.loads(json.dumps(scenes))
-    scope["stage_motion"]()
-    assert scenes == before and len(questions) == 1 and len(calls) == 2
+    scope["stage_motion"](force=True)
+    assert scenes == before and len(questions) == 1 and len(calls) == 1
     assert scope["state"]["motion_planned_only"]
     scope["stage_motion"]([1], force=True)
     scope["review_clip_prompt"](scenes[1], 1)
-    assert len(questions) == 1 and len(calls) == 2
+    assert len(questions) == 1 and len(calls) == 1
     assert not any("seen" in scene or "motion_image" in scene or "prompt_review" in scene for scene in scenes)
     scope["state"].pop("motion_planned_only")
     scope["state"].pop("motion_text_only")
-    scope["stage_motion"]()
+    scope["stage_motion"](force=True)
     assert len(questions) == 2  # A new round does not reuse old consent.
 
 
 def test_refusing_motion_fallback_stops_without_modifying_plan(tmp_path):
     scope, scenes, questions, calls = motion_scope(tmp_path, accept=False)
-    with pytest.raises(N.Stopped): scope["stage_motion"]()
+    with pytest.raises(N.Stopped): scope["stage_motion"](force=True)
     assert not scope["state"].get("motion_planned_only")
     assert [scene["video_prompt"] for scene in scenes] == ["planned-0", "planned-1", "planned-2"]
 
@@ -477,7 +477,7 @@ def test_working_web_still_writes_and_checks_real_frames(tmp_path):
     scope, scenes, questions, calls = motion_scope(tmp_path)
     scope["chat"] = lambda content: json.dumps({"shots": [
         {"video_prompt": "new motion", "seen": "real frame"}]})
-    scope["stage_motion"]()
+    scope["stage_motion"](force=True)
     assert not questions and not scope["state"].get("motion_planned_only")
     assert all(scene["video_prompt"].startswith("new motion\n") and N.VIDEO_AUDIO_RULE in scene["video_prompt"]
                and scene["seen"] == "real frame"
@@ -501,7 +501,7 @@ def test_motion_prompt_too_long_retries_once_with_bounded_prompt_and_same_image(
         return json.dumps({"shots": [{"shot": 1, "video_prompt": "small motion", "seen": "real frame"}]})
 
     scope["chat"] = chat
-    scope["stage_motion"]([0])
+    scope["stage_motion"]([0], force=True)
 
     assert len(calls) == 2
     assert isinstance(calls[0], list) and isinstance(calls[1], list)
