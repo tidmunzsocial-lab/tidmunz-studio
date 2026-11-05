@@ -8221,7 +8221,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         finally:
             run_on_ui(restore)
         if errors:
-            raise RuntimeError("; ".join(errors)[:400])
+            error = "; ".join(errors)[:400]
+            if "content violates moderation policies" in error.lower():
+                with state["lock"]:
+                    for target in (scene, state["project"]["scenes"][index]):
+                        target["clip_terminal_error"] = error
+                    save_project()
+            raise RuntimeError(error)
         receipt = (runtime.get("_auto_video_receipt_by_slot") or {}).get(active_slot) or {}
         if runtime.get("_auto_video_receipt_protocol") and not receipt.get("uuid"):
             raise RuntimeError(
@@ -8549,6 +8555,25 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     # If an accepted paid UUID survived but the MP4 did not,
                     # never resubmit this scene until its provider receipt is
                     # reconciled. Re-running Auto otherwise spends credits twice.
+                    if scene.get("clip_uuid") and not scene.get("clip_terminal_error") and callable(runtime.get("run_json")):
+                        try:
+                            history = runtime["run_json"]([
+                                "curl", "-s", "-X", "GET",
+                                "https://api.snapgen.ai/uapi/v1/history/" + str(scene["clip_uuid"]),
+                                "-H", "x-api-key: " + runtime["api_key_var"].get().strip()], timeout=60)
+                            detail = history.get("detail") if isinstance(history, dict) else None
+                            error = str(history.get("error_message") or
+                                        (detail.get("error_message") if isinstance(detail, dict) else "") or "") if isinstance(history, dict) else ""
+                            if "content violates moderation policies" in error.lower():
+                                scene["clip_terminal_error"] = error
+                                save_project()
+                        except Exception:
+                            pass  # Unknown result must keep the paid UUID locked.
+                    if scene.get("clip_uuid") and scene.get("clip_terminal_error"):
+                        scene.setdefault("clip_failed_jobs", []).append({
+                            "uuid": scene.pop("clip_uuid"),
+                            "error": scene.pop("clip_terminal_error")})
+                        save_project()
                     if scene.get("clip_uuid") and not (
                             scene.get("clip") and os.path.isfile(scene["clip"])):
                         # Quarantine an unresolved paid job instead of aborting

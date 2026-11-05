@@ -1,12 +1,14 @@
 """No-credit concurrency regression: Auto must use two distinct Slots and preserve each clip."""
 import json
 import threading
+import pytest
 from pathlib import Path
 
 from test_video_auto_scene_provider import N, load
 
 
-def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path):
+@pytest.mark.parametrize("rejected", [False, True, "history"])
+def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path, rejected):
     scenes = []
     for i in range(3):
         photo = tmp_path / f"image_{i}.png"
@@ -14,6 +16,10 @@ def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path):
         scenes.append({"image": str(photo), "seen": "reviewed",
                        "video_prompt": f"motion-{i}"})
     project = {"scenes": scenes, "done": {}, "duration": 30}
+    if rejected:
+        scenes[0].update(clip_uuid="rejected-uuid", clip_terminal_error="content violates moderation policies")
+        if rejected == "history":
+            scenes[0].pop("clip_terminal_error")
     state = {"project": project, "folder": str(tmp_path),
              "lock": threading.RLock(), "stop": False}
     calls, accepted = [], threading.Event()
@@ -38,6 +44,11 @@ def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path):
                  check_stop=lambda: None)
     load(scope, "project_path")
     load(scope, "save_project")
+    if rejected == "history":
+        from types import SimpleNamespace
+        scope["runtime"].update(
+            api_key_var=SimpleNamespace(get=lambda: "test-key"),
+            run_json=lambda *a, **k: {"error_message": "The content violates moderation policies and cannot be processed."})
 
     def submit(work, index, *, prepared, on_submitted, slot_override):
         assert prepared is True
@@ -56,6 +67,9 @@ def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path):
     scope["make_scene_clip"] = submit
     load(scope, "run_clips_dual")(project, scenes, [0, 1, 2])
     assert calls == [(0, 1), (1, 0), (2, 1)]
+    if rejected:
+        assert scenes[0]["clip_failed_jobs"][0]["uuid"] == "rejected-uuid"
+        assert "clip_terminal_error" not in scenes[0]
     assert len({sc["clip"] for sc in scenes}) == 3
     assert Path(scenes[0]["clip"]).read_bytes() == b"shot:0/slot:1"
     assert Path(scenes[1]["clip"]).read_bytes() == b"shot:1/slot:0"
