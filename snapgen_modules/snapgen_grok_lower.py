@@ -1,6 +1,8 @@
 """SnapGen Grok Lower video API adapter."""
 
 import json
+import hashlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -76,15 +78,39 @@ def _json_lines(raw):
 
 def request(api_key, prompt, image, resolution, duration, aspect, mode, model=MODEL):
     command = build_command(api_key, prompt, image, resolution, duration, aspect, mode, model)
+    # ponytail: identical unresolved requests stay locked; clear only after history reconciliation.
+    fingerprint = hashlib.sha256(json.dumps([
+        str(api_key), str(prompt), hashlib.sha256(Path(image).read_bytes()).hexdigest(),
+        resolution, duration, aspect, mode, model,
+    ], ensure_ascii=False).encode("utf-8")).hexdigest()
+    receipts = Path(image).resolve().parent / ".snapgen-video-submissions"
+    receipts.mkdir(exist_ok=True)
+    receipt = receipts / (fingerprint + ".json")
     try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-        )
-        output = (result.stdout or result.stderr or "").strip()
-        return _response_from_output(output, result.returncode, model)
-    except subprocess.TimeoutExpired as exc:
-        output = exc.stdout or exc.stderr or ""
-        return _response_from_output(output, 28, model)
+        with receipt.open("x", encoding="utf-8") as stream:
+            json.dump({"state": "submitting", "model": model}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError:
+        raise RuntimeError("คำขอนี้เคยส่งแล้วแต่ยังไม่ทราบผล — ต้องกู้จากประวัติก่อน ไม่ส่งสร้างซ้ำ") from None
+    try:
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            )
+            output = (result.stdout or result.stderr or "").strip()
+            payload = _response_from_output(output, result.returncode, model)
+        except subprocess.TimeoutExpired as exc:
+            payload = _response_from_output(exc.stdout or exc.stderr or "", 28, model)
+    except OSError:
+        receipt.unlink()  # Process never started; no paid request was sent.
+        raise
+    except Exception as exc:
+        raise RuntimeError("ยังไม่ทราบผลคำขอ API อาจรับงานแล้ว — ไม่ส่งซ้ำ ต้องตรวจประวัติ: " + str(exc)) from exc
+    # Unknown/malformed responses must not unlock a paid request.
+    if any(payload.get(key) for key in ("uuid", "history_uuid", "conversion_uuid", "id")):
+        receipt.unlink()
+    return payload
 
 
 def _response_from_output(output, returncode, model=MODEL):
