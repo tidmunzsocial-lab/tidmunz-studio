@@ -42,6 +42,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
+def _track_visible_job(state, kind, number, phase):
+    with state["lock"]:
+        tasks = state.setdefault("visible_jobs", {}).setdefault(kind, {})
+        if phase is None:
+            tasks.pop(number, None)
+        else:
+            tasks[number] = phase
+
+
 def story_history_seed_document(context, full_story: str, selected_part: str):
     """Return the stable story-history fingerprint and UTF-8 attachment text."""
     context_text = json.dumps(context or {}, ensure_ascii=False)
@@ -4203,6 +4212,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         status_banner, textvariable=status_detail_var, bg="#F1F5F9", fg="#475569",
         font=("TkDefaultFont", 9), anchor="w", justify="left", wraplength=1180)
     status_detail_label.pack(fill="x", padx=10, pady=(0, 5))
+    jobs_var = tk.StringVar(value="")
+    jobs_label = tk.Label(status_banner, textvariable=jobs_var, bg="#F1F5F9", fg="#334155",
+                          font=("TkDefaultFont", 9), anchor="w", justify="left")
+    jobs_label.pack(fill="x", padx=10, pady=(0, 5))
     credit_warning_label = tk.Label(status_banner, textvariable=credit_warning_var,
                                    bg="#F1F5F9", fg="#B91C1C", anchor="w",
                                    justify="left", wraplength=1050)
@@ -4652,6 +4665,27 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         else:
             status_detail_var.set(str(state.get("last_notice") or detail_var.get() or extra)[:280])
         status_banner.configure(bg=background, highlightbackground=foreground)
+        with state["lock"]:
+            rows = []
+            if not running:
+                state.pop("visible_jobs", None)
+            for kind, title in (("images", "รูป"), ("videos", "วิดีโอ")):
+                tasks = (state.get("visible_jobs") or {}).get(kind, {})
+                active = [n for n, phase in tasks.items() if phase == "active"]
+                queued = [n for n, phase in tasks.items() if phase == "queued"]
+                waiting = state.get("redraw_queue" if kind == "images" else "clip_redo_queue") or []
+                queued = list(dict.fromkeys(queued + [i + 1 for i in waiting]))
+                rows.extend(f"{title} · ช็อต {n} · กำลังทำงาน" for n in active)
+                if queued:
+                    rows.append(f"{title} · รอคิว {len(queued)} งาน · ถัดไปช็อต {queued[0]}")
+            pending = state.get("auto_video_postprocess_pending") or []
+            for item in pending:
+                future = item.get("job", {}).get("future")
+                if future and not future.done():
+                    rows.append(f"อัปสเกล · ช็อต {item['index'] + 1} · " +
+                                ("กำลังทำงาน" if future.running() else "รอคิว"))
+        jobs_var.set("\n".join(rows))
+        jobs_label.configure(bg=background, wraplength=max(200, status_banner.winfo_width() - 26))
         status_header.configure(bg=background)
         status_title_label.configure(bg=background, fg=foreground)
         status_percent_label.configure(bg=background, fg=foreground)
@@ -6513,6 +6547,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def work(job):
             check_batch_stop()
+            _track_visible_job(state, "images", job[0] + 1, "active")
             i, prompt, paths, board = job
             redraw_options = {"fresh_chat": True} if selected_redraw and video_mode else {}
             if scenes[i].get("identity_repair"):
@@ -6523,6 +6558,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def completed(job, image, error):
             nonlocal finished
+            _track_visible_job(state, "images", job[0] + 1, None)
             i = job[0]
             if not video_mode and error is None and job[2] and looks_like_reference_sheet(image):
                 error = ImageProviderError(f"ฉาก {i + 1} คล้ายรูปเรฟพื้นหลังเรียบ — เก็บรูปไว้ ตรวจผลก่อนสร้างใหม่")
@@ -6549,8 +6585,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 raise error
 
         try:
+            for job in jobs:
+                _track_visible_job(state, "images", job[0] + 1, "queued")
             _run_image_jobs(jobs, work, completed, check_batch_stop, max_workers=2)
         finally:
+            for job in jobs:
+                _track_visible_job(state, "images", job[0] + 1, None)
             after = balance()
             measured = before - after if before is not None and after is not None else None
             with state["lock"]:
@@ -6637,6 +6677,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def work(job):
             check_stop()
             i, prompt, paths, board, repair = job
+            _track_visible_job(state, "images", i + 1, "active")
             with attempt_lock:
                 attempts[i] += 1
 
@@ -6721,6 +6762,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def completed(job, image, error):
             i = job[0]
+            _track_visible_job(state, "images", i + 1, None)
             if image is None and error is None:
                 return  # skipped after a repeated content refusal; its error is already on the shot
             with state["lock"]:
@@ -6739,6 +6781,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(follow_shot, i)
 
         pending_jobs = list(jobs)
+        for job in jobs:
+            _track_visible_job(state, "images", job[0] + 1, "queued")
         while pending_jobs:
             check_stop()
             pass_errors = {}
@@ -8508,6 +8552,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         inflight = deque()
 
         def render(scene, index, submitted, assigned_slot):
+            _track_visible_job(state, "videos", index + 1, "active")
             work = deepcopy(scene)
             work["clip"] = make_scene_clip(
                 work, index, prepared=True, on_submitted=submitted.set,
@@ -8550,6 +8595,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             try:
+                for index in todo:
+                    _track_visible_job(state, "videos", index + 1, "queued")
                 for n, index in enumerate(todo):
                     if len(inflight) >= 2:
                         finish(inflight.popleft())
@@ -8608,6 +8655,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     submitted = threading.Event()
                     assigned_slot = slots[n % 2]
                     future = pool.submit(render, scene, index, submitted, assigned_slot)
+                    future.add_done_callback(lambda _future, number=index + 1:
+                                             _track_visible_job(state, "videos", number, None))
                     inflight.append((scene, index, future))
                     # Do not prepare the next prompt until this request is accepted
                     # by its own Slot.  A failed submission is never retried blindly.
@@ -8629,6 +8678,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         with state["lock"]:
                             item[0]["clip_error"] = str(exc)[:300]
                         save_project()
+                for index in todo:
+                    _track_visible_job(state, "videos", index + 1, None)
 
     def run_clips(project, scenes, todo):
         if video_mode:
@@ -9551,6 +9602,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def release_manual_lane(kind):
         with state["lock"]:
             state.setdefault("manual_lanes", {}).pop(kind, None)
+            state.setdefault("visible_jobs", {}).pop(kind, None)
             state["busy"] = bool(state["manual_lanes"])
 
     def regenerate_selected(only=None, ask=True):
@@ -9716,6 +9768,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def remake_clips(selected):
         """Worker thread: make the clips of these shots again with their current prompts (and show it)."""
         project = state["project"]
+        for i in selected:
+            _track_visible_job(state, "videos", i + 1, "queued")
         shots = ", ".join(str(i + 1) for i in selected)
         log(f"🎬 กำลังเจนวิดีโอใหม่: ช็อต {shots}")
         ui(stage_var.set, f"กำลังเจนวิดีโอใหม่ ช็อต {shots}")
@@ -9723,7 +9777,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             for key in ("clip", "clip_normal", "clip_error", "clip_review", "clip_use_until", "clip_use_from", "clip_cuts"):
                 project["scenes"][i].pop(key, None)
         project["done"].pop("clips", None)
-        stage_clips(selected)
+        try:
+            stage_clips(selected)
+        finally:
+            for i in selected:
+                _track_visible_job(state, "videos", i + 1, None)
         log(f"✓ เจนวิดีโอใหม่เสร็จ: ช็อต {shots}")
 
     def remake_clips_selected(only=None):

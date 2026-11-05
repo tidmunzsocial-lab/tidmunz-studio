@@ -4,6 +4,17 @@ from concurrent.futures import ThreadPoolExecutor
 from test_video_auto_scene_provider import N, load
 
 
+def test_visible_jobs_keep_independent_shots_and_remove_completed_only():
+    state = {"lock": threading.RLock()}
+    N._track_visible_job(state, "images", 18, "active")
+    N._track_visible_job(state, "images", 19, "queued")
+    N._track_visible_job(state, "videos", 18, "active")
+    N._track_visible_job(state, "images", 19, "active")
+    N._track_visible_job(state, "images", 18, None)
+    assert state["visible_jobs"] == {
+        "images": {19: "active"}, "videos": {18: "active"}}
+
+
 def test_independent_lanes_keep_busy_until_both_finish_and_block_same_shot():
     state = {"busy": False, "stop": False, "lock": threading.RLock()}
     scope = dict(vars(N), state=state)
