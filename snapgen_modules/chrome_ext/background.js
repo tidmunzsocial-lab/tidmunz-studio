@@ -908,7 +908,9 @@ async function pagePoll(kind, state) {
   }
   const fresh = pointers.filter(p => !skip.has(p));
   // A picture can still be drawing after the reply text: give it time unless ChatGPT answered instead.
-  if (kind === "image" && !fresh.length && !text && elapsed < 240) return {done: false, cid, idle};
+  // ponytail: a text-first reply ("generating…") used to end the job with no picture; now it waits too.
+  // A refusal still returns after 4 min; raise this if real pictures arrive later than that.
+  if (kind === "image" && !fresh.length && elapsed < 240) return {done: false, cid, idle};
   const images = [];
   for (const pointer of (kind === "image" ? fresh.slice(-1) : fresh)) {  // one picture per job: the newest
     const id = pointer.replace(/^[a-z-]+:\/\//, "");
