@@ -1103,10 +1103,23 @@ def _ensure_status_footer():
 
 def _installed_version():
     try:
-        data = json.loads(
-            (BASE_ROOT / "snapgen_data" / "meta" / "snapgen_version.json").read_text(encoding="utf-8-sig")
-        )
-        return str(data.get("version") or "—").strip()
+        import snapgen_updater
+        version = snapgen_updater.current_version(BASE_ROOT)
+        receipt = snapgen_updater._installation_receipt(BASE_ROOT)
+        if receipt:
+            if receipt.get("files"):
+                intact, _ = snapgen_updater.verify_installed_files(BASE_ROOT)
+                if not intact:
+                    return f"{version} (ไฟล์ไม่ครบ)"
+            else:
+                # Legacy receipt: a newer metadata label alone is not proof
+                # that the update's program files were installed.
+                marker = BASE_ROOT / "snapgen_data" / "meta" / "snapgen_version.json"
+                if marker.is_file():
+                    advertised = json.loads(marker.read_text(encoding="utf-8-sig")).get("version")
+                    if str(advertised or "") != version:
+                        return f"{version} (อัปเดตไม่ครบ)"
+        return version
     except Exception:
         return "—"
 
@@ -3247,10 +3260,11 @@ if callable(_core_duration_values_for_model):
 _original_poll_and_download = g.get("poll_and_download")
 if callable(_original_poll_and_download) and not getattr(_original_poll_and_download, "_snapgen_hosted_video_wrapper", False):
     def _poll_vela_video(i, uuid, model):
-        if str(model or "").strip() not in (VELA_VIDEO_MODEL, MUSE_VIDEO_MODEL, *SEEDANCE_MODELS):
+        if str(model or "").strip() not in (VELA_VIDEO_MODEL, MUSE_VIDEO_MODEL, GROK_LOWER_MODEL, GROK_LITE_MODEL, *SEEDANCE_MODELS):
             return _original_poll_and_download(i, uuid, model)
 
-        provider = SEEDANCE_MODELS.get(model, MUSE_VIDEO_LABEL if model == MUSE_VIDEO_MODEL else "Vela")
+        provider = SEEDANCE_MODELS.get(model, MUSE_VIDEO_LABEL if model == MUSE_VIDEO_MODEL
+                                       else "Grok" if model in (GROK_LOWER_MODEL, GROK_LITE_MODEL) else "Vela")
         last_error = None
         for attempt in range(240):  # 20 minutes; never submit the UUID again.
             try:
@@ -4566,6 +4580,11 @@ def _install_actual_video_credit():
             ))
         slot_job_token = object()
         g.setdefault("_slot_job_tokens", {})[i] = slot_job_token
+        # The Slot becoming busy is NOT evidence that the API accepted a paid
+        # request. An actual provider UUID is the receipt for that scene.
+        if auto_pipeline:
+            g.setdefault("_auto_video_receipt_by_slot", {}).pop(i, None)
+            g.setdefault("_auto_video_worker_error_by_slot", {}).pop(i, None)
         g["slot_busy"][i] = True
         g["set_generate_enabled"](i, False)
         if model_for_job == LTX23_CLOUD_MODEL:
@@ -4620,7 +4639,16 @@ def _install_actual_video_credit():
                         saved_text = "LTX-2.5 100%"
                     if auto_pipeline:
                         scene_number = (g.get("_auto_video_scene_number_by_slot") or {}).get(i)
+                        if not Path(str(local_result)).is_file():
+                            raise RuntimeError("Local backend returned no valid video file")
                         g.setdefault("_auto_video_downloaded_by_slot", {})[i] = str(local_result)
+                        g.setdefault("_auto_video_receipt_by_slot", {})[i] = {
+                            "uuid": "local:" + Path(str(local_result)).stem,
+                            "scene_number": scene_number, "model": model_for_job,
+                        }
+                        accepted = (g.get("_auto_video_accepted_callbacks_by_slot") or {}).get(i)
+                        if callable(accepted):
+                            accepted()
                         _queue_auto_video_postprocess(
                             str(local_result), i, scene_number,
                             bool(auto_options.get("slow", _ai_slow2x_enabled())),
@@ -4669,9 +4697,28 @@ def _install_actual_video_credit():
                     raise RuntimeError(f"API ไม่คืน UUID — {detail}")
                 _video_prompt_names[str(uuid)] = prompt
                 _video_uuid_slots[str(uuid)] = i  # bind download to the originating slot even while two poll
+                if auto_pipeline:
+                    g.setdefault("_auto_video_receipt_by_slot", {})[i] = {
+                        "uuid": str(uuid), "scene_number": (g.get("_auto_video_scene_number_by_slot") or {}).get(i),
+                        "model": model_for_job,
+                    }
+                    accepted = (g.get("_auto_video_accepted_callbacks_by_slot") or {}).get(i)
+                    if callable(accepted):
+                        accepted()
                 g["append_log"](i, "polling uuid: " + str(uuid))
                 _current_video_slot[0] = i
-                g["poll_and_download"](i, str(uuid), model_for_job)
+                polled_path = g["poll_and_download"](i, str(uuid), model_for_job)
+                if auto_pipeline:
+                    downloaded = (g.get("_auto_video_downloaded_by_slot") or {}).get(i)
+                    # The original core's poller sometimes returns a path rather
+                    # than invoking our download wrapper. Accept that exact path.
+                    if not downloaded and polled_path and Path(str(polled_path)).is_file():
+                        g.setdefault("_auto_video_downloaded_by_slot", {})[i] = str(polled_path)
+                        downloaded = str(polled_path)
+                    if not downloaded:
+                        raise _VideoDownloadError(
+                            "API ยอมรับงานแล้ว (UUID " + str(uuid)
+                            + ") แต่ยังไม่ได้ไฟล์ดาวน์โหลด: ห้ามกดสร้างซ้ำ ให้ตรวจประวัติงานเดิม")
                 if veo3_voice_dialogue:
                     _extract_veo3_voice_audio(i, voice_files_before)
                 if auto_pipeline:
@@ -4714,26 +4761,31 @@ def _install_actual_video_credit():
                 # as a failed generation or invite the user to spend credits
                 # by submitting the same video again.
                 g["append_log"](i, "download error: " + str(e))
+                if auto_pipeline:
+                    g.setdefault("_auto_video_worker_error_by_slot", {})[i] = str(e)
+                    report_slot_error("วิดีโอสร้างเสร็จ แต่ดาวน์โหลดไม่สำเร็จ", str(e))
+                else:
+                    _snapgen_after(0, lambda msg=str(e): g["show_error"](
+                        "วิดีโอสร้างเสร็จ แต่ดาวน์โหลดไม่สำเร็จ", msg))
                 _snapgen_after(0, lambda: g["set_slot_state"](i, "error", "Download failed"))
-                _snapgen_after(
-                    0,
-                    lambda msg=str(e): g["show_error"](
-                        "วิดีโอสร้างเสร็จ แต่ดาวน์โหลดไม่สำเร็จ",
-                        msg,
-                     ),
-                 )
             except Exception as e:
                 g["append_log"](i, "submit/poll error: " + str(e))
+                if auto_pipeline:
+                    g.setdefault("_auto_video_worker_error_by_slot", {})[i] = str(e)
+                    report_slot_error("สร้างวิดีโอไม่สำเร็จ", str(e))
+                else:
+                    _snapgen_after(0, lambda msg=str(e): report_slot_error("สร้างวิดีโอไม่สำเร็จ", msg))
                 _snapgen_after(0, lambda: g["set_slot_state"](i, "error", "Video failed"))
-                _snapgen_after(0, lambda msg=str(e): report_slot_error("สร้างวิดีโอไม่สำเร็จ", msg))
             finally:
                 if g.get("_slot_job_tokens", {}).get(i) is slot_job_token:
                     g["slot_busy"][i] = False
                     _snapgen_after(0, lambda: g["set_generate_enabled"](i, True))
 
         threading.Thread(target=worker, daemon=True).start()
+        return True  # accepted by local worker, NOT yet accepted by provider API
 
     g["on_generate_slot"] = on_generate_slot
+    g["_auto_video_receipt_protocol"] = True
     root.after(250, _install_veo3_voice_controls)
     sanitize_all_video_models()
     bind_credit_cfg_watchers()

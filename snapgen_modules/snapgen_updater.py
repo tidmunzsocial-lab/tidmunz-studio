@@ -79,8 +79,51 @@ def _version_tuple(value):
     return tuple((nums + [0, 0, 0, 0])[:4])
 
 
+def _installation_receipt(project_root):
+    """Read the last *completed* update, not just the advertised version label."""
+    receipt = Path(project_root) / "snapgen_update_last.json"
+    try:
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("version"):
+            return data
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def verify_installed_files(project_root):
+    """Return (valid, problem) for installs with a hashed completion receipt.
+
+    Older installs have no file list: their integrity cannot be certified.
+    The next successfully applied patch adds a complete verification receipt.
+    """
+    root = Path(project_root)
+    receipt = _installation_receipt(root)
+    if not receipt:
+        return False, "no successful-update receipt"
+    files = receipt.get("files")
+    if not isinstance(files, list) or not files:
+        return False, "legacy update receipt has no file hashes"
+    for item in files:
+        try:
+            rel = _safe_relative(item["path"])
+            target = root / Path(*PurePosixPath(rel).parts)
+            if (not target.is_file()
+                    or hashlib.sha256(target.read_bytes()).hexdigest()
+                    != str(item["sha256"]).lower()):
+                return False, f"installed file differs: {rel}"
+        except (OSError, KeyError, TypeError, ValueError, UpdateError):
+            return False, "invalid or missing installed file"
+    return True, ""
+
+
 def current_version(project_root):
     root = Path(project_root)
+    receipt = _installation_receipt(root)
+    # A completed installation receipt takes precedence over any metadata
+    # that was copied separately by a failed updater or a build verifier.
+    if receipt:
+        return str(receipt["version"]).lstrip("v").strip()
     candidates = [
         root / VERSION_FILE,
         root / "snapgen_data" / "meta" / VERSION_FILE,
@@ -90,7 +133,7 @@ def current_version(project_root):
             if path.is_file():
                 data = json.loads(path.read_text(encoding="utf-8"))
                 return str(data.get("version") or "0.0.0")
-        except Exception:
+        except (OSError, ValueError, TypeError):
             pass
     return "0.0.0"
 
@@ -140,8 +183,16 @@ def check_latest(project_root):
     latest = str(release.get("tag_name") or "").lstrip("v")
     asset = _release_asset(release)
     current = current_version(project_root)
+    receipt = _installation_receipt(project_root)
+    # Reinstall the latest release if its completed receipt shows damaged
+    # files, even when the displayed version number is already the latest.
+    repair = False
+    if receipt and _version_tuple(current) == _version_tuple(latest):
+        intact, _reason = verify_installed_files(project_root)
+        repair = bool(receipt.get("files")) and not intact
     return {
-        "available": _version_tuple(latest) > _version_tuple(current),
+        "available": _version_tuple(latest) > _version_tuple(current) or repair,
+        "repair": repair,
         "current": current,
         "latest": latest,
         "version": latest,
@@ -357,14 +408,27 @@ def _apply(staging, project_root, parent_pid):
                     shutil.copy2(src, temp_dst)
                     os.replace(temp_dst, dst)
                     changed.append((dst, old, existed))
-                (project_root / "snapgen_update_last.json").write_text(
+                # Reject a partial or silently corrupted install *before*
+                # recording it as completed. The exception path rolls back.
+                for item in plan["files"]:
+                    rel = _safe_relative(item["path"])
+                    target = project_root / Path(*PurePosixPath(rel).parts)
+                    if (not target.is_file()
+                            or hashlib.sha256(target.read_bytes()).hexdigest()
+                            != str(item["sha256"]).lower()):
+                        raise UpdateError(f"ยืนยันไฟล์หลังติดตั้งไม่ผ่าน: {rel}")
+                receipt_path = project_root / "snapgen_update_last.json"
+                receipt_tmp = receipt_path.with_name(receipt_path.name + ".updating")
+                receipt_tmp.write_text(
                     json.dumps(
-                        {"version": plan["version"], "updated_at": stamp},
+                        {"version": plan["version"], "updated_at": stamp,
+                         "files": plan["files"]},
                         ensure_ascii=False,
                         indent=2,
                     ),
                     encoding="utf-8",
                 )
+                os.replace(receipt_tmp, receipt_path)
             except Exception:
                 for dst, old, existed in reversed(changed):
                     try:
