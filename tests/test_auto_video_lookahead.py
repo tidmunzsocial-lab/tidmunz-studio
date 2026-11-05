@@ -251,6 +251,12 @@ def test_audio_policy_in_writer_and_outgoing_english_slot(tmp_path):
     request = N.motion_request([{"shot": 1, "line": "waves on the beach"}], "period")
     assert N.VIDEO_AUDIO_RULE in request and '"sound_effects"' in request
     assert "ห้ามมีเสียงเพลงหรือดนตรีประกอบเด็ดขาด" in request
+    assert "ไม่คัดลอกแม่แบบ" in request
+    assert "รายละเอียดพอให้สร้างตรงภาพ" in request
+    sample = "[เปิดภาพ] wide coast\n[กล้อง] ดอลลี่ถอยช้าๆ เพื่อเผยทางเดิน\n[จังหวะ] คนคงที่"
+    motion = N.motion_only_prompt(sample)
+    assert "ดอลลี่ถอยช้าๆ" in motion and "เผยทางเดิน" in motion
+    assert "ขนาดภาพ มุมกล้อง เลนส์" not in motion
     scene = {"image": "frame.png", "clip_model": "test-model", "clip_seconds": 6,
              "sound_effects": "soft waves and sea wind"}
     prompt = N.with_video_audio("original request", scene)

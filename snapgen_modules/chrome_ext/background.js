@@ -863,29 +863,40 @@ async function pagePoll(kind, state) {
   const cid = state.cid || (match ? match[1] : null);
   const idle = busy ? 0 : (state.idle || 0) + 1;
   const elapsed = (Date.now() - state.sentAt) / 1000;
-  if (!cid || idle < 2 || elapsed < 6) return {done: false, cid, idle};
+  if (!cid || elapsed < 6) return {done: false, cid, idle};
 
   if (kind === "chat" && state.user_message_id) {
     const previous = new Set([...(state.before || []), ...(state.dom_before || [])]);
     const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
     const userIndex = nodes.findIndex(n => n.getAttribute("data-message-id") === state.user_message_id &&
       n.getAttribute("data-message-author-role") === "user");
-    for (const node of (userIndex < 0 ? [] : nodes.slice(userIndex + 1)).reverse()) {
+    // ChatGPT can replace a message ID during rerender. Fall back to any assistant message
+    // added since send, instead of staying in DOM mode forever with no API fallback.
+    const freshAssistants = nodes.filter(n => n.getAttribute("data-message-author-role") === "assistant" &&
+      !previous.has(n.getAttribute("data-message-id")));
+    const candidates = userIndex >= 0
+      ? nodes.slice(userIndex + 1).filter(n => n.getAttribute("data-message-author-role") === "assistant")
+      : freshAssistants;
+    for (const node of candidates.reverse()) {
       const id = node.getAttribute("data-message-id");
       if (!id || previous.has(id) || node.getAttribute("data-message-author-role") !== "assistant") continue;
       const blocks = [...node.querySelectorAll(".markdown")];
-      const block = blocks[blocks.length - 1];
-      if (!block) continue;
+      const block = blocks[blocks.length - 1] || node;
       const codes = [...block.querySelectorAll("pre code")];
       const code = codes.length ? (codes[codes.length - 1].textContent || "").trim() : "";
-      const text = (/^[{\[]/.test(code) ? code : (block.innerText || "")).trim();
+      const text = (/^[{\[]/.test(code) ? code : (block.innerText || block.textContent || "")).trim();
       if (!text) continue;
-      if (state.dom_reply_id !== id || state.dom_reply_text !== text)
-        return {done: false, cid, idle, dom_reply_id: id, dom_reply_text: text};
+      const stable = state.dom_reply_id === id && state.dom_reply_text === text;
+      if (!stable) return {done: false, cid, idle, dom_reply_id: id, dom_reply_text: text};
+      // A complete JSON object is a finished reply even if ChatGPT's Stop button is stale.
+      let completeJson = false;
+      try { const value = JSON.parse(text); completeJson = Boolean(value && typeof value === "object"); } catch (e) {}
+      if (busy && !completeJson) return {done: false, cid, idle, dom_reply_id: id, dom_reply_text: text};
       return {done: true, text, images: [], conversation_id: cid, message_id: id, source: "chatgpt_page"};
     }
-    // The normal UI owns text generation. Do not hammer a separately throttled conversation API.
-    if (state.dom_mode) return {done: false, cid, idle};
+    // Prefer the visible UI, but if it has no assistant node for 30s, recover from the conversation API.
+    // This avoids both tight API polling and an unbounded wait on a missing/replaced DOM node.
+    if (state.dom_mode && elapsed < 30) return {done: false, cid, idle};
   }
 
   const token = (await (await fetch("/api/auth/session")).json()).accessToken;

@@ -673,15 +673,17 @@ def test_text_reply_requires_new_id_and_stable_json_without_api_polling():
     source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
     function = source[source.index("async function pagePoll("):source.index("chrome.alarms.create")]
     harness = r'''
-let text='{"shots":[{"video_prompt":"new"}]}', showNew=false;
-const block={innerText:'json Copy '+text,querySelectorAll:()=>[{textContent:text}]};
-const message=(id,role='assistant')=>({getAttribute:k=>k==='data-message-id'?id:role,querySelectorAll:()=>[block]});
+let text='{"shots":[{"video_prompt":"new"}]}', showNew=false, busyNow=true;
+// Current ChatGPT can render an answer outside .markdown while its Stop button remains visible.
+const message=(id,role='assistant')=>({innerText:text,textContent:text,
+ getAttribute:k=>k==='data-message-id'?id:role,querySelectorAll:()=>[]});
+const stop={getAttribute:k=>k==='data-testid'?'stop-button':null};
 global.location={pathname:'/c/existing'};
 global.document={querySelectorAll:s=>s.includes('data-message-id')?
- [message('old'),message('sent-user','user'),...(showNew?[message('new')]:[])]:[]};
+ [message('old'),message('sent-user','user'),...(showNew?[message('new')]:[])]:busyNow?[stop]:[]};
 global.fetch=async()=>{throw Error('must not read the throttled API');};
 (async()=>{
- const state={cid:'existing',idle:2,sentAt:Date.now()-10000,before:['old'],dom_before:['old'],dom_mode:true,user_message_id:'sent-user'};
+ const state={cid:'existing',idle:2,sentAt:Date.now()-10000,before:['old'],dom_before:['old'],dom_mode:true,user_message_id:'replaced-user'};
  const old=await pagePoll('chat',state);
  showNew=true;
  const fresh=await pagePoll('chat',state);
