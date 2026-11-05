@@ -4251,14 +4251,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ("สร้างใหม่", lambda: regenerate_selected(), "สร้างภาพช็อตที่เลือกใหม่จากพรอมต์และเรฟ ใช้เครดิตสร้างรูป"),
                 ("แก้รูปเดิม", lambda: edit_current_selected(), "แก้รายละเอียดจากภาพปัจจุบัน โดยรักษาส่วนที่ไม่ได้สั่งแก้"),
                 ("แก้ให้ตรงเรฟ", lambda: repair_identity_selected(), "เลือกตัวละคร รูปเรฟ และ Context แล้วแก้เฉพาะตัวละครนั้น"),
-                ("แก้พรอมต์", lambda: edit_prompt(), "เปิดข้อความพรอมต์ภาพให้แก้เอง ยังไม่สร้างรูปจนกดยืนยัน"),
+                ("พรอมต์ภาพ", lambda: edit_prompt(), "แก้คำสั่งสำหรับสร้างรูปเท่านั้น · บันทึกแล้วเจนรูปใหม่จะสร้างภาพใหม่"),
                 ("GPT ช่วยแก้", lambda: refine_selected(), "มีรูปแล้ว: GPT ดูภาพและแก้แค่ระยะกล้อง ไม่เปลี่ยนสไตล์/ตัวละคร/เนื้อเรื่อง · รูปยังไม่ผ่าน: ซ่อมพรอมป์เดิม · ถามก่อนสร้างรูป"),
                 ("นำเข้ารูป", lambda: use_scene_image(), "เลือกไฟล์รูปสำเร็จมาแทนภาพของช็อตเดียว ไม่เสียเครดิตสร้างรูป"),
             )),
             ("วิดีโอ", (
                 ("สร้างคลิป", lambda: remake_clips_selected(), "สร้างวิดีโอใหม่เฉพาะช็อตที่เลือกจากภาพปัจจุบัน ใช้เครดิตวิดีโอ"),
                 ("แจ้งปัญหาคลิป", lambda: fix_problem_selected(), "บอกปัญหาคลิปให้ GPT แก้คำสั่ง ไม่แก้ภาพแรก และถามก่อนสร้างคลิป"),
-                ("แก้พรอมต์", lambda: edit_video_prompt(), "พิมพ์/แก้พรอมต์วิดีโอเอง หรือกด 'GPT ช่วยแก้' ให้ GPT ดูรูปแล้วเขียนให้ ยังไม่สร้างคลิป"),
+                ("แก้พรอมต์วิดีโอ", lambda: edit_video_prompt(), "แก้คำสั่งสำหรับสร้างคลิปเท่านั้น · บันทึกแล้วไม่สร้างรูปหรือคลิป"),
                 ("ทำสโลว์", lambda: reslow_selected(), "ทำสโลว์ 2× จากคลิปที่มีอยู่ ไม่ส่งสร้างวิดีโอใหม่"),
                 ("รวมวิดีโอ", lambda: start_pipeline(only="video"), "รวมคลิปที่มีอยู่กับเสียงเป็นวิดีโอ ไม่สร้างรูปหรือคลิปใหม่"),
                 ("เปิดวิดีโอ", lambda: open_path((state["project"] or {}).get("last_video")), "เปิดวิดีโอที่รวมเสร็จล่าสุด"),
@@ -9899,7 +9899,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(refresh_all)
         threading.Thread(target=worker, daemon=True).start()
 
-    def edit_video_prompt():
+    def edit_video_prompt(_event=None):
         selection = table.selection()
         if not state["project"] or len(selection) != 1:
             messagebox.showinfo("พรอมต์วิดีโอ", "เลือกช็อตเดียวในตารางก่อน", parent=page)
@@ -9924,8 +9924,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def ask_gpt():
             save()
             gpt_video_prompt_selected()
-        make_styled_button(buttons, "SECONDARY", "GPT ช่วยแก้ (ดูรูป)", command=ask_gpt).pack(side="left", padx=4)
-        make_styled_button(buttons, "PRIMARY", "บันทึก", command=save).pack(side="left", padx=4)
+        make_styled_button(buttons, "SECONDARY", "GPT เขียนพรอมต์วิดีโอใหม่ (ดูรูป)", command=ask_gpt).pack(side="left", padx=4)
+        make_styled_button(buttons, "PRIMARY", "บันทึกพรอมต์วิดีโอ", command=save).pack(side="left", padx=4)
 
     def gpt_video_prompt_selected():
         project = state["project"]
@@ -10007,7 +10007,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 return
             regenerate_selected([index], ask=False)
         make_styled_button(buttons, "SECONDARY", "บันทึก", command=save).pack(side="left", padx=4)
-        make_styled_button(buttons, "PRIMARY", "บันทึกแล้วเจนรูปใหม่", command=save_and_redraw).pack(side="left", padx=4)
+        make_styled_button(buttons, "PRIMARY", "บันทึกพรอมต์ภาพแล้วสร้างรูปใหม่", command=save_and_redraw).pack(side="left", padx=4)
 
     def show_preview(_event=None):
         selection = table.selection()
@@ -10124,7 +10124,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         page.after(2000, run_redraw_queue)
     page.after(2000, run_redraw_queue)
 
-    table.bind("<Double-1>", edit_prompt)
+    table.bind("<Double-1>", edit_video_prompt if video_mode else edit_prompt)
     table.bind("<<TreeviewSelect>>", show_preview)
     g["video_auto_open_project" if video_mode else "narrate_open_project"] = open_project
     try:

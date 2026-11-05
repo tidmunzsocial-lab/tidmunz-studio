@@ -113,7 +113,26 @@ def check_groups(hidden_tk):
     # Invoke the registered Tk callback without mapping a window on the desktop.
     command = button.bind("<FocusIn>").split("[", 1)[1].split()[0]
     button.tk.call(command, *(button._w if key == "%W" else "0" for key in button._subst_format))
-    assert "GPT ช่วยแก้" in scope["action_hint"].get()
+    assert "ไม่สร้างรูปหรือคลิป" in scope["action_hint"].get()
+
+
+def test_video_mode_double_click_and_video_prompt_editor_never_queue_images():
+    source = Path(N.__file__).read_text(encoding="utf-8")
+    assert 'table.bind("<Double-1>", edit_video_prompt if video_mode else edit_prompt)' in source
+    editor = next(node for node in ast.walk(TREE) if isinstance(node, ast.FunctionDef)
+                  and node.name == "edit_video_prompt")
+    calls = {node.func.id for node in ast.walk(editor)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    assert not {"regenerate_selected", "stage_images", "run_gpt_scenes"} & calls
+    notices = []
+    callback = load(dict(vars(N), table=SimpleNamespace(selection=lambda: ()),
+                         state={"project": None}, page=None,
+                         messagebox=SimpleNamespace(showinfo=lambda *a, **kw: notices.append(a))),
+                    "edit_video_prompt")
+    callback(SimpleNamespace(widget=None))
+    assert len(notices) == 1
+    assert 'GPT เขียนพรอมต์วิดีโอใหม่ (ดูรูป)' in source
+    assert 'บันทึกพรอมต์ภาพแล้วสร้างรูปใหม่' in source
 
 
 def check_folding(hidden_tk):
