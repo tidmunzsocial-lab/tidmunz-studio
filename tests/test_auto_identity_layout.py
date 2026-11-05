@@ -135,6 +135,22 @@ def test_video_mode_double_click_and_video_prompt_editor_never_queue_images():
     assert 'บันทึกพรอมต์ภาพแล้วสร้างรูปใหม่' in source
 
 
+def test_manual_video_prompt_skips_gpt_only_while_request_unchanged(tmp_path):
+    image = tmp_path / "frame.png"
+    image.write_bytes(b"frame")
+    scene = {"image": str(image), "video_prompt": "user direction"}
+    scene["manual_video_prompt_key"] = N.operator_visual_review_key(scene)
+    logs = []
+    scope = dict(vars(N), state={}, log=logs.append,
+                 clip_prompt=lambda scene: (_ for _ in ()).throw(RuntimeError("review reached")))
+    review = load(scope, "review_clip_prompt")
+    review(scene, 113)
+    assert logs and "ไม่ส่ง GPT" in logs[0]
+    scene["video_prompt"] = "changed"
+    with pytest.raises(RuntimeError, match="review reached"):
+        review(scene, 113)
+
+
 def check_folding(hidden_tk):
     tk, root = hidden_tk
     box = tk.Frame(root); box.pack()

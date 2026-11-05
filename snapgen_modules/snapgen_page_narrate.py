@@ -7773,6 +7773,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         """Checker 1, before credits: a separate GPT reads the whole request + the start frame and passes or fixes it."""
         if state.get("motion_planned_only"):
             return  # User explicitly accepted the current-run fallback; no false review pass is saved.
+        if scene.get("manual_video_prompt_key") and scene["manual_video_prompt_key"] == operator_visual_review_key(scene):
+            log(f"✓ ช็อต {index + 1}: ใช้พรอมต์วิดีโอที่ผู้ใช้ยืนยัน — ไม่ส่ง GPT ตรวจหรือแก้ซ้ำ")
+            return
         if operator_visual_review_valid(scene):
             log(f"✓ ช็อต {index + 1}: AI Operator ตรวจภาพแรกและพรอมป์แล้ว — ไม่ต้องส่ง GPT ซ้ำ")
             return
@@ -9916,6 +9919,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         def save():
             scene["video_prompt"] = text.get("1.0", tk.END).strip()
+            scene.pop("prompt_review", None)  # discard the previous prompt's translation
+            scene["manual_video_prompt_key"] = operator_visual_review_key(scene)
             if scene.get("image") and os.path.isfile(scene["image"]):
                 scene["motion_image"] = file_digest(scene["image"])  # typed by hand: Auto keeps it
             save_project()

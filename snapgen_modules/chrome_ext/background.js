@@ -934,6 +934,13 @@ async function pagePoll(kind, state) {
     }
     if (m.content && m.content.content_type === "system_error") text = (m.content.text || text);
   }
+  // Do not turn an empty or still-streaming conversation snapshot into a completed reply.
+  if (kind === "chat") {
+    const last = [...nodes].reverse().find(m => m.author && m.author.role === "assistant" &&
+      m.content && m.content.content_type === "text");
+    if (!text || !last || last.status !== "finished_successfully" || last.end_turn === false)
+      return {done: false, cid, idle};
+  }
   const fresh = pointers.filter(p => !skip.has(p));
   // A picture can still be drawing after the reply text: give it time unless ChatGPT answered instead.
   // ponytail: a text-first reply ("generating…") used to end the job with no picture; now it waits too.

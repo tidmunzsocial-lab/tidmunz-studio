@@ -37,6 +37,25 @@ openPage(7,target).then(id=>console.log(JSON.stringify({id,checks,navigations}))
     assert data == {"id": 7, "checks": 1 if already_there else 2, "navigations": 0 if already_there else 1}
 
 
+@pytest.mark.parametrize("text,status,done", [("", "finished_successfully", False),
+    ('{"shots":[]}', "in_progress", False), ('{"shots":[]}', "finished_successfully", True)])
+def test_chat_api_snapshot_waits_for_nonempty_finished_answer(text, status, done):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    function = source[source.index("async function pagePoll("):source.index('chrome.alarms.create(')]
+    harness = '''
+    global.location={pathname:'/c/12345678-1234-1234-1234-123456789012'};
+    global.document={querySelectorAll:()=>[]};
+    const message={author:{role:'assistant'},content:{content_type:'text',parts:[TEXT]},status:STATUS,end_turn:true};
+    global.fetch=async url=>({ok:true,json:async()=>url.includes('/api/auth/session')?{accessToken:'test'}:{mapping:{reply:{message}},current_node:'reply'}});
+    pagePoll('chat',{before:[],sentAt:Date.now()-40000}).then(r=>console.log(JSON.stringify(r)));
+    '''.replace("TEXT", json.dumps(text)).replace("STATUS", json.dumps(status))
+    result = subprocess.run([node, "-e", function + harness], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout)["done"] is done
+
+
 def test_extension_attaches_real_text_file_before_sending():
     node = shutil.which("node")
     if not node:
