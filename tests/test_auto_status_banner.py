@@ -1,4 +1,5 @@
 """Auto page status must reflect actual busy/error/completion, not stale progress."""
+import inspect
 import sys
 from pathlib import Path
 
@@ -6,6 +7,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "snapgen_modules"))
 import snapgen_page_narrate as N
+
+
+def test_auto_page_has_one_progress_panel_and_expandable_visible_log():
+    source = inspect.getsource(N._build)
+    assert "bar = ttk.Progressbar(status_banner, maximum=100)" in source
+    assert "progress_row = tk.Frame" not in source
+    assert 'log_box.configure(height=3)' in source
+    assert 'log_box.configure(height=8 if expanded else 3)' in source
+    assert 'status_percent_var.set(f"{int(percent)}%")' in source
+    status, title, *_ = N.auto_work_status(False, False, percent=81)
+    assert status == "idle"
+    assert "81%" not in title  # The number is displayed once at the right.
 
 
 def test_saved_percent_counts_93_of_115_clips_instead_of_dropping_to_40(tmp_path):

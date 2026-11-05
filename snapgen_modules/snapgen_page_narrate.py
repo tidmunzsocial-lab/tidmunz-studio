@@ -3502,7 +3502,7 @@ def auto_work_status(busy, completed, *, error="", detail="", elapsed=0, silent_
                 str(error)[:280], "#FEE2E2", "#991B1B")
     if completed:
         return ("done", "✓ ทำงานเสร็จแล้ว", "วิดีโอพร้อมเปิดตรวจสอบ", "#F1F5F9", "#0F172A")
-    return ("idle", f"○ หยุดอยู่ · ความคืบหน้าที่บันทึกไว้ {int(percent)}%",
+    return ("idle", "○ หยุดอยู่",
             "กด ▶ ทำต่อ เพื่อเริ่มงานจากจุดที่บันทึกไว้", "#F1F5F9", "#0F172A")
 
 
@@ -4035,36 +4035,52 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tools_menu.pack(side="left")
     else:
         make_styled_button(run_row, "SUCCESS", "▶ เปิดวิดีโอ", command=lambda: open_path((state["project"] or {}).get("last_video"))).pack(side="left")
+
+    # Keep a useful three-line Log visible without shrinking the scenes table.
+    # Expand it on demand instead of giving the status a second duplicate row.
+    log_expanded = tk.BooleanVar(value=False)
+
+    def toggle_log_view():
+        expanded = not log_expanded.get()
+        log_expanded.set(expanded)
+        log_box.configure(height=8 if expanded else 3)
+        log_toggle.config(text="▾ ย่อ Log" if expanded else "▴ ขยาย Log")
+
+    log_toggle = tk.Button(run_row, text="▴ ขยาย Log", command=toggle_log_view,
+                           relief="flat", bg="#E2E8F0", fg="#0F172A", padx=7)
+    log_toggle.pack(side="left", padx=4)
     redo_var = tk.StringVar(value=stages[2][1])
     make_styled_button(run_row, "SECONDARY", "↺ ทำใหม่ตั้งแต่ขั้น", command=lambda: redo_from(redo_var.get())).pack(side="right")
     ttk.Combobox(run_row, textvariable=redo_var, values=[t for _k, t, _w in stages], width=14,
                  state="readonly").pack(side="right", padx=6)
 
-    # A high-visibility live status immediately under the Start/Stop controls.
-    # The small progress text below is secondary; users must never need to
-    # inspect the bottom-right Chrome indicator to know if Auto is running.
+    # ONE shared status/progress card: no duplicate standalone progress/status row.
+    # stage_var/detail_var remain the data source for the card and mobile API.
     status_banner = tk.Frame(box, bg="#F1F5F9", highlightthickness=1,
                              highlightbackground="#CBD5E1")
-    status_banner.pack(fill="x", padx=8, pady=(5, 3))
+    status_banner.pack(fill="x", padx=8, pady=(4, 2))
+    status_header = tk.Frame(status_banner, bg="#F1F5F9")
+    status_header.pack(fill="x", padx=10, pady=(5, 2))
     status_title_var = tk.StringVar(value="○ พร้อมทำงาน")
     status_detail_var = tk.StringVar(value="กำลังตรวจสถานะโปรเจกต์")
+    status_percent_var = tk.StringVar(value="0%")
     status_title_label = tk.Label(
-        status_banner, textvariable=status_title_var, bg="#F1F5F9", fg="#0F172A",
-        font=("TkDefaultFont", 12, "bold"), anchor="w", justify="left")
-    status_title_label.pack(fill="x", padx=12, pady=(7, 1))
+        status_header, textvariable=status_title_var, bg="#F1F5F9", fg="#0F172A",
+        font=("TkDefaultFont", 11, "bold"), anchor="w", justify="left")
+    status_title_label.pack(side="left")
+    status_percent_label = tk.Label(
+        status_header, textvariable=status_percent_var, bg="#F1F5F9", fg="#0F172A",
+        font=("TkDefaultFont", 11, "bold"), anchor="e")
+    status_percent_label.pack(side="right")
+    bar = ttk.Progressbar(status_banner, maximum=100)
+    bar.pack(fill="x", padx=10, pady=(1, 3))
     status_detail_label = tk.Label(
-        status_banner, textvariable=status_detail_var, bg="#F1F5F9", fg="#0F172A",
-        font=("TkDefaultFont", 10), anchor="w", justify="left", wraplength=1180)
-    status_detail_label.pack(fill="x", padx=12, pady=(0, 8))
-
-    progress_row = tk.Frame(box, bg=bg)
-    progress_row.pack(fill="x", padx=8, pady=(4, 0))
-    bar = ttk.Progressbar(progress_row, maximum=100)
-    bar.pack(fill="x")
-    tk.Label(progress_row, textvariable=stage_var, bg=bg, fg="#0F172A", font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill="x", pady=(4, 0))
-    tk.Label(progress_row, textvariable=detail_var, bg=bg, fg="#475569", anchor="w").pack(fill="x")
-    credit_warning_label = tk.Label(progress_row, textvariable=credit_warning_var, bg=bg,
-                                   fg="#B91C1C", anchor="w", justify="left", wraplength=1050)
+        status_banner, textvariable=status_detail_var, bg="#F1F5F9", fg="#475569",
+        font=("TkDefaultFont", 9), anchor="w", justify="left", wraplength=1180)
+    status_detail_label.pack(fill="x", padx=10, pady=(0, 5))
+    credit_warning_label = tk.Label(status_banner, textvariable=credit_warning_var,
+                                   bg="#F1F5F9", fg="#B91C1C", anchor="w",
+                                   justify="left", wraplength=1050)
     stage_row = tk.Frame(box, bg=bg)
     stage_row.pack(fill="x", padx=8, pady=(2, 4))
     stage_labels = {}
@@ -4074,8 +4090,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         stage_labels[key] = label
 
     log_box = make_log_box(box)
-    log_box.configure(height=1)
-    log_box.pack(side="bottom", fill="x", padx=8, pady=(2, 6))
+    # Reserve visible room for diagnostics; reclaimed space comes from merging the status rows.
+    log_box.configure(height=3)
+    log_box.pack(side="bottom", fill="x", padx=8, pady=(2, 4))
 
     # ── scenes table ──
     table_tools = tk.Frame(box, bg=bg)
@@ -4498,11 +4515,25 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             detail=description, elapsed=now - status_clock["began"],
             silent_for=now - status_clock["last_change"], percent=percent)
         status_title_var.set(title)
-        status_detail_var.set(extra if running or kind == "error"
-                              else str(state.get("last_notice") or extra)[:280])
+        status_percent_var.set(f"{int(percent)}%")
+        if running:
+            # Show the action and its detail in the same card, without repeating
+            # a separate progress row or overwriting state used by the mobile API.
+            step = re.sub(r"\s*\.\.\.\s*\d+%\s*$", "", str(stage_var.get()).strip())
+            summary = f"{step} — {description}" if step and description and step != description else (description or step)
+            status_detail_var.set(summary[:280] if kind != "waiting" else extra)
+        elif kind in ("error", "done"):
+            status_detail_var.set(extra)
+        else:
+            status_detail_var.set(str(state.get("last_notice") or detail_var.get() or extra)[:280])
         status_banner.configure(bg=background, highlightbackground=foreground)
+        status_header.configure(bg=background)
         status_title_label.configure(bg=background, fg=foreground)
-        status_detail_label.configure(bg=background, fg=foreground)
+        status_percent_label.configure(bg=background, fg=foreground)
+        credit_warning_label.configure(bg=background)
+        status_detail_label.configure(
+            bg=background, fg=foreground,
+            wraplength=max(200, status_banner.winfo_width() - 26))
         root.after(1000, refresh_work_banner)
 
     root.after(200, refresh_work_banner)
