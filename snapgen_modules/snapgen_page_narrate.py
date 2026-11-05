@@ -4543,7 +4543,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         total = sum(w for _k, _t, w in stages)
         for key, title, weight in stages:
             if key == stage_key:
-                percent = int((done_weight + weight * max(0.0, min(1.0, fraction))) * 100 / total)
+                stage_percent = int((done_weight + weight * max(0.0, min(1.0, fraction))) * 100 / total)
+                # A one-shot redraw or clip repair must not make 93 saved clips
+                # look like the whole story regressed from 81% back to 20%.
+                percent = max(stage_percent, auto_saved_percent(state.get("project"), stages))
                 ui(lambda p=percent, t=title: (bar.configure(value=p), stage_var.set(f"{t} ... {p}%")))
                 break
             done_weight += weight

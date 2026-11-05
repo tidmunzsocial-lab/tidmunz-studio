@@ -16,6 +16,7 @@ def test_auto_page_has_one_progress_panel_and_expandable_visible_log():
     assert 'log_box.configure(height=3)' in source
     assert 'log_box.configure(height=8 if expanded else 3)' in source
     assert 'status_percent_var.set(f"{int(percent)}%")' in source
+    assert 'max(stage_percent, auto_saved_percent(state.get("project"), stages))' in source
     status, title, *_ = N.auto_work_status(False, False, percent=81)
     assert status == "idle"
     assert "81%" not in title  # The number is displayed once at the right.
