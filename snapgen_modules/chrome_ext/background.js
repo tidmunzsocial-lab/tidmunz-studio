@@ -116,6 +116,13 @@ async function loop() {
           await ensureWindow();
           result = await runJob(job, workerKey, pauseImages);
         }
+        // GPT answered with a question/text but no picture: tell it once, in the same chat, to draw now.
+        // A policy refusal is left alone so the program can reword the prompt.
+        if (job.type === "image" && result && result.done && !(result.images || []).length &&
+            result.conversation_id && !/policy|นโยบาย|ละเมิด|violat|can.?t help|ไม่สามารถ/i.test(result.text || "")) {
+          result = await runJob({...job, prompt: "สร้างรูปเลย ไม่ต้องถาม ใช้ข้อมูลที่ให้ไปแล้ว", images: [], files: [],
+                                 conversation_id: result.conversation_id}, workerKey, pauseImages);
+        }
       }
     } catch (e) {
       result = {error: String(e && e.message || e)};
