@@ -35,11 +35,14 @@ def make_scope(scene, message, saves):
     seen = []
     def fake_gpt(prompt, image_path=None):
         seen.append((prompt, image_path))
-        return json.dumps(message, ensure_ascii=False)
+        answer = message.pop(0) if isinstance(message, list) else message
+        return answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
     scope = dict(state={"project": project}, story_anchor=lambda i: (
         "ช็อต 1: กษัตริย์เดินชายหาด; ฉากก่อนหน้าท้าวพรหมเทพเดินมาจากฝั่งซ้าย; "
         "ฉากถัดไปนาคโผล่ขึ้นจากทะเล"),
         gpt_text=fake_gpt, parse_json_reply=json.loads,
+        check_stop=lambda: None, set_progress=lambda *args: None,
+        set_manual_progress=lambda *args: None,
         ensure_bodies=lambda: None, save_project=lambda: saves.append(deepcopy(project)),
         log=lambda msg: None)
     return load_inner("refine_scene_prompt", scope), project, seen
@@ -80,6 +83,49 @@ def test_camera_refinement_keeps_style_actor_story_and_existing_media(tmp_path):
     assert seen[0][1] == str(image)
     assert "same faces and costumes" in seen[0][0]
     assert "ฉากถัดไป" in seen[0][0]
+
+
+def test_one_click_camera_help_retries_invalid_json_and_saves_only_valid_change(tmp_path):
+    picture = tmp_path / "scene_105.png"
+    picture.write_bytes(b"original valuable frame")
+    scene = {
+        "image": str(picture), "clip": str(tmp_path / "paid_clip_105.mp4"),
+        "has_people": True, "characters": ["ท้าวพรหมเทพ"],
+        "prompt": "Extreme Wide Shot 24mm ท้าวพรหมเทพยืนอยู่ริมทะเล",
+        "video_prompt": "พระองค์หันมองทะเล",
+    }
+    original = deepcopy(scene)
+    saves = []
+    refine, _, sent = make_scope(
+        scene,
+        ["GPT replied in plain prose, no JSON",
+         {"camera": "medium_close", "reason": "ใบหน้าเดิมเล็กเกินไป"}],
+        saves,
+    )
+    changed = refine(0)
+    assert "Medium Close-Up" in changed
+    assert len(sent) == 2  # only retry the malformed finished response
+    assert sent[0][1] == sent[1][1] == str(picture)
+    assert len(saves) == 1
+    assert picture.read_bytes() == b"original valuable frame"
+    assert scene["clip"] == original["clip"]
+    assert scene["video_prompt"] == original["video_prompt"]
+
+
+def test_one_click_json_failure_never_changes_scene_or_media(tmp_path):
+    picture = tmp_path / "frame.png"
+    picture.write_bytes(b"keep original")
+    scene = {"image": str(picture), "characters": ["ท้าวพรหมเทพ"],
+             "has_people": True, "prompt": "Extreme Wide Shot 24mm ท้าวพรหมเทพ"}
+    original = deepcopy(scene)
+    saves = []
+    refine, _, sent = make_scope(scene, ["invalid", "still invalid", "no JSON"], saves)
+    with pytest.raises(RuntimeError, match="3 ครั้ง"):
+        refine(0)
+    assert len(sent) == 3
+    assert not saves
+    assert scene == original
+    assert picture.read_bytes() == b"keep original"
 
 
 def test_gpt_keep_camera_is_noop_without_credit_or_unwanted_scene_change(tmp_path):

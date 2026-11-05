@@ -3434,6 +3434,78 @@ def parse_json_reply(text: str) -> dict:
     raise RuntimeError("GPT ไม่ได้ตอบเป็น JSON")
 
 
+def retry_structured_gpt_reply(send, *, label, valid=None, attempts=3, on_retry=None):
+    """Retry only a completed GPT answer with malformed JSON or a wrong schema.
+
+    A transport timeout is *not* retried here: the provider may have accepted
+    that request, and another submission could duplicate work or credit use.
+    send(attempt_number) issues a fresh text/analysis request each time.
+    """
+    last = None
+    for attempt in range(1, max(1, attempts) + 1):
+        raw = send(attempt)  # Network/provider errors propagate without resubmission.
+        try:
+            parsed = parse_json_reply(raw)
+            if valid is not None and not valid(parsed):
+                raise RuntimeError(f"GPT ตอบ JSON แต่ข้อมูล{label}ไม่ครบหรือไม่ถูกต้อง")
+            return parsed
+        except (ValueError, RuntimeError, TypeError) as exc:
+            last = exc
+            if attempt >= attempts:
+                break
+            if on_retry:
+                on_retry(attempt + 1, attempts, str(exc))
+    raise RuntimeError(f"GPT ส่งข้อมูล{label}ไม่ถูกต้องหลังลอง {attempts} ครั้ง: {last}")
+
+
+def auto_saved_percent(project, stages):
+    """Overall progress from persisted work, including partial media stages.
+
+    A missing done.clips flag must not make 93 existing clips look like 0%.
+    This does not mark any stage complete or submit generation requests.
+    """
+    if not project:
+        return 0
+    done = project.get("done") or {}
+    scenes = project.get("scenes") or []
+    total = sum(weight for _key, _title, weight in stages)
+    if not total:
+        return 0
+    amount = 0.0
+    for key, _title, weight in stages:
+        fraction = 1.0 if done.get(key) else 0.0
+        if scenes and key in ("images", "clips"):
+            media_key = "image" if key == "images" else "clip"
+            fraction = sum(
+                bool(scene.get(media_key)) and os.path.isfile(str(scene[media_key]))
+                for scene in scenes) / len(scenes)
+        elif scenes and key == "motion":
+            fraction = sum(bool(str(scene.get("video_prompt") or
+                                    scene.get("video_prompt_planned") or "").strip())
+                           for scene in scenes) / len(scenes)
+        amount += weight * fraction
+    return min(100, max(0, int(amount * 100 / total)))
+
+
+def auto_work_status(busy, completed, *, error="", detail="", elapsed=0, silent_for=0, percent=0):
+    """Presentation-only status for the whole Auto page (never controls jobs)."""
+    if busy and silent_for >= 12 * 60:
+        return ("waiting", "● รอผลนานผิดปกติ · ตรวจสอบงานที่กำลังรอ",
+                f"{detail or 'กำลังรอผู้ให้บริการ'} · ทำงานมา {int(elapsed // 60)} นาที",
+                "#FEF3C7", "#92400E")
+    if busy:
+        duration = f"{int(elapsed // 60):02d}:{int(elapsed % 60):02d}"
+        return ("working", f"● กำลังทำงานอยู่ · {duration}",
+                detail or "กำลังประมวลผล — งานยังไม่เสร็จ", "#DCFCE7", "#166534")
+    if error:
+        return ("error", "● งานหยุดเพราะเกิดข้อผิดพลาด",
+                str(error)[:280], "#FEE2E2", "#991B1B")
+    if completed:
+        return ("done", "✓ ทำงานเสร็จแล้ว", "วิดีโอพร้อมเปิดตรวจสอบ", "#F1F5F9", "#0F172A")
+    return ("idle", f"○ หยุดอยู่ · ความคืบหน้าที่บันทึกไว้ {int(percent)}%",
+            "กด ▶ ทำต่อ เพื่อเริ่มงานจากจุดที่บันทึกไว้", "#F1F5F9", "#0F172A")
+
+
 # ── page ──────────────────────────────────────────────────────────────────
 
 def install(g: dict, root: tk.Misc) -> tk.Frame:
@@ -3968,6 +4040,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     ttk.Combobox(run_row, textvariable=redo_var, values=[t for _k, t, _w in stages], width=14,
                  state="readonly").pack(side="right", padx=6)
 
+    # A high-visibility live status immediately under the Start/Stop controls.
+    # The small progress text below is secondary; users must never need to
+    # inspect the bottom-right Chrome indicator to know if Auto is running.
+    status_banner = tk.Frame(box, bg="#F1F5F9", highlightthickness=1,
+                             highlightbackground="#CBD5E1")
+    status_banner.pack(fill="x", padx=8, pady=(5, 3))
+    status_title_var = tk.StringVar(value="○ พร้อมทำงาน")
+    status_detail_var = tk.StringVar(value="กำลังตรวจสถานะโปรเจกต์")
+    status_title_label = tk.Label(
+        status_banner, textvariable=status_title_var, bg="#F1F5F9", fg="#0F172A",
+        font=("TkDefaultFont", 12, "bold"), anchor="w", justify="left")
+    status_title_label.pack(fill="x", padx=12, pady=(7, 1))
+    status_detail_label = tk.Label(
+        status_banner, textvariable=status_detail_var, bg="#F1F5F9", fg="#0F172A",
+        font=("TkDefaultFont", 10), anchor="w", justify="left", wraplength=1180)
+    status_detail_label.pack(fill="x", padx=12, pady=(0, 8))
+
     progress_row = tk.Frame(box, bg=bg)
     progress_row.pack(fill="x", padx=8, pady=(4, 0))
     bar = ttk.Progressbar(progress_row, maximum=100)
@@ -4068,13 +4157,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     # ── small utilities ──
     def log(message):
+        message = str(message)
+        # The visible banner reflects terminal errors, not mere retry attempts.
+        if message.startswith("❌") and not re.search(r"ครั้งที่\s+\d+", message):
+            state["last_error"] = message.removeprefix("❌").strip()
+        elif message.startswith(("✓", "✅")):
+            state.pop("last_error", None)
         try:
             import snapgen_error_reporter
-            if str(message).startswith("❌"):
-                snapgen_error_reporter.report_log(str(message), "เล่าภาพ")
+            if message.startswith("❌"):
+                snapgen_error_reporter.report_log(message, "เล่าภาพ")
         except Exception:
             pass
-        root.after(0, lambda m=str(message): append_log(log_box, m))
+        root.after(0, lambda m=message: append_log(log_box, m))
 
     def ui(fn, *args):
         root.after(0, lambda: fn(*args))
@@ -4151,6 +4246,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             state.pop(transient, None)
         state["folder"] = str(folder)
         state["project"] = project
+        state.pop("last_error", None)
+        state.pop("last_notice", None)
         if video_mode:
             toggle_settings(not bool(project.get("scenes")))
         if not video_mode:
@@ -4350,15 +4447,65 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         refresh_stages()
         if state["busy"]:
             return
-        done = (state["project"] or {}).get("done", {})
-        total = sum(w for _k, _t, w in stages)
-        percent = int(sum(w for k, _t, w in stages if done.get(k)) * 100 / total)
+        # Count persisted partial images, motion prompts and clips too.
+        # Otherwise a paused 93/115-clip run misleadingly drops back to 40%.
+        percent = auto_saved_percent(state.get("project"), stages)
         bar.configure(value=percent)
-        if percent == 100:
+        if state.get("last_error"):
+            stage_var.set(f"หยุดแล้ว · พบข้อผิดพลาด · ทำไปแล้ว {percent}%")
+            detail_var.set(str(state["last_error"])[:280])
+        elif percent == 100:
             stage_var.set("เสร็จแล้ว 100% — กด ▶ เปิดวิดีโอ")
+            detail_var.set("วิดีโอพร้อมเปิดดู")
         elif percent:
-            stage_var.set(f"ทำไปแล้ว {percent}% — กดเริ่มเพื่อทำต่อ")
+            stage_var.set(f"หยุดอยู่ · ทำไปแล้ว {percent}% — กด ▶ ทำต่อ")
+            detail_var.set(str(state.get("last_notice") or "ไม่มีงานกำลังรันในขณะนี้")[:280])
             start_btn.config(text="▶ ทำต่อ")
+        else:
+            stage_var.set("พร้อมเริ่มงาน — ยังไม่ได้รัน")
+            detail_var.set(str(state.get("last_notice") or "")[:280])
+
+    # UI-only heartbeat: one timer for all Auto operations, including GPT
+    # repair, manual redraw, clip QC, 3D/reference edits and full pipeline.
+    status_clock = {"was_busy": False, "began": time.monotonic(),
+                    "last_change": time.monotonic(), "observed": None}
+
+    def refresh_work_banner():
+        if not status_banner.winfo_exists():
+            return
+        now = time.monotonic()
+        running = bool(state["busy"])
+        if running and not status_clock["was_busy"]:
+            status_clock["began"] = now
+            status_clock["last_change"] = now
+            status_clock["observed"] = None
+            # New work clears any error from the previous operation.
+            state.pop("last_error", None)
+            state.pop("last_notice", None)
+        current = (stage_var.get(), detail_var.get(), state.get("detail", ""))
+        if running and current != status_clock["observed"]:
+            status_clock["observed"] = current
+            status_clock["last_change"] = now
+        status_clock["was_busy"] = running
+        try:
+            percent = float(bar.cget("value") or 0)
+        except (tk.TclError, ValueError):
+            percent = 0.0
+        finished = bool((state.get("project") or {}).get("done", {}).get("video"))
+        description = str(detail_var.get() or state.get("detail") or "")[:210]
+        kind, title, extra, background, foreground = auto_work_status(
+            running, finished, error=state.get("last_error") or "",
+            detail=description, elapsed=now - status_clock["began"],
+            silent_for=now - status_clock["last_change"], percent=percent)
+        status_title_var.set(title)
+        status_detail_var.set(extra if running or kind == "error"
+                              else str(state.get("last_notice") or extra)[:280])
+        status_banner.configure(bg=background, highlightbackground=foreground)
+        status_title_label.configure(bg=background, fg=foreground)
+        status_detail_label.configure(bg=background, fg=foreground)
+        root.after(1000, refresh_work_banner)
+
+    root.after(200, refresh_work_banner)
 
     def set_progress(stage_key, fraction, detail=""):
         done_weight = 0
@@ -4371,6 +4518,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             done_weight += weight
         state["detail"] = detail
         ui(detail_var.set, detail)
+
+    def set_manual_progress(label, detail):
+        """A one-shot GPT/manual action must not reset whole-film progress to 20%."""
+        state["detail"] = detail
+        percent = auto_saved_percent(state.get("project"), stages)
+        ui(lambda: (bar.configure(value=percent),
+                    stage_var.set(f"{label} · ทั้งโปรเจกต์ {percent}%"),
+                    detail_var.set(detail)))
+
+    def json_retry_notice(label, attempt, total, reason):
+        """Show recoverable malformed GPT answers in the main Auto status."""
+        check_stop()
+        message = f"GPT {label}: คำตอบ JSON ไม่ถูกต้อง · กำลังลองใหม่ {attempt}/{total}"
+        state["detail"] = message
+        ui(detail_var.set, message)
+        log(f"↻ {message} ({reason[:90]})")
 
     def check_stop():
         if state["stop"]:
@@ -5181,7 +5344,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         timeline = (shared or {}).get("timeline") or (project.get("context") or {}).get("timeline") or []
         if not timeline:
             log("Context ของทีมยังไม่มีเส้นเวลา (กลางวัน/กลางคืนของแต่ละช่วง) — ให้ GPT อ่านทั้งเรื่องแล้วเขียนครั้งเดียว")
-            timeline = timeline_mod.parse(parse_json_reply(with_retries("เส้นเวลาเรื่อง", lambda: gpt_text(timeline_mod.request(full)))))
+            timeline_reply = with_retries("เส้นเวลาเรื่อง", lambda: parse_json_reply(gpt_text(timeline_mod.request(full))))
+            timeline = timeline_mod.parse(timeline_reply)
             if timeline and path:
                 try:
                     if timeline_mod.add_to_sidecar(path, timeline):
@@ -6683,14 +6847,30 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         old = str(scene.get("prompt") or "").strip()
         image = str(scene.get("image") or "")
 
+        def show_json_retry(attempt, total, why):
+            check_stop()
+            log(f"↻ GPT ตอบข้อมูลไม่ตรงรูปแบบ ({why[:100]}) — ลองใหม่ครั้งที่ {attempt}/{total}")
+            set_manual_progress("กำลัง GPT ช่วยแก้",
+                                f"GPT ช่วยแก้ช็อต {index + 1}: คำตอบ JSON ไม่ถูกต้อง · ลองใหม่ {attempt}/{total}")
+
         if image and os.path.isfile(image):
             # The scene already exists: GPT can inspect its framing but is NOT
             # allowed to rewrite any visual content, style, character or story.
-            reply = parse_json_reply(gpt_text(
-                camera_repair_request(scene, anchor, style), image_path=image)) or {}
-            camera = str(reply.get("camera") or "").strip().lower()
-            if camera not in _CAMERA_REPAIR_LABELS:
-                raise RuntimeError("GPT เลือกมุมกล้องไม่ชัดเจน — เก็บพรอมป์และรูปเดิมไว้")
+            camera_request = camera_repair_request(scene, anchor, style)
+
+            def send_camera(attempt):
+                check_stop()
+                strict = ("\n\nครั้งก่อนตอบไม่ตรงรูปแบบ กรุณาตอบ JSON object เท่านั้น "
+                          'เช่น {"camera":"medium_close","reason":"เห็นใบหน้าเล็ก"} '
+                          "ห้ามใส่ข้อความอื่นหรือพรอมป์ใหม่.") if attempt > 1 else ""
+                return gpt_text(camera_request + strict, image_path=image)
+
+            reply = retry_structured_gpt_reply(
+                send_camera, label="มุมกล้อง", attempts=3,
+                valid=lambda obj: str(obj.get("camera") or "").strip().lower()
+                in _CAMERA_REPAIR_LABELS,
+                on_retry=show_json_retry)
+            camera = str(reply["camera"]).strip().lower()
             if not apply_camera_only_refinement(scene, camera):
                 log(f"ฉาก {index + 1}: มุมกล้องเดิมเหมาะแล้ว — ไม่เปลี่ยนพรอมป์หรือสไตล์")
                 return old
@@ -6702,7 +6882,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         # No image was produced: preserve the original button's purpose of
         # repairing rejected prompts, rather than inventing a new visual style.
         ensure_bodies()
-        reply = gpt_text(
+        repair_request = (
             "รูปนี้ยังสร้างไม่ผ่าน จงซ่อมเฉพาะข้อความที่ทำให้ผู้สร้างรูปปฏิเสธ "
             "โดยคงลักษณะภาพยนตร์ สไตล์ โทนสี แสงยุคสมัย องค์ประกอบ ตัวละคร ใบหน้า รูปร่าง ชุด "
             "สถานที่ เวลา เหตุการณ์ ตำแหน่งซ้ายขวา และความต่อเนื่องกับช็อตก่อนหลังเหมือนเดิมทุกอย่าง. "
@@ -6714,9 +6894,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             "หรือหลีกเลี่ยงภาพเด็กในสถานการณ์อันตรายโดยไม่เพิ่มเหตุการณ์ใหม่. "
             "ตอบ JSON เท่านั้น {\"prompt\":\"...\"}.\n"
             f"กฎภาพ/ตัวละครของเรื่อง (ต้องรักษา): {style}\n{anchor}\nprompt เดิม: {old}")
-        new = str((parse_json_reply(reply) or {}).get("prompt") or "").strip()
-        if not new:
-            raise RuntimeError("GPT ไม่ได้ส่ง prompt ใหม่กลับมา")
+        reply = retry_structured_gpt_reply(
+            lambda attempt: gpt_text(repair_request + (
+                '\n\nตอบ JSON object เท่านั้น เช่น {"prompt":"พรอมป์ใหม่ที่รักษาตัวละครและสถานที่เดิม"} '
+                "ไม่ต้องมีคำอธิบาย." if attempt > 1 else "")),
+            label="ซ่อมพรอมป์ภาพ", attempts=3,
+            valid=lambda obj: bool(str(obj.get("prompt") or "").strip()),
+            on_retry=show_json_retry)
+        new = str(reply["prompt"]).strip()
         # Refuse broad rewrites which remove known people or the original location.
         missing_names = [str(name) for name in scene.get("characters") or []
                          if str(name) in old and str(name) not in new]
@@ -6740,6 +6925,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             messagebox.showinfo("เล่าภาพ", "กำลังทำงานอยู่ — รอให้เสร็จ หรือกดหยุดก่อน", parent=page)
             return
         state["busy"], state["stop"] = True, False
+        state.pop("last_error", None)
+        state.pop("last_notice", None)
         for transient in ("motion_planned_only", "motion_text_only", "snapgen_resubmit_confirmed"):
             state.pop(transient, None)
 
@@ -6747,7 +6934,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             done = []
             try:
                 for i in selected:
-                    set_progress("images", 0, f"GPT กำลังตรวจมุมกล้อง/พรอมป์ ฉาก {i + 1}")
+                    set_manual_progress("กำลัง GPT ช่วยแก้",
+                                        f"GPT กำลังตรวจมุมกล้อง/พรอมป์ ฉาก {i + 1}")
                     before = str(project["scenes"][i].get("prompt") or "").strip()
                     updated = refine_scene_prompt(i)
                     if updated != before:
@@ -6755,6 +6943,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         done.append(i)
                     else:
                         log(f"ฉาก {i + 1} ใช้พรอมป์เดิม — ไม่จำเป็นต้องสร้างภาพใหม่")
+                if done:
+                    state["last_notice"] = (
+                        f"GPT แก้พรอมป์ {len(done)} ช็อตแล้ว · กำลังถามยืนยันก่อนสร้างภาพใหม่")
+                else:
+                    state["last_notice"] = "GPT ตรวจแล้ว ไม่จำเป็นต้องสร้างภาพใหม่"
             except Exception as exc:
                 log(f"❌ GPT แก้ prompt ไม่สำเร็จ: {exc}")
             finally:
@@ -6791,16 +6984,24 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         body = {"model": "auto", "temporary_chat": True, "chatgpt_image_intercept": False, "messages": [{
             "role": "user", "content": [{"type": "text", "text": prompt},
                                         {"type": "image_url", "image_url": {"url": contact_sheet_data_url(scenes)}}]}]}
-        request = urllib.request.Request(
-            g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body).encode("utf-8"),
-            headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"}, method="POST")
-        data = queued_bridge(lambda: open_bridge(request))
-        reply = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        parsed = parse_json_reply(str(reply)) or {}
-        try:
-            panels = int(parsed.get("panels") or 0)
-        except (TypeError, ValueError):
-            panels = 0
+        def request_checked_sheet(attempt):
+            check_stop()
+            correction = ("\n\nโปรดตอบ JSON object ที่มี panels เป็นจำนวนแผงภาพที่เห็น "
+                          "และ bad เป็นรายการปัญหาเท่านั้น ห้ามมีข้อความอื่น.") if attempt > 1 else ""
+            body["messages"][0]["content"][0]["text"] = prompt + correction
+            request = urllib.request.Request(
+                g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body).encode("utf-8"),
+                headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"},
+                method="POST")
+            data = queued_bridge(lambda: open_bridge(request))
+            return str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+
+        parsed = retry_structured_gpt_reply(
+            request_checked_sheet, label="ตรวจรูปสตอรี่บอร์ด", attempts=3,
+            valid=lambda result: int(result.get("panels") or 0) > 0,
+            on_retry=lambda n, total, why: json_retry_notice(
+                "ตรวจรูปสตอรี่บอร์ด", n, total, why))
+        panels = int(parsed.get("panels") or 0)
         if panels <= 0:
             # GPT did not see the attached sheet (it once answered "all fine" with no picture attached).
             raise RuntimeError("GPT ไม่เห็นรูปสตอรี่บอร์ดที่แนบ — ไม่นับว่าผ่าน")
@@ -7328,16 +7529,25 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return with_video_audio(prompt, scene)
 
     def gpt_look(text: str, images=()) -> dict:
-        """One question with pictures to GPT in a temporary chat (keeps the story history clean); JSON reply."""
-        content = [{"type": "text", "text": text}] + [
-            {"type": "image_url", "image_url": {"url": url}} for url in images if url]
-        body = {"model": "auto", "temporary_chat": True, "chatgpt_image_intercept": False,
-                "messages": [{"role": "user", "content": content}]}
-        request = urllib.request.Request(
-            g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body).encode("utf-8"),
-            headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"}, method="POST")
-        data = queued_bridge(lambda: open_bridge(request))
-        return parse_json_reply(str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")) or {}
+        """Temporary-chat GPT visual QC, retrying *only completed* invalid JSON replies."""
+        def send(attempt):
+            check_stop()
+            correction = ("\n\nคำตอบก่อนหน้านี้ไม่ใช่ JSON ที่ใช้ได้ "
+                          "ตอบ JSON object ตามรูปแบบที่ขอเท่านั้น ห้ามมีข้อความอื่น.") if attempt > 1 else ""
+            content = [{"type": "text", "text": text + correction}] + [
+                {"type": "image_url", "image_url": {"url": url}} for url in images if url]
+            body = {"model": "auto", "temporary_chat": True, "chatgpt_image_intercept": False,
+                    "messages": [{"role": "user", "content": content}]}
+            request = urllib.request.Request(
+                g["_chatgpt_api_base"]() + "/chat/completions", data=json.dumps(body).encode("utf-8"),
+                headers={"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"},
+                method="POST")
+            data = queued_bridge(lambda: open_bridge(request))
+            return str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+
+        return retry_structured_gpt_reply(
+            send, label="ตรวจคลิป", attempts=3,
+            on_retry=lambda n, total, why: json_retry_notice("ตรวจคลิป", n, total, why))
 
     def review_clip_prompt(scene, index):
         """Checker 1, before credits: a separate GPT reads the whole request + the start frame and passes or fixes it."""
