@@ -3419,6 +3419,88 @@ def file_digest(path) -> str:
     return hashlib.md5(Path(path).read_bytes()).hexdigest()
 
 
+def wait_until_video_decodable(path, timeout_seconds=120):
+    """Wait for an accepted download to become complete before copying or probing.
+
+    A completed cloud task can be reported while the local MP4 is still being
+    written, including its moov/metadata atom. Never treat a zero-byte copy as a
+    completed clip or submit another paid request because of a local file race.
+    """
+    import ai_slow2x
+    source = Path(path)
+    ffmpeg = ai_slow2x.ensure_ffmpeg_tool()
+    deadline = time.monotonic() + timeout_seconds
+    stable_size = 0
+    previous_size = -1
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            size = source.stat().st_size
+            if size > 1024 and size == previous_size:
+                stable_size += 1
+            else:
+                stable_size = 0
+            previous_size = size
+            if stable_size >= 2:
+                ai_slow2x._video_dimensions(ffmpeg, source)
+                return str(source)
+        except (OSError, RuntimeError, ValueError) as exc:
+            last_error = str(exc)
+        time.sleep(1)
+    raise RuntimeError("ไฟล์วิดีโอดาวน์โหลดไม่สมบูรณ์ก่อนประมวลผล: "
+                       + (last_error or f"{source.name} ยังไม่พร้อม"))
+
+
+def video_first_frame_rgb(path):
+    """Decode a paid clip's first frame locally, without another provider call."""
+    import io
+    import subprocess
+    from PIL import Image
+    import ai_slow2x
+    ffmpeg = ai_slow2x.ensure_ffmpeg_tool()
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path),
+         "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+        capture_output=True, timeout=40)
+    if result.returncode or not result.stdout:
+        raise RuntimeError("ถอดเฟรมแรกจากคลิปที่ดาวน์โหลดไม่ได้")
+    with Image.open(io.BytesIO(result.stdout)) as first:
+        return first.convert("RGB")
+
+
+def assert_video_first_frame_not_other_scene(path, index, scenes):
+    """Refuse a paid result that clearly belongs to an adjacent scene.
+
+    Only flag a very strong mismatch; ordinary image-to-video motion and
+    similar adjacent stills must never trigger another automatic paid request.
+    """
+    from PIL import Image, ImageChops, ImageStat
+    own = scenes[index].get("image")
+    if not own or not Path(own).is_file():
+        return
+    neighboring = [(j, scenes[j].get("image")) for j in (index - 1, index + 1)
+                   if 0 <= j < len(scenes) and scenes[j].get("image")
+                   and Path(scenes[j]["image"]).is_file()]
+    if not neighboring:
+        return
+    try:
+        frame = video_first_frame_rgb(path).resize((160, 90), Image.Resampling.BILINEAR)
+        def distance(image_path):
+            with Image.open(image_path) as candidate:
+                still = candidate.convert("RGB").resize((160, 90), Image.Resampling.BILINEAR)
+            return sum(ImageStat.Stat(ImageChops.difference(frame, still)).mean) / 3
+        own_distance = distance(own)
+        closest = min(((distance(image_path), j) for j, image_path in neighboring),
+                      default=(float("inf"), -1))
+    except (OSError, ValueError, RuntimeError):
+        return  # A decoder/QA failure must not create a paid retry.
+    if own_distance > 30 and closest[0] < 18 and own_distance > closest[0] * 2.2:
+        raise RuntimeError(
+            f"คลิปฉาก {index + 1} ดูเหมือนภาพของฉาก {closest[1] + 1} "
+            f"(ต่างจากรูปตัวเอง {own_distance:.1f}, รูปอีกฉาก {closest[0]:.1f}); "
+            "ไฟล์ต้นฉบับยังอยู่ ห้ามส่งสร้างซ้ำอัตโนมัติ")
+
+
 def operator_visual_review_key(scene: dict) -> str:
     """Fingerprint the actual first frame and every motion-relevant field.
 
@@ -3445,11 +3527,20 @@ def operator_visual_review_key(scene: dict) -> str:
 
 def operator_visual_review_valid(scene: dict) -> bool:
     review = scene.get("operator_visual_review") or {}
-    return bool(review.get("reviewed_by") == "ChatGPT AI Operator"
-                and review.get("key")
-                and review["key"] == operator_visual_review_key(scene)
-                and str(scene.get("seen") or "").strip()
-                and str(scene.get("video_prompt") or "").strip())
+    if not (review.get("reviewed_by") == "ChatGPT AI Operator"
+            and review.get("key") and str(scene.get("seen") or "").strip()
+            and str(scene.get("video_prompt") or "").strip()):
+        return False
+    if review["key"] == operator_visual_review_key(scene):
+        return True
+    # Same Grok image-to-video family: a runtime Lower -> Lite selection must not
+    # invalidate a visual first-frame review of the *same* image and motion prompt.
+    # The alternative fingerprint changes ONLY the model; any edited image,
+    # dialogue, scene, timing or motion instruction still invalidates the review.
+    if scene.get("clip_model") == VIDEO_GROK_LITE_MODEL:
+        prior = dict(scene, clip_model=VIDEO_GROK_LOWER_MODEL)
+        return review["key"] == operator_visual_review_key(prior)
+    return False
 
 
 def parse_json_reply(text: str) -> dict:
@@ -8116,6 +8207,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not new_files:
             raise RuntimeError("Slot ทำงานเสร็จแต่ไม่พบไฟล์วิดีโอใหม่")
         newest = max(new_files, key=lambda f: f.stat().st_mtime)  # post-processed version is written last
+        # The provider may mark the download done before the MP4 is fully flushed.
+        # Do not record a 0-byte clip; await a readable, stable local asset instead.
+        wait_until_video_decodable(newest)
+        # A concurrent Slot must not silently attach another shot's paid result.
+        assert_video_first_frame_not_other_scene(newest, index, state["project"]["scenes"])
         clips_dir = Path(state["folder"]) / "clips"
         clips_dir.mkdir(exist_ok=True)
         # A shot made again never overwrites its earlier clips: they move to clips/_สำรอง with the time.

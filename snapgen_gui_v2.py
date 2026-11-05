@@ -2296,6 +2296,10 @@ try:
                     pass
 
         def process():
+            # This is the sole worker for Slow/4K. A parallel video download can
+            # still be writing its MP4 header, so wait for a stable readable file.
+            from snapgen_page_narrate import wait_until_video_decodable
+            wait_until_video_decodable(src)
             current = str(src)
             if mute_enabled:
                 current = _mute_video_stream_copy(current, log_fn=log_fn, enabled=True)
@@ -2322,9 +2326,11 @@ try:
                     raise RuntimeError(f"อ่านความละเอียดก่อนอัปสเกลไม่ได้: {exc}") from exc
                 if max(before) >= 3840 and not slow_enabled:
                     actual_backend[0] = "ข้าม (ไฟล์ต้นฉบับ 4K แล้ว)"
-                current = _auto_upscale_video_1080p(
-                    current, log_fn=log_fn, target_4k=True, upscale_enabled=True, progress=report,
-                )
+                    # Do not upscale a completed 4K video a second time.
+                else:
+                    current = _auto_upscale_video_1080p(
+                        current, log_fn=log_fn, target_4k=True, upscale_enabled=True, progress=report,
+                    )
                 if max(before) < 3840:
                     after = _slow2x_mod._video_dimensions(_slow2x_mod.ensure_ffmpeg_tool(log=log_fn), current)
                     expected = _slow2x_mod._video_4k_size(*before)

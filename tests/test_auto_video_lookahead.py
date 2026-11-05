@@ -166,6 +166,8 @@ def test_real_slot_adapter_download_and_postprocess_flow_is_bounded(tmp_path, mo
     scope.update(video_output_dir=lambda: downloads, run_on_ui=lambda fn: fn(),
                  set_slot_config=lambda *_: None, clip_prompt=lambda _: "approved action",
                  with_retries=lambda _label, fn, **kwargs: fn(),
+                 wait_until_video_decodable=lambda _: None,  # fake fixture is not a real MP4
+                 assert_video_first_frame_not_other_scene=lambda *_: None,
                  time=SimpleNamespace(time=time.time, strftime=time.strftime, sleep=lambda _: time.sleep(0.02)))
     load(scope, "make_clip")
     load(scope, "make_scene_clip")

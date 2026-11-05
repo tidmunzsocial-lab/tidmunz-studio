@@ -144,7 +144,9 @@ def test_download_dispatch_uses_4k_and_does_not_skip_an_old_topaz2x_clip(tmp_pat
     assert calls == [str(src)] and Path(output).stem.endswith("_4K")
 
 
-def test_auto_postprocess_is_queued_without_waiting_for_the_next_clip(tmp_path):
+def test_auto_postprocess_is_queued_without_waiting_for_the_next_clip(tmp_path, monkeypatch):
+    import snapgen_page_narrate as N
+    monkeypatch.setattr(N, "wait_until_video_decodable", lambda path: None)  # fake clip bytes
     source = tmp_path / "downloaded.mp4"
     source.write_bytes(b"source")
     events, logs, progress = [], [], []
