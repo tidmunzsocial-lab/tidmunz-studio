@@ -10329,5 +10329,92 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                   "start": mobile_start, "stop": mobile_stop,
                                   "repair_options": mobile_identity_options,
                                   "repair_identity": mobile_repair_identity}
+    else:
+        # Distinct from "mobile_auto": this controller owns the desktop เล่าภาพ page.
+        # Its callbacks are invoked on Tk's main thread by MobileController.tick().
+        def narrate_mobile_snapshot():
+            project = state.get("project") or {}
+            scenes = project.get("scenes") or []
+            base = export_root() / work_dir_name
+            folders = sorted((p.parent for p in base.glob("*/project.json")),
+                             key=lambda p: p.stat().st_mtime, reverse=True)[:30] if base.is_dir() else []
+            shots = [{"n": i + 1, "text": str(sc.get("text") or "")[:120],
+                      "image": str(sc["image"]) if sc.get("image") and os.path.isfile(str(sc["image"])) else "",
+                      "error": str(sc.get("error") or "")[:150]}
+                     for i, sc in enumerate(scenes[:120])]
+            video = str(project.get("last_video") or "")
+            return {"title": Path(state["folder"]).name if state.get("folder") else "",
+                    "stories": [p.name for p in folders],
+                    "busy": bool(state["busy"]),
+                    "stage": str(stage_var.get()),
+                    "detail": str(detail_var.get())[:280],
+                    "percent": auto_saved_percent(project, stages),
+                    "log": log_box.get("1.0", "end").strip()[-3200:],
+                    "images_done": sum(bool(sc.get("image") and os.path.isfile(str(sc["image"])))
+                                       for sc in scenes),
+                    "scenes_total": len(scenes),
+                    "done": {key: bool((project.get("done") or {}).get(key))
+                             for key, _label, _weight in stages},
+                    "shots": shots,
+                    "video": video if video and os.path.isfile(video) else "",
+                    "has_script": bool(project.get("script")),
+                    "has_audio": bool(project.get("audio")),
+                    "last_error": str(state.get("last_error") or "")[:250]}
+
+        def narrate_mobile_open(name):
+            if state["busy"]:
+                raise ValueError("หน้าเล่าภาพกำลังทำงานอยู่ — ห้ามเปลี่ยนเรื่อง")
+            name = str(name or "").strip()
+            base = (export_root() / work_dir_name).resolve()
+            folder = (base / name).resolve()
+            if not name or folder.parent != base or not (folder / "project.json").is_file():
+                raise ValueError("ไม่พบโปรเจกต์เล่าภาพนี้")
+            if not load_saved_project(folder, quiet=True):
+                raise ValueError("เปิดโปรเจกต์เล่าภาพไม่สำเร็จ")
+            return f"เปิดโปรเจกต์เล่าภาพ {folder.name} แล้ว"
+
+        def narrate_mobile_start(confirmed=False):
+            if confirmed is not True:
+                raise ValueError("ต้องยืนยันว่าอาจมีการสร้างรูปและใช้เครดิตก่อนทำต่อ")
+            if state["busy"]:
+                raise ValueError("เล่าภาพกำลังทำงานอยู่แล้ว")
+            project = state.get("project") or {}
+            if not project or not project.get("script") or not project.get("audio"):
+                raise ValueError("โปรเจกต์ต้องมีไฟล์บทและไฟล์เสียงก่อน")
+            if not project.get("style_chosen") and not any(sc.get("image") for sc in project.get("scenes") or []):
+                raise ValueError("ตั้งค่าสไตล์ครั้งแรกในโปรแกรมบนคอมก่อน เพื่อไม่ให้มีหน้าต่างถามค้าง")
+            if (project.get("scenes") and project.get("aspect")
+                    and project["aspect"] != desired_aspect()):
+                raise ValueError("สัดส่วนเปลี่ยน — ตรวจและยืนยันบนโปรแกรมคอมก่อน")
+            if (project.get("scenes") and any(sc.get("image") for sc in project["scenes"])
+                    and (project.get("style_mode") or "ปกติ") != style_var.get()):
+                raise ValueError("สไตล์เปลี่ยน — ยืนยันบนคอมก่อนทำต่อ")
+            if audio_changed():
+                raise ValueError("ไฟล์เสียงมีการเปลี่ยนแปลง — ตรวจบนคอมก่อนทำต่อ")
+            if (project.get("done", {}).get("plan") and
+                    int(project.get("image_count") or 0) != desired_count()):
+                raise ValueError("จำนวนรูปเปลี่ยน — ตรวจและยืนยันการวางแผนใหม่บนคอมก่อน")
+            auto = runtime.get("mobile_auto") or {}
+            if callable(auto.get("snapshot")) and auto["snapshot"]().get("busy"):
+                raise ValueError("วิดีโอออโต้กำลังทำงานอยู่ — ยังไม่เริ่มเล่าภาพซ้อน")
+            state["auto_yes"] = True  # web user explicitly confirmed this single run
+            try:
+                start_pipeline()
+            finally:
+                if not state["busy"]:
+                    state.pop("auto_yes", None)
+            if not state["busy"]:
+                raise ValueError("ยังไม่เริ่มงาน โปรดดู Log หน้าเล่าภาพ")
+            return "สั่งทำต่อหน้าเล่าภาพแล้ว — ตรวจสถานะและ Log ก่อนสั่งซ้ำ"
+
+        def narrate_mobile_stop():
+            if not state["busy"]:
+                return "เล่าภาพไม่ได้กำลังทำงาน"
+            request_stop()
+            return "รับคำสั่งหยุดแล้ว — หยุดหลังขั้นตอนย่อยที่กำลังทำ"
+
+        runtime["mobile_narrate"] = {"snapshot": narrate_mobile_snapshot,
+                                     "open": narrate_mobile_open,
+                                     "start": narrate_mobile_start, "stop": narrate_mobile_stop}
     return {"open_project": open_project, "refresh_clip_info": refresh_clip_info, "busy": lambda: state["busy"],
             "stage_var": stage_var}

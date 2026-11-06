@@ -8,7 +8,7 @@ try { drafts = JSON.parse(localStorage.getItem('snapgen-mobile-drafts-v2') || '{
 function keepDrafts(){try{localStorage.setItem('snapgen-mobile-drafts-v2',JSON.stringify(drafts));}catch(_){}}
 function keepCollapsedSlots(){try{localStorage.setItem('snapgen-mobile-collapsed-slots',JSON.stringify([...collapsedSlots]));}catch(_){}}
 function notify(message,error=false){$('toast').textContent=message;$('toast').classList.toggle('error',error);$('toast').hidden=false;clearTimeout(notify.timer);notify.timer=setTimeout(()=>$('toast').hidden=true,error?10000:6500);}
-function tab(name){currentTab=['video','image','storyface','story','prompt'].includes(name)?name:'video';$('video-page').hidden=currentTab!=='video';$('image-page').hidden=currentTab!=='image';$('storyface-page').hidden=currentTab!=='storyface';$('story-page').hidden=currentTab!=='story';$('prompt-page').hidden=currentTab!=='prompt';document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===currentTab));try{localStorage.setItem('snapgen-mobile-tab',currentTab);}catch(_){}}
+function tab(name){currentTab=['video','narrate','image','storyface','story','prompt'].includes(name)?name:'video';$('video-page').hidden=currentTab!=='video';$('narrate-page').hidden=currentTab!=='narrate';$('image-page').hidden=currentTab!=='image';$('storyface-page').hidden=currentTab!=='storyface';$('story-page').hidden=currentTab!=='story';$('prompt-page').hidden=currentTab!=='prompt';document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===currentTab));try{localStorage.setItem('snapgen-mobile-tab',currentTab);}catch(_){}}
 function options(select,values,selected){const rows=values.map(v=>typeof v==='object'?v:{value:String(v),label:String(v)});if(selected && !rows.some(v=>v.value===selected))rows.unshift({value:selected,label:selected});const html=rows.map(v=>`<option value="${esc(v.value)}">${esc(v.label)}</option>`).join('');if(select.innerHTML!==html)select.innerHTML=html;select.value=selected??rows[0]?.value??'';}
 function imgData(){return {...state.image,...drafts.image};}
 function slotData(i){const base=state.slots[i];return {...base,...drafts['slot'+i],config:{...base.config,...drafts['slot'+i]?.config}};}
@@ -119,7 +119,7 @@ function renderBusy(){if(!state)return;document.querySelectorAll('main button,ma
  if(el.id==='auto-button'&&state.image.auto?.running)busy=flight||!state.ready;
  el.disabled=!!busy;
  });}
-async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error();state=await r.json();$('offline').hidden=!!state.ready;$('connection').textContent=state.ready?'● เชื่อมต่อโปรแกรมแล้ว':'○ รอโปรแกรม';render();renderAuto();}catch(_){if(state)state.ready=false;$('offline').hidden=false;$('connection').textContent='○ ขาดการเชื่อมต่อ';renderBusy();}}
+async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error();state=await r.json();$('offline').hidden=!!state.ready;$('connection').textContent=state.ready?'● เชื่อมต่อโปรแกรมแล้ว':'○ รอโปรแกรม';render();renderAuto();renderNarrate();}catch(_){if(state)state.ready=false;$('offline').hidden=false;$('connection').textContent='○ ขาดการเชื่อมต่อ';renderBusy();}}
 function dialog(title,html,context){dialogContext=context;$('dialog-title').textContent=title;$('dialog-body').innerHTML=html;if(!$('dialog').open)$('dialog').showModal();}
 function autoRepairReferenceChanged(){const ctx=dialogContext;if(!ctx||ctx.kind!=='auto-repair')return;const c=ctx.options.characters.find(x=>x.name===$('auto-identity-character').value);const refs=[...(c?.references||[]),...(ctx.uploadedReferences||[])];const ref=refs.find(x=>x.id===$('auto-identity-reference').value);$('auto-identity-ref-preview').innerHTML=ref?.url?`<a href="${ref.url}" target="_blank" rel="noopener"><img src="${ref.url}?thumb=1" loading="lazy" alt="ภาพเรฟที่เลือก"></a><span>${esc(ref.name||ref.label||'เรฟ')}</span>`:'<p class="preview-empty">เลือกรูปเรฟเพื่อดูตัวอย่าง</p>';}
 function autoRepairCharacterChanged(){const ctx=dialogContext;if(!ctx||ctx.kind!=='auto-repair')return;const c=ctx.options.characters.find(x=>x.name===$('auto-identity-character').value);const refs=[...(c?.references||[]),...(ctx.uploadedReferences||[])];options($('auto-identity-reference'),refs.map(r=>({value:r.id,label:r.label||r.name})),refs[0]?.id||'');$('auto-identity-context').textContent=c?.context||'ไม่มี Context';$('auto-identity-notes').value=c?.notes||'';autoRepairReferenceChanged();}
@@ -158,6 +158,17 @@ document.addEventListener('click',async e=>{const b=e.target.closest('button,[da
  if(b.dataset.autoRepair!==undefined){const shot=Number(b.dataset.autoRepair);const opts=await command('auto_repair_options',{shot},null,true);if(!opts?.characters?.length)throw Error('ช็อตนี้ไม่มีตัวละครใน Context ให้แก้เรฟ');dialog('แก้ให้ตรงเรฟ · ช็อต '+shot,autoRepairDialogHtml(opts),{kind:'auto-repair',shot,options:opts,uploadedReferences:[]});autoRepairCharacterChanged();return;}
  if(b.dataset.autoRepairSubmit!==undefined){const opts=dialogContext.options;const c=opts.characters.find(x=>x.name===$('auto-identity-character').value);const reference=$('auto-identity-reference').value;if(!reference){notify('เลือกเรฟจากคอมหรืออัปโหลดเรฟจากมือถือก่อน',true);return;}if($('auto-identity-provider').value==='snapgen'&&opts.snapgen_credit_consent_required&&!$('auto-identity-consent').checked){notify('อ่านคำเตือนเครดิตแล้วติ๊กยอมรับก่อนใช้ SnapGen API',true);return;}if(await command('auto_identity_repair',{shot:dialogContext.shot,character:c?.name,reference_id:reference,notes:$('auto-identity-notes').value,provider:$('auto-identity-provider').value,accept_snapgen_credit:$('auto-identity-consent')?.checked||false}))$('dialog').close();return;}
  if(b.dataset.autoReload!==undefined){const img=document.querySelector(`img[data-auto-image="${b.dataset.autoReload}"]`);if(img){img.dataset.retry='0';img.src=img.dataset.src+'&retry='+Date.now();b.hidden=true;}return;}
+ if(b.dataset.narrate){
+   const action=b.dataset.narrate;
+   if(action==='start'){
+     if(!window.confirm('เริ่ม / ทำต่อเล่าภาพเรื่อง '+(state.narrate?.title||'ที่เปิดอยู่')+'? อาจสร้างรูปและใช้เครดิตเพิ่มเติม โปรดตรวจสอบงานที่ค้างก่อนกดยืนยัน'))return;
+     await command('narrate_start',{confirm_paid:true});
+   }else if(action==='open'){
+     if(!$('narrate-story').value)throw Error('เลือกโปรเจกต์เล่าภาพก่อน');
+     await command('narrate_open',{name:$('narrate-story').value});
+   }else if(action==='stop'){await command('narrate_stop');}
+   return;
+ }
  if(b.dataset.auto){await command('auto_'+b.dataset.auto,b.dataset.auto==='open'?{name:$('auto-story').value}:{});return;}
  if(b.dataset.action){const payload=b.dataset.action.startsWith('video_')?videoFields(i):b.dataset.action.startsWith('story_face_')?storyFaceFields():imageFields();await command(b.dataset.action,payload,Number.isNaN(i)?null:i);return;}
  if(b.dataset.camera){dirtyImage('camera',b.dataset.camera);render();return;}
@@ -222,3 +233,48 @@ function renderAuto(){const a=state&&state.auto;if(!a||!$('auto-shots'))return;
  const shots=a.shots||[];$('auto-count').textContent=shots.length?`${shots.length} ช็อต · คลิปเสร็จ ${shots.filter(s=>s.clip).length}`:'';
  const key=JSON.stringify(shots.map(s=>[s.n,s.image?.id,s.clip,s.review,s.error]));if(key===autoShotsKey)return;autoShotsKey=key;
  $('auto-shots').innerHTML=shots.length?shots.map(s=>`<div class="media-card shot-card">${s.image?`<div class="auto-image-wrap"><a href="${s.image.url}" target="_blank" rel="noopener"><img class="auto-shot-image" data-auto-image="${s.image.id}" data-src="${s.image.url}?thumb=1" src="${s.image.url}?thumb=1" loading="lazy" decoding="async" alt="ช็อต ${s.n}"></a><button class="auto-image-reload" data-auto-reload="${s.image.id}" hidden>↻ โหลดรูปใหม่</button></div>`:'<div class="preview-empty">ยังไม่มีรูป</div>'}<div class="name"><span class="tag">ช็อต ${s.n} · ${s.start}s</span>${s.clip?'<span class="tag ok">คลิป ✓</span>':''}${s.error?'<span class="tag bad">มีปัญหา</span>':''}${esc(s.text)}</div><div class="media-actions"><button class="purple" data-auto-repair="${s.n}" ${a.busy||!s.image?'disabled':''}>แก้ให้ตรงเรฟ</button></div></div>`).join(''):'<p class="empty">เปิดเรื่องแล้วกดเริ่ม ช็อตจะขึ้นที่นี่</p>';}
+
+let narrateShotsKey='',narrateVideoKey='';
+function renderNarrate(){
+ const n=state&&state.narrate;
+ const buttons=document.querySelectorAll('[data-narrate]');
+ if(!n){
+   $('narrate-title').textContent='ยังไม่พร้อม';
+   $('narrate-stage').textContent='ต้องเปิดโปรแกรม Tidmunz Studio เวอร์ชันที่รองรับหน้าเล่าภาพ';
+   $('narrate-detail').textContent='เว็บนี้ยังไม่เชื่อมกับคำสั่งหน้าเล่าภาพ';
+   buttons.forEach(b=>b.disabled=true);
+   return;
+ }
+ $('narrate-title').textContent=n.title||'ยังไม่ได้เปิดเรื่อง';
+ const sel=$('narrate-story');
+ const html=(n.stories||[]).map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
+ if(sel.dataset.html!==html){
+   sel.innerHTML=html;sel.dataset.html=html;
+   sel.value=(n.stories||[]).includes(n.title)?n.title:(n.stories||[])[0]||'';
+ }
+ $('narrate-bar').style.width=Math.max(0,Math.min(100,Number(n.percent)||0))+'%';
+ $('narrate-stage').textContent=(n.busy?'● ':'')+(n.stage||'พร้อม');
+ $('narrate-detail').textContent=n.last_error?('⚠ '+n.last_error+' · '+(n.detail||'')):(n.detail||'');
+ $('narrate-count').textContent=`${n.images_done||0}/${n.scenes_total||0} รูปฉาก · ${Math.round(Number(n.percent)||0)}%`;
+ buttons.forEach(b=>{
+   const op=b.dataset.narrate;
+   b.disabled=flight||!state.ready||(n.busy&&op!=='stop')||(!n.busy&&op==='stop')
+     ||(op==='start'&&(!n.title||!n.has_script||!n.has_audio||state.auto?.busy))
+     ||(op==='open'&&!(n.stories||[]).length);
+ });
+ setLog('narrate-log',n.log||'ยังไม่มี Log');
+ const video=n.video;
+ if(narrateVideoKey!==(video?.id||'')){
+   narrateVideoKey=video?.id||'';
+   $('narrate-video').innerHTML=video?`<video controls playsinline preload="metadata" src="${video.url}"></video><div class="media-actions"><a href="${video.url}" target="_blank" rel="noopener">เปิดวิดีโอ</a></div>`:'';
+ }
+ const shots=n.shots||[];
+ const key=JSON.stringify(shots.map(s=>[s.n,s.image?.id,s.error]));
+ if(narrateShotsKey!==key){
+   narrateShotsKey=key;
+   $('narrate-shots').innerHTML=shots.length?shots.map(s=>`<article class="media-card">
+   ${s.image?`<a href="${s.image.url}" target="_blank" rel="noopener"><img src="${s.image.url}?thumb=1" loading="lazy" alt="ภาพฉาก ${s.n}"></a>`:'<div class="preview-empty">ยังไม่มีรูป</div>'}
+   <div class="name"><b>ฉาก ${s.n}</b> ${esc(s.text||'')}${s.error?`<span class="tag bad"> · ${esc(s.error)}</span>`:''}</div>
+   </article>`).join(''):'<p class="empty">ยังไม่มีแผนฉากในโปรเจกต์นี้</p>';
+ }
+}

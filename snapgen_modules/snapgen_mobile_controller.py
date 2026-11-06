@@ -630,6 +630,7 @@ class MobileController:
                   "flags": flags, "prompts": prompts, "videos": self.videos,
                   "story": self._story_document(), "prompt_split": split_snapshot,
                   "story_face": story_face, "auto": self._auto_snapshot(),
+                  "narrate": self._narrate_snapshot(),
                   "credit": credit, "ready": True}
         with self.lock:
             self.snapshot = result
@@ -645,6 +646,23 @@ class MobileController:
         except Exception as exc:
             return {"title": "", "stage": "อ่านหน้าออโต้ไม่สำเร็จ", "log": safe_log(str(exc)), "shots": [], "stories": []}
         data["log"] = safe_log(data.get("log", ""))
+        data["video"] = self.register_media(data["video"]) if data.get("video") else None
+        for shot in data.get("shots") or []:
+            shot["image"] = self.register_media(shot["image"]) if shot.get("image") else None
+        return data
+
+    def _narrate_snapshot(self):
+        """Real เล่าภาพ status; never fall back to the unrelated Auto page."""
+        narrate = self.g.get("mobile_narrate") or {}
+        if not callable(narrate.get("snapshot")):
+            return None
+        try:
+            data = dict(narrate["snapshot"]())
+        except Exception as exc:
+            return {"title": "", "busy": False, "stage": "อ่านหน้าเล่าภาพไม่สำเร็จ",
+                    "log": safe_log(str(exc)), "shots": [], "stories": []}
+        data["log"] = safe_log(data.get("log", ""))
+        data["last_error"] = safe_log(data.get("last_error", ""))
         data["video"] = self.register_media(data["video"]) if data.get("video") else None
         for shot in data.get("shots") or []:
             shot["image"] = self.register_media(shot["image"]) if shot.get("image") else None
@@ -714,6 +732,17 @@ class MobileController:
                 label = face["generate"](character_key, age)
                 return f"เริ่มสร้างหน้าตรง มุมข้าง และ Body ของ {label} แล้ว"
             raise ValueError("ไม่พบคำสั่งหน้านิทาน")
+        if str(action).startswith("narrate_"):
+            narrate = g.get("mobile_narrate") or {}
+            if not narrate:
+                raise ValueError("หน้าเล่าภาพยังไม่พร้อม กรุณาเปิดโปรแกรมเวอร์ชันใหม่")
+            if action == "narrate_open":
+                return narrate["open"](data.get("name"))
+            if action == "narrate_start":
+                return narrate["start"](confirmed=data.get("confirm_paid") is True)
+            if action == "narrate_stop":
+                return narrate["stop"]()
+            raise ValueError("ไม่พบคำสั่งหน้าเล่าภาพ")
         if str(action).startswith("auto_"):
             auto = g.get("mobile_auto") or {}
             if not auto:
