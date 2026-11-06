@@ -142,6 +142,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         return ref_story_folder(g.get("EXPORT_REF", export_ref_dir), _ref_done_story())
 
     g["ref_folder"] = _ref_output_folder
+    # Programmatic Auto always names its Ref folder after the selected
+    # Prompt-Ref source, never the separate Ref page's possibly stale chat.
+    g["ref_folder_for_auto"] = lambda: ref_story_folder(
+        g.get("EXPORT_REF", export_ref_dir), _prompt_ref_story_title())
     ref_page = tk.Frame(root, bg="#FAFAF7")
     g["ref_page"] = ref_page
     ref_name_var = tk.StringVar(value="")
@@ -2101,62 +2105,97 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         except Exception:
             return ""
 
-    def _ref_done_load():
-        for path in (_ref_output_folder() / "_ref_done.json", ref_done_path):
+    def _ref_done_load(story_title=None, folder=None):
+        title = str(story_title or _ref_done_story())
+        output = Path(folder) if folder is not None else _ref_output_folder()
+        for path in (output / "_ref_done.json", ref_done_path):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("story") == _ref_done_story() and isinstance(data.get("items"), dict):
+                if data.get("story") == title and isinstance(data.get("items"), dict):
                     return data["items"]
             except (OSError, ValueError, AttributeError):
                 pass
         return {}
 
-    def _ref_already_done(kind, name):
-        path = _ref_done_load().get(f"{kind}:{name}")
+    def _ref_already_done(kind, name, story_title=None, folder=None):
+        path = _ref_done_load(story_title, folder).get(f"{kind}:{name}")
         return bool(path) and Path(path).is_file()
 
-    def _ref_mark_done(kind, name, path):
-        items = _ref_done_load()
+    def _ref_mark_done(kind, name, path, story_title=None, folder=None):
+        title = str(story_title or _ref_done_story())
+        output = Path(folder) if folder is not None else _ref_output_folder()
+        items = _ref_done_load(title, output)
         items[f"{kind}:{name}"] = str(path)
         try:
-            for path in (_ref_output_folder() / "_ref_done.json", ref_done_path):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps({"story": _ref_done_story(), "items": items},
-                                           ensure_ascii=False, indent=1), encoding="utf-8")
+            for ledger in (output / "_ref_done.json", ref_done_path):
+                ledger.parent.mkdir(parents=True, exist_ok=True)
+                ledger.write_text(json.dumps({"story": title, "items": items},
+                                             ensure_ascii=False, indent=1), encoding="utf-8")
         except OSError:
             pass
 
-    def _run_ref_jobs(names, auto=False, ref_image=None, entity_kind="", _auto_history_tried=False):
+    def _run_ref_jobs(names, auto=False, ref_image=None, entity_kind="", _auto_history_tried=False,
+                      automatic_provider=None, on_item=None, on_complete=None):
+        """Auto may use this same Ref engine without opening a provider dialog.
+
+        on_complete(error) always resolves a programmatic run; missing outputs
+        and provider errors must not mark the Auto stage as completed.
+        """
         names = [n.strip() for n in names if n and n.strip()]
         if not names:
             _ref_log("ไม่มีชื่อสำหรับสร้าง Ref")
+            if on_complete:
+                on_complete(None)
             return
         if ref_job_running[0]:
-            _ref_log("กำลังสร้างอยู่ — รอให้งานเดิมเสร็จก่อน")
+            error = RuntimeError("งาน Ref อีกชุดกำลังทำงานอยู่")
+            _ref_log(str(error))
+            if on_complete:
+                on_complete(error)
             return
         if auto and entity_kind in ("character", "location"):
-            provider = _choose_auto_ref_provider()
+            if automatic_provider is None:
+                provider = _choose_auto_ref_provider()
+            elif automatic_provider in ("gpt_web", "snapgen"):
+                provider = automatic_provider
+                ref_provider_var.set(ref_provider_labels[provider])
+            else:
+                raise ValueError("ไม่รองรับผู้ให้บริการ Ref นี้")
             if provider is None:
                 _ref_log("ยกเลิก Auto Ref — ยังไม่ส่งงาน")
+                if on_complete:
+                    on_complete(RuntimeError("ยกเลิกการเลือกผู้ให้บริการ Ref"))
                 return
         options = _ref_request_options()
         if options is None:
+            if on_complete:
+                on_complete(RuntimeError("Ref ไม่มีข้อมูลผู้ให้บริการที่พร้อมใช้งาน"))
             return
+        auto_story = _prompt_ref_story_title() if automatic_provider is not None else None
+        output_folder = (
+            ref_story_folder(g.get("EXPORT_REF", export_ref_dir), auto_story)
+            if auto_story else _ref_output_folder())
         if auto and entity_kind in ("character", "location"):
-            # Resume: Refs already made for this story are kept; only the missing ones are made.
-            todo = [n for n in names if not _ref_already_done(entity_kind, n)]
+            # Resume only this story's ledger; stale Ref-page chat names are ignored.
+            todo = [n for n in names
+                    if not _ref_already_done(entity_kind, n, auto_story, output_folder)]
             if len(todo) < len(names):
                 _ref_log(f"[auto-ref] ทำไว้แล้ว {len(names) - len(todo)} จาก {len(names)} — ข้าม และทำต่อที่เหลือ "
                          "(กด 🧹 ล้างรูป ถ้าอยากทำใหม่ทั้งหมด)")
             if not todo:
                 _ref_log("[auto-ref] ครบทุกรายการแล้ว ไม่มีอะไรต้องสร้างเพิ่ม")
+                if on_complete:
+                    on_complete(None)
                 return
             names = todo
-        isolated_character_auto = bool(auto and entity_kind == "character")
+        # Single-page Auto has all facts in the selected story's Context; do
+        # not reuse Ref's separate previous-story chat, even for locations.
+        isolated_character_auto = bool(auto and (
+            entity_kind == "character" or automatic_provider is not None))
         has_ref_story = g.get("has_ref_story_history")
         current_ref_title = g.get("get_ref_story_title")
         valid_ref_story = bool(has_ref_story()) if callable(has_ref_story) else False
-        title = current_ref_title() if callable(current_ref_title) else ""
+        title = auto_story or (current_ref_title() if callable(current_ref_title) else "")
         if options["provider"] == "gpt_web" and not isolated_character_auto and (not valid_ref_story or not title):
             ref_story_title_var.set("")
             ensure_history = g.get("ensure_main_story_history")
@@ -2169,24 +2208,31 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     try:
                         ensure_history()
                         root.after(0, lambda: (ref_job_running.__setitem__(0, False), _run_ref_jobs(
-                            names, auto=auto, ref_image=ref_image, entity_kind=entity_kind, _auto_history_tried=True)))
+                            names, auto=auto, ref_image=ref_image, entity_kind=entity_kind,
+                            _auto_history_tried=True, automatic_provider=automatic_provider,
+                            on_item=on_item, on_complete=on_complete)))
                     except Exception as exc:
                         message = str(exc)[:400]
+                        if callable(on_complete):
+                            on_complete(exc)
                         root.after(0, lambda: (ref_job_running.__setitem__(0, False), _ref_log(
                             "[บทเรื่อง] สร้างประวัติเรื่องอัตโนมัติไม่สำเร็จ: " + message +
                             " — ตรวจว่ามีไฟล์บทและ Context ของเรื่องนี้ใน Prompt-Ref")))
                 threading.Thread(target=_start_history, daemon=True).start()
                 return
             _ref_log("[บทเรื่อง] ยังไม่มีประวัติเรื่องหลัก — เริ่มเรื่องจาก Prompt-Ref ก่อน")
+            if callable(on_complete):
+                on_complete(RuntimeError("ยังไม่มีประวัติเรื่องหลักจาก Prompt-Ref"))
             return
         ref_story_title_var.set(title)
         if options["provider"] == "gpt_web":
             ok_bridge, bridge_msg = _ref_bridge_ready()
             _ref_log(bridge_msg)
             if not ok_bridge:
+                if callable(on_complete):
+                    on_complete(RuntimeError(bridge_msg))
                 return
         selected_story_type = _current_ref_story_type_id()
-        output_folder = _ref_output_folder()
         output_folder.mkdir(parents=True, exist_ok=True)
         _ref_log(f"[ref] โฟลเดอร์เรื่อง: {output_folder}")
         # Auto buttons are Context-driven by definition.  A single manual Ref
@@ -2199,6 +2245,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         else:
             root.after(0, lambda: _set_ref_action_buttons_running(True, auto=False))
         def worker():
+            failure = None
             try:
                 lock = globals().get("_bridge_queue_lock")
                 def run_one(idx, name):
@@ -2217,19 +2264,28 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     location_design = None
                     ghost_design = None
                     if context_kind == "location" or entity_kind == "location":
+                        # One-page Auto must not query a previous Ref history for
+                        # missing designs: require a valid current-story location Bible.
+                        if (automatic_provider is not None and
+                                not (context_entity.get("visual_description") or
+                                     context_entity.get("views"))):
+                            raise RuntimeError(f"Context ของสถานที่ {name} ยังไม่มีแบบภาพ — ไม่ใช้ประวัติของเรื่องอื่น")
                         _ref_log(f"[location-lock] กำลังอ่าน Context และออกแบบ: {name}")
                         location_design, reused = _design_location_via_context(name)
                         _ref_log(
                             f"[location-lock] {'ใช้แบบที่ล็อกไว้' if reused else 'สร้างและบันทึกแบบใหม่'}: {name}"
                         )
                     elif context_kind in ("character", "manual") and _is_ghost_character(name, context_entity):
-                        _ref_log(f"[ghost-research] กำลังวิเคราะห์ชนิดผีและคติที่เกี่ยวข้อง: {name}")
-                        ghost_design, reused = _analyze_ghost_character(name, context_entity, _film)
-                        ghost_type = str(ghost_design.get("ghost_type") or "ผี").strip()
-                        _ref_log(
-                            f"[ghost-research] {'ใช้ Ghost Bible เดิม' if reused else 'วิเคราะห์และบันทึก Ghost Bible แล้ว'}: "
-                            f"{name} — {ghost_type}"
-                        )
+                        if automatic_provider is None:
+                            _ref_log(f"[ghost-research] กำลังวิเคราะห์ชนิดผีและคติที่เกี่ยวข้อง: {name}")
+                            ghost_design, reused = _analyze_ghost_character(name, context_entity, _film)
+                            ghost_type = str(ghost_design.get("ghost_type") or "ผี").strip()
+                            _ref_log(
+                                f"[ghost-research] {'ใช้ Ghost Bible เดิม' if reused else 'วิเคราะห์และบันทึก Ghost Bible แล้ว'}: "
+                                f"{name} — {ghost_type}"
+                            )
+                        else:
+                            _ref_log(f"[ghost-research] ใช้ลักษณะผีจาก Context ของเรื่องนี้โดยตรง: {name}")
                     prompt = _build_ref_prompt(
                         name,
                         entity_kind=entity_kind or context_kind,
@@ -2248,7 +2304,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     else:
                         _ref_log(f"[context] พบเพียงชื่อ {name} — เติมเฉพาะรายละเอียดที่ Context ไม่ระบุ")
                     refine = g.get("_refine_prompt_via_ai") or globals().get("_refine_prompt_via_ai")
-                    if options["provider"] == "gpt_web" and callable(refine) and ghost_design is None:
+                    if (automatic_provider is None and options["provider"] == "gpt_web"
+                            and callable(refine) and ghost_design is None):
                         _ref_log(f"[refine] ส่ง GPT แปลง prompt Ref: {name}")
                         # Select details are already embedded in `prompt`.
                         # Never append the full story context here.
@@ -2277,8 +2334,13 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         "aspect_ratio":"1:1", "history_and_training_disabled":False,
                     }
                     payload.update(_ref_auto_history_payload(auto, entity_kind or context_kind))
+                    if automatic_provider is not None:
+                        # Programmatic Auto never appends Ref images to an old
+                        # story's Ref chat. The prompt carries same-story Context.
+                        payload.pop("_use_ref_story_history", None)
+                        payload["_temporary_chat"] = True
                     if isolated_character_auto and options["provider"] == "gpt_web":
-                        _ref_log(f"[auto-ref] แยก ChatGPT history สำหรับตัวละคร {name}; ส่งทีละตัว")
+                        _ref_log(f"[auto-ref] แยก ChatGPT history สำหรับเรฟ {name}; ส่งทีละตัว")
                     if ref_image and os.path.exists(ref_image):
                         with open(ref_image, "rb") as _f:
                             import base64 as _b64
@@ -2290,7 +2352,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     out = _normalize_ref_output(out, name)
                     out = _ref_plain_file(out, file_hint, output_dir=output_folder)
                     if auto and entity_kind in ("character", "location"):
-                        _ref_mark_done(entity_kind, name, out)
+                        _ref_mark_done(entity_kind, name, out, auto_story, output_folder)
+                    if callable(on_item):
+                        on_item(name, idx, len(names), str(out))
                     root.after(0, lambda out=out, ghost=bool(ghost_design): (
                         _ref_log(f"✓ {out}"), _ref_gallery_add(out, True, is_ghost=ghost), _notify_done()
                     ))
@@ -2312,6 +2376,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         send_type(selected_story_type, log_fn=_ref_log)
                     run_all()
             except Exception as e:
+                failure = e
                 root.after(0, lambda e=e: _ref_log(f"ERROR: {e}"))
             finally:
                 if auto:
@@ -2319,6 +2384,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     root.after(0, lambda: _set_auto_ref_button_running(False))
                 else:
                     root.after(0, lambda: _set_ref_action_buttons_running(False, auto=False))
+                if callable(on_complete):
+                    on_complete(failure)
         threading.Thread(target=worker, daemon=True).start()
     g["_run_ref_jobs"] = _run_ref_jobs
     

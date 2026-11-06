@@ -7,6 +7,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# Configure per-monitor DPI BEFORE any recovered bytecode can create Tk's
+# default root. Otherwise Windows bitmap-scales 96-DPI UI on 125%+ monitors.
+from snapgen_modules.snapgen_dpi import enable_high_dpi as _studio_enable_high_dpi
+_STUDIO_DPI_MODE = _studio_enable_high_dpi()
+
 BASE_ROOT = Path(__file__).resolve().parent
 
 # Earliest possible crash capture, before venv handoff, folder migration,
@@ -17137,6 +17142,13 @@ if root:
         import traceback; traceback.print_exc()
 
     _install_ref_mode()
+    # Diagnose UI stalls while preserving the original Tk event-loop flow.
+    # A passive monitor records only stack locations when Tk stops responding.
+    try:
+        from snapgen_modules.snapgen_ui_monitor import install as _install_ui_monitor
+        _install_ui_monitor(g.get("root") or root, BASE / "logs" / "ui_stalls.log")
+    except Exception as _ui_monitor_error:
+        print(f"[SnapGen] UI monitor unavailable: {_ui_monitor_error}")
     _rewire_prompt_buttons(root)
     _remove_old_ai_provider_widgets(root)
     _remove_unused_buttons(root)

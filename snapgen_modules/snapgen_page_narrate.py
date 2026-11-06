@@ -848,6 +848,20 @@ STAGES = (
 )
 # Slot 2 auto mode: the same pipeline, plus one AI video clip per scene.
 VIDEO_STAGES = (
+    ("analysis", "วิเคราะห์บท", 2),
+    ("context", "สร้าง Context", 5),
+    ("ref_characters", "สร้างตัวละคร", 8),
+    ("transcribe", "ฟังเสียง", 6),
+    ("plan", "วางแผนฉาก", 5),
+    ("storyboard", "สตอรี่ชีต", 5),
+    ("images", "สร้างรูปฉาก", 19),
+    ("motion", "พรอมต์วิดีโอ", 5),
+    ("clips", "สร้างคลิปวิดีโอ", 37),
+    ("video", "ตัดต่อ", 8),
+)
+# Preserve the original visual progress scale for existing unfinished films.
+# New one-page runs explicitly use the expanded stage scale.
+LEGACY_VIDEO_STAGES = (
     ("context", "วิเคราะห์บท", 4),
     ("transcribe", "ฟังเสียง", 6),
     ("plan", "วางแผนฉาก", 5),
@@ -1461,6 +1475,19 @@ def match_reference_files(text: str, folder) -> list:
             found.append((stem.strip(), os.path.join(folder, name)))
     found.sort(key=lambda item: -len(item[0]))
     return found
+
+
+def references_from_story_folder(candidates, folder):
+    """Keep only Ref images physically inside the current story's selected folder.
+
+    The Image AI page can also have manually attached images from a different
+    story; video Auto must never silently include those in its generated shots.
+    """
+    if not folder or not Path(folder).is_dir():
+        return []
+    parent = Path(folder).resolve()
+    return [(name, path) for name, path in candidates
+            if Path(path).is_file() and Path(path).resolve().parent == parent]
 
 
 def reference_character_name(stem: str) -> str:
@@ -3565,16 +3592,21 @@ def clip_ambience_selected(scene, index):
 
 def parse_json_reply(text: str) -> dict:
     text = str(text or "").strip()
-    for candidate in [text] + re.findall(r"```(?:json)?\s*([\s\S]*?)```", text):
+    # ChatGPT may wrap code as <CodeBlock language="json" editable={true}>…</CodeBlock>.
+    clean = re.sub(r"</?CodeBlock\b[^>]*>", "", text).strip()
+    decoder = json.JSONDecoder()
+    for candidate in [clean] + re.findall(r"```(?:json)?\s*([\s\S]*?)```", clean):
         start = candidate.find("{")
-        if start < 0:
-            continue
-        try:
-            value, _ = json.JSONDecoder().raw_decode(candidate[start:])
-            if isinstance(value, dict):
-                return value
-        except ValueError:
-            continue
+        for _ in range(50):  # skip a stray "{" (e.g. in a tag) and try the next one
+            if start < 0:
+                break
+            try:
+                value, _ = decoder.raw_decode(candidate[start:])
+                if isinstance(value, dict):
+                    return value
+            except ValueError:
+                pass
+            start = candidate.find("{", start + 1)
     snippet = " ".join(text.split())[:90]
     raise RuntimeError(f"GPT ไม่ได้ตอบเป็น JSON ({len(text)} ตัวอักษร: {snippet or 'ว่าง'})")
 
@@ -3611,6 +3643,10 @@ def auto_saved_percent(project, stages):
     """
     if not project:
         return 0
+    # Old project.json files predate the one-page Context/Ref stages. Keep
+    # their formerly reported progress (including partial clip work) stable.
+    if stages is VIDEO_STAGES and project.get("auto_progress_version") != "one_page":
+        stages = LEGACY_VIDEO_STAGES
     done = project.get("done") or {}
     scenes = project.get("scenes") or []
     total = sum(weight for _key, _title, weight in stages)
@@ -3838,11 +3874,22 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         """Video flow: the Image page's attachments, matched by name like Image AI does."""
         text = " ".join([str(scene.get("prompt") or ""), " ".join(scene.get("characters") or []), str(scene.get("location") or ""),
                          str(scene.get("text") or "")])
+        folder = attachment_folder()
         matcher = runtime.get("img_match_refs_for_text")
         if callable(matcher):
             found = matcher(text)
+            # Tests also exercise this nested helper in isolation, outside
+            # _build's video_mode closure. Default to legacy matching there.
+            try:
+                story_folder_only = video_mode
+            except NameError:
+                story_folder_only = False
+            if story_folder_only:
+                # Image AI also remembers manual refs from unrelated stories.
+                # Auto deliberately uses ONLY the selected same-story folder.
+                found = references_from_story_folder(found, folder)
         else:
-            found = match_reference_files(text, attachment_folder())
+            found = match_reference_files(text, folder)
         paths = [str(path) for _name, path in found]
         # Character sheets are saved as ref_<name>_<id>.png: attach them by the character names of this shot, not
         # by finding the whole file name in the prompt (GPT writes only "เจ้าหญิงเขมา").
@@ -4194,7 +4241,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     log_toggle = tk.Button(run_row, text="▴ ขยาย Log", command=toggle_log_view,
                            relief="flat", bg="#E2E8F0", fg="#0F172A", padx=7)
     log_toggle.pack(side="left", padx=4)
-    redo_var = tk.StringVar(value=stages[2][1])
+    redo_var = tk.StringVar(value=next((t for k, t, _w in stages if k == "plan"), stages[2][1]))
     make_styled_button(run_row, "SECONDARY", "↺ ทำใหม่ตั้งแต่ขั้น", command=lambda: redo_from(redo_var.get())).pack(side="right")
     ttk.Combobox(run_row, textvariable=redo_var, values=[t for _k, t, _w in stages], width=14,
                  state="readonly").pack(side="right", padx=6)
@@ -4233,8 +4280,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     stage_row = tk.Frame(box, bg=bg)
     stage_row.pack(fill="x", padx=8, pady=(2, 4))
     stage_labels = {}
-    for key, title, _weight in stages:
-        label = tk.Label(stage_row, text=f"○ {title}", bg=bg, fg="#94A3B8")
+    # Ten Auto stages at 125%+ DPI do not fit on one horizontal line.
+    # Keep all progress steps readable without clipping either end.
+    stage_lines = [tk.Frame(stage_row, bg=bg)]
+    if video_mode:
+        stage_lines.append(tk.Frame(stage_row, bg=bg))
+    for line in stage_lines:
+        line.pack(fill="x", pady=(0, 2))
+    for index, (key, title, _weight) in enumerate(stages):
+        line = stage_lines[min(index // 5, len(stage_lines) - 1)] if video_mode else stage_lines[0]
+        label = tk.Label(line, text=f"○ {title}", bg=bg, fg="#94A3B8")
         label.pack(side="left", padx=(0, 14))
         stage_labels[key] = label
 
@@ -4563,10 +4618,30 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     enable_drop(cards[1], choose_audio)
 
     # ── display ──
+    table_refresh = {"fingerprint": None, "last": 0.0}
+
     def refresh_table():
+        scenes = (state["project"] or {}).get("scenes", [])
+        # Large films can have 100+ remote/Drive assets. Rebuilding the entire
+        # Treeview and checking every file on EVERY status update stalls Tk.
+        # Refresh immediately on scene mutations, otherwise at most every 2 s
+        # to detect an image/clip finishing without a path change.
+        fingerprint = tuple((
+            scene.get("start"), scene.get("image"), scene.get("clip"),
+            scene.get("prompt"), scene.get("error"), scene.get("bad"),
+            scene.get("clip_error"), scene.get("clip_use_until"),
+            tuple(scene.get("characters") or ()), scene.get("location"),
+            (scene.get("clip_review") or {}).get("verdict"),
+            (scene.get("clip_review") or {}).get("reason"))
+            for scene in scenes)
+        now = time.monotonic()
+        if (fingerprint == table_refresh["fingerprint"]
+                and now - table_refresh["last"] < 2.0):
+            return
+        table_refresh["fingerprint"], table_refresh["last"] = fingerprint, now
         selected, focused, scroll = table.selection(), table.focus(), table.yview()
         table.delete(*table.get_children())
-        for i, scene in enumerate((state["project"] or {}).get("scenes", [])):
+        for i, scene in enumerate(scenes):
             image = scene.get("image")
             status = "✓" if image and os.path.isfile(image) else "—"
             if scene.get("error"):
@@ -5568,6 +5643,80 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return timeline_mod.note(rows)
 
     # ── stages ──
+    def stage_auto_analysis():
+        """Validate the selected original story before the shared Prompt-Ref workflow."""
+        project = state["project"]
+        source = Path(str(project.get("script") or ""))
+        audio = Path(str(project.get("audio") or ""))
+        if not source.is_file() or not audio.is_file():
+            raise RuntimeError("ออโต้ต้องมีไฟล์บทและเสียงของเรื่องนี้ก่อน")
+        text = read_script(source)
+        if not _squash(text):
+            raise RuntimeError("ไฟล์บทที่เลือกไม่มีเนื้อหา")
+        if project.get("script_hash") and project["script_hash"] != script_hash(text):
+            raise RuntimeError("บทเปลี่ยนหลังเปิดโปรเจกต์ — ไม่ใช้ Context ของบทเก่า")
+        set_progress("analysis", 1.0, f"ตรวจบทเต็มและเสียงแล้ว: {source.name}")
+
+    def ensure_auto_prompt_ref_context():
+        """Use the REAL Prompt-Ref story/Context builder without navigating to that page.
+
+        Only a same-story shared Context may be reused. The Prompt-Ref Bridge
+        lock serializes all GPT history changes; never mix the previous story.
+        """
+        project = state["project"]
+        source = Path(str(project["script"])).resolve()
+        from snapgen_shared_context import matches_story
+        story_reader = g.get("_read_story_upload")
+        story = story_reader(str(source)) if callable(story_reader) else read_script(source)
+        if not str(story or "").strip():
+            raise RuntimeError("อ่านบทต้นฉบับไม่ได้")
+        shared = current_team_context()
+        if shared and not matches_story(shared, story):
+            # DOCX whitespace can differ: current_team_context already proved
+            # exact source identity using its own DOCX-aware validation.
+            if not context_matches_script(shared, str(source), read_script(source)):
+                shared = None
+        required = ("_save_prompt_ref_source_file", "_prompt_ref_history_ready",
+                    "_reset_prompt_ref_conversation", "_ingest_prompt_ref_story",
+                    "_build_prompt_ref_context_in_history", "_write_context_master",
+                    "_attach_loaded_context_to_history")
+        missing = [key for key in required if not callable(g.get(key))]
+        if missing:
+            raise RuntimeError("Prompt-Ref ยังไม่พร้อมใช้งานจาก Auto: " + ", ".join(missing))
+        lock = g.get("_bridge_queue_lock")
+        if lock is None:
+            raise RuntimeError("ไม่พบคิว GPT เดียวกับหน้า Prompt-Ref")
+        base = Path(g["BASE"])
+        while not lock.acquire(timeout=1):
+            check_stop()
+            ui(detail_var.set, "รอคิว GPT ของ Prompt-Ref ที่กำลังทำงานอยู่ ...")
+        try:
+            check_stop()
+            g["_save_prompt_ref_source_file"](str(source))
+            (base / "prompt_ref_source.txt").write_text(str(story).strip() + "\n", encoding="utf-8")
+            if shared:
+                set_progress("context", 0.35, "พบ Context ของบทนี้แล้ว — ผูกกับประวัติ Prompt-Ref")
+                master = g["_write_context_master"](data=shared["context"], invent=False)
+                if not g.get("_prompt_ref_context_history_ready", lambda *_: False)(story):
+                    g["_attach_loaded_context_to_history"](master)
+            else:
+                set_progress("context", 0.15, "ส่งบททั้งเรื่องเข้า Prompt-Ref และวิเคราะห์ Context ...")
+                if not g["_prompt_ref_history_ready"](story):
+                    g["_reset_prompt_ref_conversation"]()
+                    g["_ingest_prompt_ref_story"](story, str(source))
+                set_progress("context", 0.55, "Prompt-Ref กำลังสร้าง Context ตัวละครและสถานที่ ...")
+                raw = g["_build_prompt_ref_context_in_history"]()
+                master = g["_write_context_master"](data=raw, invent=False)
+            (base / "prompt_ref_context.json").write_text(
+                json.dumps(master, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        finally:
+            lock.release()
+        checked = current_team_context()
+        if not checked:
+            raise RuntimeError("Prompt-Ref สร้าง Context แล้วแต่ยังไม่มีไฟล์ Context ที่ยืนยันว่าตรงกับบท — ยังไม่สร้างรูป")
+        set_progress("context", 0.95, "ตรวจสอบ Context ของเรื่องนี้ผ่านแล้ว")
+        return checked
+
     def stage_context():
         project, folder = state["project"], Path(state["folder"])
         shared = None
@@ -5580,11 +5729,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 shared = snapgen_shared_context.find(project["script"])
         except Exception:
             pass
-        if video_mode and not shared:
-            # ออโต้ makes one part of a story whose Context (names, looks, places) was built once in
-            # Prompt-Ref and drawn into the reference pictures: never analyse it again here.
-            raise RuntimeError("ยังไม่มี Context ของเรื่องนี้จากหน้า Prompt-Ref — ไปทำ Context ในหน้า Prompt-Ref "
-                               "(เลือกบทเรื่องเดียวกัน) ก่อน แล้วกดเริ่มที่หน้าออโต้อีกครั้ง")
+        if video_mode:
+            # A single Auto Start owns the complete Prompt-Ref preparation.
+            # This creates a missing same-story Context, or binds the validated
+            # existing one, before any reference/image/video credit is used.
+            shared = ensure_auto_prompt_ref_context()
         if shared:
             context = shared["context"]
             log("ใช้ Context ของเรื่องนี้จากหน้า Prompt-Ref — ไม่วิเคราะห์บทใหม่")
@@ -5661,6 +5810,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     log("บันทึก Context ไว้ข้างไฟล์บทแล้ว — หน้า Prompt-Ref และคนในทีมใช้ต่อได้")
             except Exception:
                 pass
+        if video_mode and shared:
+            # Establish the exact script/context identity before any Ref work.
+            # Ref folder is assigned only after the sheets are verified.
+            bind_auto_context(project, shared, read_script(project["script"]), None)
         (folder / "context.json").write_text(json.dumps(context, ensure_ascii=False, indent=2), encoding="utf-8")
         project["context"] = context
         labels = []
@@ -5722,6 +5875,116 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return os.path.getmtime(str(project["audio"])) > transcript.stat().st_mtime
         except OSError:
             return False
+
+    def stage_auto_ref_characters():
+        """Make all missing same-story Ref sheets with the existing Ref engine.
+
+        The Ref page already owns image generation, per-item success receipts,
+        and resuming missing names. Auto waits for each batch before moving on,
+        then selects the resulting folder on the Image AI page.
+        """
+        project = state["project"]
+        context = project.get("context") or {}
+        characters = list(dict.fromkeys(
+            str(c.get("name") or "").strip() for c in (context.get("characters") or [])
+            if isinstance(c, dict) and str(c.get("name") or "").strip()))
+        locations = list(dict.fromkeys(
+            str(c.get("name") or "").strip() for c in (context.get("locations") or [])
+            if isinstance(c, dict) and str(c.get("name") or "").strip()))
+        if not characters and not locations:
+            raise RuntimeError("Prompt-Ref Context ไม่มีตัวละครหรือสถานที่สำหรับสร้าง Ref")
+        run_refs = g.get("_run_ref_jobs")
+        ref_folder = g.get("ref_folder_for_auto")
+        if not callable(run_refs) or not callable(ref_folder):
+            raise RuntimeError("หน้า Ref ยังไม่พร้อมให้ Auto เรียกใช้งาน")
+        folder = Path(ref_folder())
+        if (g.get("ref_job_running") or [False])[0] or (g.get("auto_ref_running") or [False])[0]:
+            raise RuntimeError("Ref กำลังสร้างรูปอีกงานหนึ่งอยู่ — ไม่เริ่มงานซ้อน")
+        total = len(characters) + len(locations)
+        completed = 0
+
+        def run_batch(names, kind):
+            nonlocal completed
+            if not names:
+                return
+            finished, started = threading.Event(), threading.Event()
+            result = {"error": None}
+
+            def on_item(name, index, count, output):
+                fraction = (completed + index) / max(1, total)
+                label = "ตัวละคร" if kind == "character" else "สถานที่"
+                set_progress("ref_characters", fraction, f"สร้างเรฟ{label} {index}/{count}: {name}")
+
+            def on_complete(error):
+                result["error"] = error
+                finished.set()
+
+            def launch():
+                try:
+                    run_refs(names, auto=True, entity_kind=kind,
+                             automatic_provider="gpt_web", on_item=on_item,
+                             on_complete=on_complete)
+                except Exception as exc:
+                    on_complete(exc)
+                finally:
+                    started.set()
+
+            ui(launch)
+            while not started.wait(0.5):
+                check_stop()
+            while not finished.wait(0.5):
+                if state["stop"]:
+                    stop = g.get("stop_auto_ref")
+                    if callable(stop):
+                        ui(stop)
+                    raise Stopped()
+            if result["error"] is not None:
+                raise RuntimeError(f"สร้างเรฟ {kind} ไม่สำเร็จ: {result['error']}")
+            completed += len(names)
+
+        # Make character identities first, then the environments they inhabit.
+        run_batch(characters, "character")
+        run_batch(locations, "location")
+        ledger = folder / "_ref_done.json"
+        try:
+            payload = json.loads(ledger.read_text(encoding="utf-8"))
+            items = payload["items"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError("ตรวจผลรูปอ้างอิงไม่ได้: ไม่พบทะเบียน Ref ของเรื่องนี้") from exc
+        missing = [name for kind, names in (("character", characters), ("location", locations))
+                   for name in names
+                   if not Path(str(items.get(f"{kind}:{name}") or "")).is_file()]
+        if missing:
+            raise RuntimeError("ยังมีเรฟที่ไม่เสร็จ: " + ", ".join(missing[:10]))
+        if not folder.is_dir():
+            raise RuntimeError("ไม่พบโฟลเดอร์ Ref หลังสร้างรูป")
+        select_folder = runtime.get("set_image_ref_folder")
+        if not callable(select_folder):
+            raise RuntimeError("หน้าสร้างรูป AI ยังไม่พร้อมเลือกโฟลเดอร์ Ref")
+        selected, event = {}, threading.Event()
+
+        def bind_folder():
+            try:
+                selected["count"] = select_folder(str(folder))
+            except Exception as exc:
+                selected["error"] = exc
+            finally:
+                event.set()
+
+        ui(bind_folder)
+        while not event.wait(0.5):
+            check_stop()
+        if selected.get("error") is not None or not selected.get("count"):
+            raise RuntimeError("เลือกโฟลเดอร์เรฟในหน้าสร้างรูป AI ไม่สำเร็จ: "
+                               + str(selected.get("error") or "ไม่พบรูป"))
+        project["reference_folder"] = str(folder)
+        # Re-read the same-story shared Context with Image AI's real Ref folder
+        # so subsequent storyboard/image stages cannot pick another story's refs.
+        sync_auto_context()
+        save_project()
+        log(f"✓ สร้างเรฟแล้ว {len(characters)} ตัวละคร · {len(locations)} สถานที่ "
+            f"· ผูกโฟลเดอร์รูป AI: {folder}")
+        set_progress("ref_characters", 1.0, "สร้างเรฟครบและเลือกโฟลเดอร์ภาพอ้างอิงแล้ว")
 
     def stage_transcribe():
         project, folder = state["project"], Path(state["folder"])
@@ -8848,9 +9111,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     state["_auto_video_postprocess_finalizer"] = finalize_auto_video_postprocesses
 
-    STAGE_FUNCS = {"context": stage_context, "transcribe": stage_transcribe, "characters": stage_characters,
-                   "plan": stage_plan, "storyboard": stage_storyboard, "images": stage_images,
-                   "motion": stage_motion, "clips": stage_clips, "video": stage_video}
+    STAGE_FUNCS = {"analysis": stage_auto_analysis, "context": stage_context,
+                   "ref_characters": stage_auto_ref_characters, "transcribe": stage_transcribe,
+                   "characters": stage_characters, "plan": stage_plan, "storyboard": stage_storyboard,
+                   "images": stage_images, "motion": stage_motion, "clips": stage_clips, "video": stage_video}
 
     def render_video_selected(force=False):
         project = state["project"]
@@ -9088,12 +9352,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if not project.get("audio"):
             messagebox.showinfo("เล่าภาพ", "เลือกไฟล์เสียงบรรยายก่อน", parent=page)
             return
-        if video_mode:
-            try:
-                sync_auto_context()
-            except (RuntimeError, OSError, ValueError) as exc:
-                messagebox.showerror("Context ของ Auto", str(exc), parent=page)
-                return
+        # The video Auto worker now owns Context and Ref preparation.
+        # Never block on missing Prompt-Ref/refs before the worker can create them.
+        if video_mode and not project.get("style_chosen"):
+            project["style_chosen"] = True  # honor the style already shown in Auto
         if only is None and not project.get("style_chosen") and not any(
                 s.get("image") for s in project.get("scenes") or []):
             # Before the style shapes the characters and pictures, ask once (people forget to switch it).
@@ -9145,9 +9407,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             for key in ("images", "motion", "clips"):
                 project["done"].pop(key, None)
         if video_mode:
-            if not attachment_folder():
-                messagebox.showinfo("ออโต้", "เลือกโฟลเดอร์ไฟล์แนบ (รูปตัวละคร/สถานที่) ที่หน้ารูป AI ก่อน — "
-                                    "ออโต้ใช้ไฟล์แนบชุดเดียวกับ flow สร้างวิดีโอ", parent=page)
+            if only not in (None, "analysis", "context", "ref_characters") and not attachment_folder():
+                messagebox.showinfo("ออโต้", "ขั้นตอนนี้ต้องมีโฟลเดอร์เรฟก่อน — เริ่ม Auto ปกติเพื่อสร้าง Context/Ref อัตโนมัติ", parent=page)
                 return
             # Plans made for one fixed clip length (before grok-lower 6/10/15 + Slow 2x) need re-planning.
             chosen_model = project.get("video_model")
@@ -9180,6 +9441,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if not has_words and script_dialogues(story_script()):
                 project["done"].pop("transcribe", None)
         project["image_count"] = wanted
+        if (video_mode and not project.get("auto_progress_version")
+                and not any(project.get("done", {}).values())
+                and not project.get("scenes")):
+            project["auto_progress_version"] = "one_page"
         if not video_mode:
             project["film"] = bool(film_var.get())  # what the checkbox shows is what the video gets
         project.update({"aspect": aspect,
@@ -9207,6 +9472,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     if image_provider_choice is not None:
                         project["image_stage_providers"]["images"] = image_provider_choice
                 keys = [only] if only else [k for k, _t, _w in stages]
+                if (video_mode and only is None and stages is VIDEO_STAGES
+                        and project.get("auto_progress_version") != "one_page"
+                        and (project.get("scenes") or any(project.get("done", {}).values()))):
+                    # Legacy partial films must not unexpectedly regenerate Ref
+                    # sheets or repeat Prompt-Ref analysis on resume.
+                    keys = [k for k, _t, _w in LEGACY_VIDEO_STAGES]
                 confirmed = False
                 for key in keys:
                     current = key

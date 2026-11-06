@@ -993,6 +993,9 @@ async function pagePoll(kind, state) {
     }
     if (m.content && m.content.content_type === "system_error") text = (m.content.text || text);
   }
+  // ChatGPT now stores code answers as <CodeBlock language="json" editable={true}>…</CodeBlock>:
+  // the "{true}" in the tag broke every JSON reader. Hand the program the answer itself.
+  text = text.replace(/<\/?CodeBlock\b[^>]*>/g, "").trim();
   // Do not turn an empty or still-streaming conversation snapshot into a completed reply.
   if (kind === "chat") {
     const last = [...nodes].reverse().find(m => m.author && m.author.role === "assistant" &&
