@@ -16,7 +16,7 @@ Use this skill when a person asks ChatGPT or another AI assistant to control **�
 
 ## Two different workflows — do not confuse them
 - **วิดีโอออโต้ (Auto):** `snapgen_modules/snapgen_ai_operator.py` and the existing Mobile Web `auto` status/actions support read-only `projects`, `status`, `diagnose`, opening a saved Auto project, and guarded stop/resume.
-- **เล่าภาพ (Narration):** separate projects under `export/เล่าภาพ/`. A similarly named project does not make Auto's `auto_start` equivalent to Narration's `start_pipeline()`. Verify whether the *installed app version* exposes a Narration-specific controller before sending commands. If none exists, clearly state the limitation instead of clicking or invoking Auto.
+- **เล่าภาพ (Narration):** separate projects under `export/เล่าภาพ/`. A similarly named project does not make Auto's `auto_start` equivalent to Narration's `start_pipeline()`. GitHub source now includes a separate `mobile_narrate` controller and Mobile Web tab; check that the *installed app* actually returns `narrate` in `/api/status` before using it. Supported actions on that build are `narrate_open`, `narrate_stop`, and guarded `narrate_start` requiring explicit credit consent; details and tested limits are in `references/operations.md`. Never fall back to Auto actions when Narration support is absent.
 - The local Mobile Web at `127.0.0.1:8765` has `GET /api/status`, `POST /api/command`, and `GET /api/receipt/<id>`. Read the credential from the local `snapgen_data/mobile_web_url.txt` **inside the authorized machine only**, and keep it out of shell output, chat, documentation, Git and other hosts.
 
 ## Safety and verification
@@ -29,4 +29,4 @@ Use this skill when a person asks ChatGPT or another AI assistant to control **�
 - Report exact observed result, last action, and remaining blocker. A command being accepted is not proof a video completed.
 
 ## Distribution
-This public, credential-free skill is distributed with the program's GitHub source, the first-install launcher and the release patch. `references/distribution.md` explains how a different GPT can import it. Shipping files onto a PC **does not** auto-install a ChatGPT plugin or grant remote permissions to another account.
+This skill is currently available in GitHub source for testing; it is not yet included in the installer or release patch. `references/distribution.md` explains how a different GPT can import it. Shipping files onto a PC **does not** auto-install a ChatGPT plugin or grant remote permissions to another account.

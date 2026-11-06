@@ -22,8 +22,6 @@ files = [
     *sorted((ROOT / "snapgen_modules" / "mobile").glob("*.*")),
     *sorted((ROOT / "snapgen_modules" / "chrome_ext").glob("*.*")),
     *sorted((ROOT / "snapgen_modules" / "cc5").glob("*.py")),
-    # Public, credential-free agent skills are part of every program update.
-    *sorted((ROOT / ".agents" / "skills").rglob("*.md")),
 ]
 files = [p for p in files if p.is_file() and not p.name.startswith("test_")]
 

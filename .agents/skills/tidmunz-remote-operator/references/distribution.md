@@ -1,11 +1,11 @@
 # Distribution and versioning
 
-## Installed application
+## Current status — GitHub source only
 - The repository source has this skill at `.agents/skills/tidmunz-remote-operator/SKILL.md` with its references.
-- The desktop launcher on a *new* PC installs the published GitHub **Release** source archive, including this directory.
-- The in-app updater installs the Release asset `tidmun-studio-patch.zip`. Its build script includes all `.agents/skills/**/*.md`; the updater verifies the manifest's SHA-256 entries and installs new skill files alongside code.
+- This skill is in GitHub for evaluation. The released installer has not been configured to distribute it automatically.
+- The in-app updater currently does **not** add skill Markdown files to its patch. Do not promise installation until that feature is tested and explicitly authorized.
 - Updating GitHub `main` alone does **not** update customers' installed programs. A deliberately published version/tag and an app update are still required.
-- The Release also publishes `tidmunz-operator-skill.zip` for import into other skills-compatible agents. The skill can be extracted without installing the Windows app.
+- `tools/build_operator_skill.py` can build a standalone `tidmunz-operator-skill.zip` locally, but the Release workflow does not yet publish that asset.
 
 ## In another GPT or account
 Provide the ZIP or skill directory through the other assistant's supported import/knowledge mechanism. The assistant must read `SKILL.md` and reference files and connect an explicitly authorized computer-access tool; the skill does not grant access or install a plugin by itself. Keep secrets and personal tokens separate from every shared skill.

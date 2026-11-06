@@ -19,7 +19,7 @@ FILES = (
 )
 
 
-def test_install_and_patch_include_skill():
+def test_skill_is_in_repository_but_not_in_public_patch_yet():
     for path in FILES:
         assert (ROOT / path).is_file(), path
     # In a real release, the workflow writes the version file before building.
@@ -42,10 +42,7 @@ def test_install_and_patch_include_skill():
             entries = {entry["path"]: entry for entry in manifest["files"]}
             for path in FILES:
                 name = path.as_posix()
-                assert name in archive.namelist() and name in entries
-                contents = (ROOT / path).read_bytes()
-                assert archive.read(name) == contents
-                assert entries[name]["sha256"] == hashlib.sha256(contents).hexdigest()
+                assert name not in archive.namelist() and name not in entries
 
 
 def test_portable_zip_has_only_credential_free_skill_documents():

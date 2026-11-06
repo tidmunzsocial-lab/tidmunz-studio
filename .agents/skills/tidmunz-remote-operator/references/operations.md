@@ -15,6 +15,15 @@
 5. For potentially credit-consuming work obtain specific authorization and verify the result, including actual saved media.
 6. A user-controlled graceful stop is safer than killing the desktop process.
 
+## เล่าภาพ — verified local Mobile Web route (6 Nov 2026)
+For a running installation that exposes `narrate` in `GET /api/status`:
+- `narrate.title`, `stories`, `busy`, `stage`, `detail`, `percent`, `images_done`, `scenes_total`, `shots`, `video`, and `log` show the desktop Narration page state. This is NOT the separate `auto` state.
+- `POST /api/command` with `action: "narrate_open"` and `data: {"name": "<exact existing title>"}` opens a saved Narration project without triggering paid generation.
+- `action: "narrate_stop"` requests graceful stop (or reports idle); it does not force-kill media jobs.
+- `action: "narrate_start"` with `data: {"confirm_paid": true}` is only allowed after the person explicitly confirms a potential credit-consuming run. The source rejects missing confirmation and incompatible settings, running Auto work, changed narration, and an already-busy Narration job. **Do not test a confirmed start on a live project without approval.**
+- Reuse the original HTTP command ID for any uncertain delivery and poll its receipt. Never retry an accepted request with a fresh ID.
+- A 6 Nov 2026 local test confirmed the public webpage rendered the Narration tab, `narrate_open` succeeded and updated `/api/status`, and `narrate_stop` returned idle. Generating a complete narration via `narrate_start` remains **untested**.
+
 ## Engineering changes
 The authoritative source repository (not the installed app) owns code and skills. Read its `AGENTS.md` and `STATE.md` before changing source. Preserve unrelated worktree edits. The Mobile Web frontend is `snapgen_modules/mobile/`, HTTP routing in `snapgen_modules/snapgen_mobile_web.py`, and Tk-owned execution in `snapgen_modules/snapgen_mobile_controller.py`. The Narration page implementation is `snapgen_modules/snapgen_page_narrate.py`.
 For Narration remote support, add an explicitly named `narrate` status/actions registration from the real Tk page, process operations on Tk's main thread, preserve existing project data, and use request receipts/idempotency. Never reuse Auto's controller for Narration by name alone. Test the exact running version before claiming action support.
