@@ -114,8 +114,9 @@ def test_repeated_active_tab_styling_never_flashes_to_13_chars():
 def test_highdpi_startup_keeps_floating_size_without_maximizing():
     source = (BASE / "snapgen_gui_v2.py").read_text(encoding="utf-8")
     assert "def _set_highdpi_floating_size():" in source
-    assert "root.after_idle(_set_highdpi_floating_size)" in source
-    assert "outer_w = min(1134, work_w - 48)" in source
-    assert "outer_h = min(624, work_h - 32)" in source
+    assert "root.after(80, _set_highdpi_floating_size)" in source
+    assert "ratio = dpi / 96.0" in source
+    assert "outer_w = min(round(1134 * ratio)" in source
+    assert "outer_h = min(round(624 * ratio)" in source
     assert 'root.state("zoomed")' not in source[source.index("def _set_highdpi_floating_size():"):
                                               source.index("# Final canonical Slot loader.")]

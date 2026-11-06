@@ -17486,7 +17486,8 @@ if root:
 
             user32 = ctypes.windll.user32
             h = int(str(root.frame()), 0)
-            if user32.GetDpiForWindow(h) <= 96:
+            dpi = user32.GetDpiForWindow(h)
+            if dpi <= 96:
                 return
             work, bounds, client = _Rect(), _Rect(), _Rect()
             if not user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0):
@@ -17497,9 +17498,14 @@ if root:
                 return
             work_w = work.right - work.left
             work_h = work.bottom - work.top
-            outer_w = min(1134, work_w - 48)
-            outer_h = min(624, work_h - 32)
-            if outer_w < 840 or outer_h < 525:
+            # Windows' DPI-aware Tk reads 1920x1080 physical coordinates
+            # when an unscaled caller sees a 1536x864 125%-scaled desktop.
+            # Scale the approved 1134x624 outer size to that native system
+            # before passing it to Tk, otherwise the user sees 922x558.
+            ratio = dpi / 96.0
+            outer_w = min(round(1134 * ratio), work_w - round(48 * ratio))
+            outer_h = min(round(624 * ratio), work_h - round(32 * ratio))
+            if outer_w < 840 * ratio or outer_h < 525 * ratio:
                 return
             border_w = max(0, (bounds.right - bounds.left) - (client.right - client.left))
             border_h = max(0, (bounds.bottom - bounds.top) - (client.bottom - client.top))
@@ -17511,7 +17517,8 @@ if root:
         except Exception as _dpi_size_error:
             print(f"[SnapGen] floating DPI size unchanged: {_dpi_size_error}")
 
-    root.after_idle(_set_highdpi_floating_size)
+    # The HWND is 1x1 during first idle; wait for native borders to exist.
+    root.after(80, _set_highdpi_floating_size)
 
     # Final canonical Slot loader.  The recovered Video loader may restore an
     # Image Prompt from legacy sidecar metadata.  This wrapper is installed
