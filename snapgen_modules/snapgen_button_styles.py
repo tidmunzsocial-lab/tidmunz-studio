@@ -126,21 +126,44 @@ def make_button(
     )
 
 
+def mode_tab_geometry(btn: tk.Button):
+    """One geometry for initial paint, mode clicks and window resizing.
+
+    A 125%-DPI Tk session must use compact, text-sized tabs from the FIRST
+    frame. Otherwise _set_mode_active() writes width=13 on every click and
+    the delayed responsive adapter restores width=0, causing visible flashes.
+    """
+    try:
+        dpi_scaling = float(btn.tk.call("tk", "scaling"))
+        available_width = int(btn.winfo_toplevel().winfo_width())
+    except (tk.TclError, ValueError, TypeError):
+        dpi_scaling, available_width = 1.34, 1
+    if dpi_scaling >= 1.49:
+        # Preserve the exact compact spacing the user approved on 125% DPI.
+        return 0, 3, 2, 9
+    if available_width < 1150:
+        return 0, 3, 2, 9
+    if available_width < 1460:
+        return 0, 6, 2, 9
+    return MODE_WIDTH, MODE_PADX, MODE_PACK_PADX, 10
+
+
 def style_mode_button(btn: tk.Button, active: bool = False) -> None:
-    """Apply MODE_IDLE or MODE_ACTIVE style to an existing mode button."""
+    """Apply mode colors AND final responsive geometry in one Tk update."""
     s = STYLE.MODE_ACTIVE if active else STYLE.MODE_IDLE
     try:
+        width, pad_x, pack_pad_x, font_size = mode_tab_geometry(btn)
         btn.config(
             bg=s.bg, fg=s.fg,
             activebackground=s.active_bg, activeforeground=s.active_fg,
             relief="flat", bd=0, borderwidth=0,
-            width=MODE_WIDTH, height=MODE_HEIGHT,
-            padx=MODE_PADX, pady=MODE_PADY,
-            font=(SNAPGEN_UI_FONT, 10, "bold"),
+            width=width, height=MODE_HEIGHT,
+            padx=pad_x, pady=MODE_PADY,
+            font=(SNAPGEN_UI_FONT, font_size, "bold"),
             cursor="hand2", highlightthickness=0,
             overrelief="flat",
         )
         if btn.winfo_manager() == "pack":
-            btn.pack_configure(padx=MODE_PACK_PADX)
+            btn.pack_configure(padx=pack_pad_x)
     except Exception:
         pass

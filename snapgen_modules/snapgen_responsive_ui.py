@@ -136,19 +136,10 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
     def relayout():
         state["after"] = None
         try:
-            width = root.winfo_width()
-            if width < 1150:
-                width_chars, inner_pad, outer_pad, font_size = 0, 3, 2, 9
-            elif width < 1460:
-                width_chars, inner_pad, outer_pad, font_size = 0, 6, 2, 9
-            else:
-                width_chars, inner_pad, outer_pad, font_size = 12, 8, 3, 10
-            # width=0 lets Tk size to the FULL Thai label and emoji instead
-            # of clipping it to a fixed 8/10-character rectangle.
-            target = (width_chars, inner_pad, outer_pad, font_size)
-            if state["layout"] == target:
-                return
-            state["layout"] = target
+            # Use the SAME geometry chosen by style_mode_button() on every
+            # active-mode change. No intermediate width=13 and no flash when
+            # clicking tabs or resizing on a 125%-DPI monitor.
+            from snapgen_button_styles import mode_tab_geometry
             btns = (g.get("mode_buttons") or modes)
             if not isinstance(btns, dict) or not btns:
                 btns = {}
@@ -158,11 +149,15 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
             for button in btns.values():
                 if not isinstance(button, tk.Button) or not button.winfo_exists():
                     continue
-                button.configure(width=width_chars, padx=inner_pad,
-                                 font=(font[0], font_size, "bold"))
-                if button.winfo_manager() == "pack":
+                width_chars, inner_pad, outer_pad, font_size = mode_tab_geometry(button)
+                desired_font = (font[0], font_size, "bold")
+                if (int(button.cget("width")) != width_chars
+                        or int(button.cget("padx")) != inner_pad):
+                    button.configure(width=width_chars, padx=inner_pad, font=desired_font)
+                if (button.winfo_manager() == "pack"
+                        and int(button.pack_info().get("padx", 0)) != outer_pad):
                     button.pack_configure(padx=outer_pad)
-        except (tk.TclError, TypeError):
+        except (tk.TclError, TypeError, ValueError):
             pass
 
     def request_layout(event=None):
@@ -176,13 +171,7 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
         state["after"] = root.after(180, relayout)
 
     root.bind("<Configure>", request_layout, add="+")
-    if mode_frame is not None:
-        for button in mode_frame.winfo_children():
-            if isinstance(button, tk.Button):
-                button.bind("<ButtonRelease-1>", lambda _e: root.after(120, lambda: (
-                    state.__setitem__("layout", None), relayout())), add="+")
-    root.after(220, relayout)
-    # Startup reasserts legacy tab styles again at 500/1500 ms. Re-apply
-    # compact geometry after those style passes to keep the final layout fit.
-    root.after(1900, lambda: (state.__setitem__("layout", None), relayout()))
+    # Do not schedule a second resize after clicks. style_mode_button now
+    # applies the final size in the SAME call that updates active colors.
+    root.after_idle(relayout)
     g["_responsive_relayout"] = request_layout

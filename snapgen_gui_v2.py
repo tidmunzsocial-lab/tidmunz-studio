@@ -17468,19 +17468,50 @@ if root:
 
     root.after(60, _center_main_window)
 
-    def _expand_highdpi_first_window():
+    def _set_highdpi_floating_size():
+        """Use the approved +25%-area floating window; never maximize.
+
+        The old 125% DPI window was 1014x558 outside; 1134x624 is 25.1%
+        more window area. Preserve native window decorations, centre within
+        the Windows work area and clamp gracefully on smaller monitors.
+        """
         try:
             if os.name != "nt" or root.state() != "normal":
                 return
             import ctypes
-            h = int(str(root.frame()), 0)
-            dpi = ctypes.windll.user32.GetDpiForWindow(h)
-            if dpi > 96 and root.winfo_screenwidth() <= 1800:
-                root.state("zoomed")
-        except Exception:
-            pass
 
-    root.after(230, _expand_highdpi_first_window)
+            class _Rect(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+            user32 = ctypes.windll.user32
+            h = int(str(root.frame()), 0)
+            if user32.GetDpiForWindow(h) <= 96:
+                return
+            work, bounds, client = _Rect(), _Rect(), _Rect()
+            if not user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0):
+                return
+            if not user32.GetWindowRect(h, ctypes.byref(bounds)):
+                return
+            if not user32.GetClientRect(h, ctypes.byref(client)):
+                return
+            work_w = work.right - work.left
+            work_h = work.bottom - work.top
+            outer_w = min(1134, work_w - 48)
+            outer_h = min(624, work_h - 32)
+            if outer_w < 840 or outer_h < 525:
+                return
+            border_w = max(0, (bounds.right - bounds.left) - (client.right - client.left))
+            border_h = max(0, (bounds.bottom - bounds.top) - (client.bottom - client.top))
+            width = outer_w - border_w
+            height = outer_h - border_h
+            x = work.left + (work_w - outer_w) // 2
+            y = work.top + (work_h - outer_h) // 2
+            root.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception as _dpi_size_error:
+            print(f"[SnapGen] floating DPI size unchanged: {_dpi_size_error}")
+
+    root.after_idle(_set_highdpi_floating_size)
 
     # Final canonical Slot loader.  The recovered Video loader may restore an
     # Image Prompt from legacy sidecar metadata.  This wrapper is installed

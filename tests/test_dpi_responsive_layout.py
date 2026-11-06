@@ -73,3 +73,49 @@ def test_mode_tabs_and_toolbar_split_keep_commands():
         assert len(tabs) == 8
     finally:
         root.destroy()
+
+
+
+def test_repeated_active_tab_styling_never_flashes_to_13_chars():
+    """Every old _set_mode_active() callback uses the central style function."""
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Window manager unavailable in CI")
+    try:
+        from snapgen_button_styles import style_mode_button, mode_tab_geometry
+        root.tk.call("tk", "scaling", 1.6683)  # simulate Windows 125% DPI
+        root.geometry("1116x577")
+        tabs = []
+        nav = tk.Frame(root)
+        nav.pack(fill="x")
+        for title in ("สร้างวิดีโอ", "สร้างรูป AI", "Ref", "Prop",
+                      "นิทาน", "คาราโอเกะ", "ตัดเสียง", "เล่าภาพ"):
+            button = tk.Button(nav, text=title)
+            style_mode_button(button)
+            button.pack(side="left")
+            tabs.append(button)
+        root.update()
+        start_sizes = [button.winfo_reqwidth() for button in tabs]
+        assert all(mode_tab_geometry(button)[0] == 0 for button in tabs)
+        assert all(int(button.cget("width")) == 0 for button in tabs)
+
+        for _ in range(4):
+            for index, button in enumerate(tabs):
+                style_mode_button(button, active=(index == 5))
+                # Processing idle redraws between clicks MUST not change sizes.
+                root.update_idletasks()
+                assert int(button.cget("width")) == 0
+            assert [button.winfo_reqwidth() for button in tabs] == start_sizes
+    finally:
+        root.destroy()
+
+
+def test_highdpi_startup_keeps_floating_size_without_maximizing():
+    source = (BASE / "snapgen_gui_v2.py").read_text(encoding="utf-8")
+    assert "def _set_highdpi_floating_size():" in source
+    assert "root.after_idle(_set_highdpi_floating_size)" in source
+    assert "outer_w = min(1134, work_w - 48)" in source
+    assert "outer_h = min(624, work_h - 32)" in source
+    assert 'root.state("zoomed")' not in source[source.index("def _set_highdpi_floating_size():"):
+                                              source.index("# Final canonical Slot loader.")]
