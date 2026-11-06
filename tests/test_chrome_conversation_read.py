@@ -378,6 +378,7 @@ def test_run_job_does_not_resend_a_prompt_rejected_as_too_long():
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
 let sends=0,fresh=0,polls=0;
+global.chrome={tabs:{get:async()=>({windowId:1})}};
 const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000,sleep=async()=>{};
 const workerTab=async()=>7,freshTab=async()=>{fresh++;return 8;},openPage=async id=>id;
 function pageNodes(){} function pageSend(){} function pagePoll(){polls++;}
@@ -433,6 +434,7 @@ def test_run_job_does_not_poll_gpt_after_an_unconfirmed_send():
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
 let polls=0;
+global.chrome={tabs:{get:async()=>({windowId:1})}};
 const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000, sleep=async()=>{};
 const workerTab=async()=>7, openPage=async id=>id;
 function pageNodes(){} function pageSend(){} function pagePoll(){polls++;}
@@ -661,12 +663,14 @@ def test_unknown_new_chat_recovers_created_conversation_without_resending(locati
     source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
     run = source[source.index("async function runJob("):source.index("// ── functions below")]
     harness = r'''
-let sends=0, polls=0, polledCid=null;
+let sends=0, polls=0, polledCid=null, focused=false, active=false;
 const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000, sleep=async()=>{}, workerTab=async()=>7, openPage=async id=>id;
-global.chrome={tabs:{get:async()=>({status:'complete',url:LOCATION})}};
+global.chrome={windows:{update:async()=>{focused=true;}},tabs:{
+ get:async()=>({status:'complete',url:LOCATION,windowId:1}),update:async()=>{active=true;}}};
 function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
 async function inPage(_id,fn,args){
- if(fn.name==='pageSend'){sends++;return {error:'prompt was not confirmed',send_state:'unknown'};}
+ if(fn.name==='pageSend'){if(!focused||!active)throw Error('text send lacks foreground focus');
+ sends++;return {error:'prompt was not confirmed',send_state:'unknown'};}
  if(fn.name==='pageVerifyDelivery')return {state:'sent',user_message_id:'new-user'};
  if(fn.name==='pagePoll'){polls++;polledCid=args[1].cid;return {done:true,text:'new reply'};}
  throw Error('unexpected read');

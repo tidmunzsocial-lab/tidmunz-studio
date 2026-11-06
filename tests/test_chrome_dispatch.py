@@ -79,7 +79,7 @@ const ready=new Promise(resolve=>{notify=resolve;});
 const CHAT_JOB_LIMIT_MS=180000; const JOB_LIMIT_MS=720000, sleep=async()=>{};
 global.setInterval=fn=>{heartbeat=fn;return 7;};
 global.clearInterval=()=>{cleared=true;};
-global.chrome={tabs:{reload:async()=>{reloads++;releaseSend();}}};
+global.chrome={tabs:{get:async()=>({windowId:1}),reload:async()=>{reloads++;releaseSend();}}};
 const workerTab=async()=>7, openPage=async id=>id;
 function pageNodes(){} function pageSend(){} function pagePoll(){throw Error('must not poll');}
 const relay=async()=>({active});

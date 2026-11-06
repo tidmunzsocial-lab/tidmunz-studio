@@ -394,6 +394,11 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
         started = await inPage(tabId, pageSend, [job]);
       } finally { release(); }
     } else {
+      // Text insertion also needs the foreground document, not merely editor.focus().
+      const tab = await chrome.tabs.get(tabId);
+      if (chrome.windows && chrome.windows.update)
+        await chrome.windows.update(tab.windowId, {state: "normal", focused: true});
+      if (chrome.tabs.update) await chrome.tabs.update(tabId, {active: true});
       started = await inPage(tabId, pageSend, [job]);
     }
   } catch (e) {
@@ -422,7 +427,7 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
               started = {ok: true, before: baseline, oldPointers: [], dom_before: baseline,
                          conversation_id: created[1], user_message_id: verified.user_message_id,
                          send_state: "sent"};
-            return;
+            if (started.send_state === "sent") return;
           }
         } catch (e) {}
       }
@@ -464,6 +469,10 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
               send_state: "not_sent"};
     }
     try {
+      const tab = await chrome.tabs.get(tabId);
+      if (chrome.windows && chrome.windows.update)
+        await chrome.windows.update(tab.windowId, {state: "normal", focused: true});
+      if (chrome.tabs.update) await chrome.tabs.update(tabId, {active: true});
       started = await inPage(tabId, pageSend, [job]);
     } catch (e) {
       started = {error: "ChatGPT page stopped responding after the retry send attempt: " + String(e && e.message || e),
