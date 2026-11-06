@@ -491,6 +491,7 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
                  dom_before: started.dom_before || [], dom_mode: Boolean(started.dom_mode),
                  user_message_id: started.user_message_id || null};
   let deadline = Date.now() + (job.type === "chat" ? CHAT_JOB_LIMIT_MS : JOB_LIMIT_MS);
+  const hardDeadline = state.sentAt + JOB_LIMIT_MS;
   let throttles = 0;
   while (Date.now() < deadline) {
     if (cancelled) return {error: "ChatGPT operation cancelled"};
@@ -530,7 +531,19 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
     }
     throttles = 0;
     if (result.done || result.error) return result;
+    // Only evidence from this reply extends the idle limit; errors/429 do not.
+    if (job.type === "chat" && result.generating)
+      deadline = Math.min(hardDeadline, Date.now() + CHAT_JOB_LIMIT_MS);
   }
+  // One final read of the same conversation can recover a reply completed at the boundary.
+  if (job.type === "chat" && !cancelled && throttles === 0) {
+    try {
+      const result = await inPage(tabId, pagePoll, [job.type, state]);
+      if (result && result.done) return result;
+    } catch (e) {}
+  }
+  if (job.type === "chat" && Date.now() >= hardDeadline)
+    return {error: "ChatGPT took longer than 12 minutes; original prompt may have been sent; do not resend", send_state: "sent", conversation_id: state.cid};
   return {error: job.type === "chat" ? "ChatGPT response timed out after 3 minutes; original prompt may have been sent; do not resend" : "ChatGPT took longer than 12 minutes"};
   } finally {
     finished = true;
@@ -896,11 +909,11 @@ async function pagePoll(kind, state) {
       const text = (/^[{\[]/.test(code) ? code : (block.innerText || block.textContent || "")).trim();
       if (!text) continue;
       const stable = state.dom_reply_id === id && state.dom_reply_text === text;
-      if (!stable) return {done: false, cid, idle, dom_reply_id: id, dom_reply_text: text};
+      if (!stable) return {done: false, cid, idle, generating: true, dom_reply_id: id, dom_reply_text: text};
       // A complete JSON object is a finished reply even if ChatGPT's Stop button is stale.
       let completeJson = false;
       try { const value = JSON.parse(text); completeJson = Boolean(value && typeof value === "object"); } catch (e) {}
-      if (busy && !completeJson) return {done: false, cid, idle, dom_reply_id: id, dom_reply_text: text};
+      if (busy && !completeJson) return {done: false, cid, idle, generating: true, dom_reply_id: id, dom_reply_text: text};
       return {done: true, text, images: [], conversation_id: cid, message_id: id, source: "chatgpt_page"};
     }
     // Prefer the visible UI, but if it has no assistant node for 30s, recover from the conversation API.
@@ -948,7 +961,7 @@ async function pagePoll(kind, state) {
     const last = [...nodes].reverse().find(m => m.author && m.author.role === "assistant" &&
       m.content && m.content.content_type === "text");
     if (!text || !last || last.status !== "finished_successfully" || last.end_turn === false)
-      return {done: false, cid, idle};
+      return {done: false, cid, idle, generating: Boolean(last && last.status === "in_progress")};
   }
   const fresh = pointers.filter(p => !skip.has(p));
   // A picture can still be drawing after the reply text: give it time unless ChatGPT answered instead.
