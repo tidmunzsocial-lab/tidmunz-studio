@@ -8657,7 +8657,7 @@ def _rebuild_prompt_ref_bridge_once():
     """No separate Bridge to rebuild any more (ChatGPT goes through the Chrome extension)."""
     return False
 
-def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, model="auto"):
+def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, model="auto", _rate_retries=2):
     if require_history and not _prompt_ref_cursor_ready():
         raise RuntimeError("ยังไม่ได้เริ่มเรื่อง — วางบททั้งเรื่องแล้วกด เริ่มเรื่องจากบทนี้ ก่อน")
     requested_conversation_id = (
@@ -8703,6 +8703,7 @@ def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, mod
             # flattened to only "502 Bad Gateway" in team-PC logs.
             transport_error = str(exc)
             bridge_error_body = ""
+            error_info = {}
             if isinstance(exc, urllib.error.HTTPError):
                 try:
                     bridge_error_body = exc.read().decode("utf-8", errors="replace").strip()
@@ -8725,6 +8726,29 @@ def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, mod
                 # Bridge returned structured JSON, so its process is alive.
                 # Rebuilding cannot fix account/model/storage provider errors.
                 if bridge_error_body:
+                    # A confirmed 429 in the existing story is a cooldown, not
+                    # an erased conversation. The extension reports not_sent
+                    # only after verifying the outgoing turn was never clicked.
+                    # Retry that same text turn, same cursor, at most twice.
+                    if (exc.code == 429 and _rate_retries > 0
+                            and isinstance(error_info, dict)
+                            and error_info.get("code") == "rate_limited"
+                            and error_info.get("send_state") == "not_sent"):
+                        try:
+                            seconds = float(error_info.get("retry_after") or 30)
+                        except (TypeError, ValueError):
+                            seconds = 30.0
+                        if seconds != seconds:  # guard NaN without adding a module dependency
+                            seconds = 30.0
+                        seconds = max(5.0, min(180.0, seconds))
+                        print(f"[Prompt-Ref] GPT จำกัดการอ่านประวัติ (429) — รอ {seconds:.0f} วินาที "
+                              f"แล้วส่งเฉพาะข้อความที่ยืนยันว่าไม่ได้ส่ง (เหลือ {_rate_retries} ครั้ง)",
+                              flush=True)
+                        time.sleep(seconds)
+                        return _prompt_ref_chat(
+                            messages, require_history=require_history,
+                            _repair_retry=_repair_retry, model=model,
+                            _rate_retries=_rate_retries - 1)
                     # The user explicitly started a new story, but an incomplete
                     # first upload may have left an inaccessible cursor behind.
                     # Retry only its initial turn, never an established history.

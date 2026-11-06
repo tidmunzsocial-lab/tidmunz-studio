@@ -77,3 +77,40 @@ def test_only_explicit_incomplete_new_story_recovers_from_404(monkeypatch, pendi
             ns["_prompt_ref_chat"]([{"role": "user", "content": "story"}], require_history=required)
         assert ns["_prompt_ref_conversation"]["conversation_id"] == "original"
     assert len(requests) == retries
+
+
+def test_verified_unsent_429_waits_and_retries_same_history_once(monkeypatch):
+    """Only retry a turn whose Chrome extension proved was never sent."""
+    from types import SimpleNamespace
+    import os
+
+    ns = scope()
+    node = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_prompt_ref_chat")
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "prompt_ref", "exec"), ns)
+    requests, waits = [], []
+
+    def post(request, **kwargs):
+        requests.append(json.loads(request.data))
+        if len(requests) == 1:
+            body = json.dumps({"error": {"code": "rate_limited", "provider_status": 429,
+                                        "send_state": "not_sent", "retry_after": 75,
+                                        "message": "ChatGPT read HTTP 429"}}).encode()
+            raise urllib.error.HTTPError(request.full_url, 429, "Too Many Requests",
+                                         {}, io.BytesIO(body))
+        return io.BytesIO(json.dumps({
+            "conversation_id": "original", "parent_message_id": "new-reply",
+            "chatgpt_account": "owner",
+            "choices": [{"message": {"content": "OK"}}]}).encode())
+
+    ns.update(json=json, time=SimpleNamespace(sleep=waits.append),
+              _chatgpt_api_base=lambda: "http://localhost/v1",
+              _save_prompt_ref_conversation=lambda: None,
+              _extract_bridge_cursor=lambda data: (data["conversation_id"], data["parent_message_id"]),
+              Path=Path, os=os, __builtins__=__builtins__)
+    monkeypatch.setattr(urllib.request, "urlopen", post)
+    assert ns["_prompt_ref_chat"]([{"role": "user", "content": "analyse"}], require_history=True) == "OK"
+    assert waits == [75.0]
+    assert len(requests) == 2
+    assert all(r["metadata"]["conversation_id"] == "original" for r in requests)
+    assert ns["_prompt_ref_conversation"]["conversation_id"] == "original"
+    assert ns["_prompt_ref_conversation"]["parent_message_id"] == "new-reply"

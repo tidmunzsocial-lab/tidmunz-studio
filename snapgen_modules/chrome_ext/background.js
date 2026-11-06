@@ -458,7 +458,12 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
   };
   await reconcileUnknownSend();
   if (cancelled) return {error: "ChatGPT operation cancelled"};
-  if (started && started.error && started.send_state === "not_sent" && started.code !== "prompt_too_long") {
+  if (started && started.error && started.send_state === "not_sent" &&
+      started.code !== "prompt_too_long" && !started.provider_status) {
+    // A provider HTTP status (especially 429) is authoritative. Reloading the
+    // tab immediately cannot fix rate limiting and must not misclassify it as
+    // a deleted conversation. Only UI/transport failures before Send retry.
+
     // Retry only after a failure before the click or an authoritative no-new-message check.
     try {
       await report("opening");
@@ -662,31 +667,33 @@ async function pageSend(job) {
     if (!session || !session.accessToken) return {error: "ChatGPT is logged out in Chrome — log in, then try again"};
   }
   if (domReady) before = domBefore;
-  // ChatGPT itself cannot open this chat (it shows "Unable to load conversation" and its reads keep
-  // answering 429 while new chats work): report it as gone so the app starts a fresh story chat.
+  // An "Unable to load conversation" banner is a UI symptom, NOT proof
+  // that a chat was deleted. It can coexist with HTTP 429/5xx. Only a
+  // confirmed HTTP 404 from the conversation endpoint can mean not-found.
   const unloadable = () => /ไม่สามารถโหลดการสนทนา|unable to load conversation|couldn.t load (?:this )?conversation/i
     .test(String(document.body && document.body.innerText || ""));
-  if (job.conversation_id && !domReady && unloadable())
-    return {error: "ChatGPT conversation failed: 404 — ChatGPT cannot load this chat", not_found: true, send_state: "not_sent"};
   if (job.conversation_id && !domReady) {
-    // A just-created chat may not yet be readable after navigation. Retry GET
-    // only, never send the prompt twice or silently start another chat.
+    // Read-only verification; never resend a message merely to test this chat.
+    // A just-created history may not be immediately readable after navigation.
     let check;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       check = await fetch(`/backend-api/conversation/${job.conversation_id}`,
         {cache: "no-store", headers: {Authorization: "Bearer " + session.accessToken}});
-      if (check.status !== 404 || attempt === 2) break;
+      if (check.status !== 404 || attempt === 4) break;
       await sleep(1500);
     }
-    if (check.status === 404) return {error: "ChatGPT conversation failed: 404 — not found for this account", not_found: true};
-    if (!check.ok && (unloadable() || (await sleep(3000), unloadable())))
-      return {error: "ChatGPT conversation failed: 404 — ChatGPT cannot load this chat", not_found: true, send_state: "not_sent"};
+    if (check.status === 404)
+      return {error: "ChatGPT conversation failed: 404 — backend confirms not found for this account",
+              not_found: true, provider_status: 404, send_state: "not_sent"};
     if (!check.ok) {
       const raw = check.headers && check.headers.get("Retry-After");
       const retry = raw ? (/^\d+(\.\d+)?$/.test(raw.trim()) ? Number(raw) : (Date.parse(raw) - Date.now()) / 1000) : 0;
       return {error: `ChatGPT conversation read failed: HTTP ${check.status} — message not sent`,
               provider_status: check.status, send_state: "not_sent", retry_after: Number.isFinite(retry) ? Math.max(0, retry) : 0};
     }
+    if (unloadable())
+      return {error: "ChatGPT UI cannot display this conversation although the backend returned HTTP 200 — message not sent",
+              code: "chat_ui_not_ready", send_state: "not_sent"};
     const data = await check.json();
     before = Object.keys(data.mapping || {});
     for (const node of Object.values(data.mapping || {}))

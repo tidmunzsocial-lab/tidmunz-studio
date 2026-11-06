@@ -98,8 +98,13 @@ pageSend({type:'chat',conversation_id:'existing',prompt:'read attachment',images
 
 
 @pytest.mark.parametrize("statuses,clicks,reads,not_found,banner", [
-    ([404, 200], 1, 2, False, ""), ([404, 404, 404], 0, 3, True, ""), ([403], 0, 1, False, ""),
-    ([429], 0, 1, False, ""), ([429], 0, 0, True, "ไม่สามารถโหลดการสนทนา ChatGPT นี้ได้")])
+    ([404, 200], 1, 2, False, ""),
+    ([404, 404, 404, 404, 404], 0, 5, True, ""),
+    ([403], 0, 1, False, ""),
+    ([429], 0, 1, False, ""),
+    ([429], 0, 1, False, "ไม่สามารถโหลดการสนทนา ChatGPT นี้ได้"),
+    ([503], 0, 1, False, "Unable to load conversation"),
+    ([200], 0, 1, False, "Unable to load conversation")])
 def test_extension_retries_reads_without_resending_or_mislabeling_403(statuses, clicks, reads, not_found, banner):
     node = shutil.which("node")
     if not node:
@@ -137,8 +142,13 @@ pageSend({conversation_id:'test-chat',prompt:'test',images:[]}).then(result=>{
         code, body = api.error_reply(data["result"])
         assert code == 403 and body["error"]["code"] == "chatgpt_conversation_access_denied"
     if banner:
-        assert api.error_reply(data["result"])[0] == 404
-    if statuses == [429] and not banner:
+        # A cosmetic ChatGPT UI banner is not evidence the history was deleted.
+        assert not data["result"].get("not_found")
+        if statuses == [200]:
+            assert data["result"]["code"] == "chat_ui_not_ready"
+        else:
+            assert data["result"]["provider_status"] == statuses[0]
+    if statuses == [429]:
         assert data["result"]["send_state"] == "not_sent"
         assert data["result"]["retry_after"] == 75
         assert api.error_reply(data["result"])[0] == 429
@@ -276,7 +286,7 @@ const el=(id,role,text)=>({innerText:text,textContent:text,querySelectorAll:()=>
 const nodes=[el('u1','user','prompt'),el('a1','assistant','ไม่สามารถโหลดคำตอบนี้')];
 global.location={pathname:'/c/12345678-1234-1234-1234-123456789012'};
 global.document={querySelectorAll:s=>s.includes('data-message-id')?nodes:[]};
-const message={author:{role:'assistant'},content:{content_type:'text',parts:['{"characters":[]}']},status:'finished_successfully',end_turn:true};
+const message={author:{role:'assistant'},content:{content_type:'text',parts:['<CodeBlock language="json" editable={true}>{"characters":[]}</CodeBlock>']},status:'finished_successfully',end_turn:true};
 global.fetch=async url=>({ok:true,json:async()=>url.includes('/api/auth/session')?{accessToken:'t'}:{mapping:{a1:{message}},current_node:'a1'}});
 pagePoll('chat',{before:[],dom_before:[],user_message_id:'u1',dom_mode:true,sentAt:Date.now()-60000,
   dom_reply_id:'a1',dom_reply_text:'ไม่สามารถโหลดคำตอบนี้',dom_reply_since:Date.now()-30000}).then(r=>console.log(JSON.stringify(r)));
