@@ -3575,7 +3575,8 @@ def parse_json_reply(text: str) -> dict:
                 return value
         except ValueError:
             continue
-    raise RuntimeError("GPT ไม่ได้ตอบเป็น JSON")
+    snippet = " ".join(text.split())[:90]
+    raise RuntimeError(f"GPT ไม่ได้ตอบเป็น JSON ({len(text)} ตัวอักษร: {snippet or 'ว่าง'})")
 
 
 def retry_structured_gpt_reply(send, *, label, valid=None, attempts=3, on_retry=None):

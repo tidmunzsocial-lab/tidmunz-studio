@@ -97,9 +97,10 @@ pageSend({type:'chat',conversation_id:'existing',prompt:'read attachment',images
     assert data["names"] == ["story_context.txt"]
 
 
-@pytest.mark.parametrize("statuses,clicks,reads,not_found", [
-    ([404, 200], 1, 2, False), ([404, 404, 404], 0, 3, True), ([403], 0, 1, False), ([429], 0, 1, False)])
-def test_extension_retries_reads_without_resending_or_mislabeling_403(statuses, clicks, reads, not_found):
+@pytest.mark.parametrize("statuses,clicks,reads,not_found,banner", [
+    ([404, 200], 1, 2, False, ""), ([404, 404, 404], 0, 3, True, ""), ([403], 0, 1, False, ""),
+    ([429], 0, 1, False, ""), ([429], 0, 0, True, "ไม่สามารถโหลดการสนทนา ChatGPT นี้ได้")])
+def test_extension_retries_reads_without_resending_or_mislabeling_403(statuses, clicks, reads, not_found, banner):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node unavailable")
@@ -112,7 +113,7 @@ global.setTimeout = fn => {fn(); return 0;};
 const send = {disabled:false, click:()=>clicks++};
 const form = {isConnected:true, querySelectorAll:()=>[], querySelector:s=>s==='button[type="submit"]'?send:null};
 const editor = {isConnected:true, innerText:'', textContent:'', closest:()=>form, focus:()=>{}};
-global.document = {querySelector:()=>editor,execCommand:(cmd,_show,value)=>{
+global.document = {body:{innerText:BANNER},querySelector:()=>editor,execCommand:(cmd,_show,value)=>{
  if(cmd==='selectAll')editor.innerText='';
  if(cmd==='insertText')editor.innerText=value;
 }};
@@ -126,7 +127,7 @@ global.fetch = async (url, options) => {
 pageSend({conversation_id:'test-chat',prompt:'test',images:[]}).then(result=>{
  console.log(JSON.stringify({result,clicks,reads}));
 }).catch(e=>{console.error(e);process.exitCode=1});
-'''.replace("STATUSES", json.dumps(statuses))
+'''.replace("STATUSES", json.dumps(statuses)).replace("BANNER", json.dumps(banner))
     result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
     data = json.loads(result.stdout)
     assert data["clicks"] == clicks and data["reads"] == reads
@@ -135,7 +136,9 @@ pageSend({conversation_id:'test-chat',prompt:'test',images:[]}).then(result=>{
         assert data["result"]["provider_status"] == 403
         code, body = api.error_reply(data["result"])
         assert code == 403 and body["error"]["code"] == "chatgpt_conversation_access_denied"
-    if statuses == [429]:
+    if banner:
+        assert api.error_reply(data["result"])[0] == 404
+    if statuses == [429] and not banner:
         assert data["result"]["send_state"] == "not_sent"
         assert data["result"]["retry_after"] == 75
         assert api.error_reply(data["result"])[0] == 429
@@ -260,6 +263,54 @@ global.fetch=async url=>{
     assert data["result"]["dom_mode"] is True
     assert data["result"]["user_message_id"] == "sent-user"
     assert data["result"]["dom_before"] == data["known"] == ["old-0", "old-1"]
+
+
+def test_unloadable_reply_on_screen_is_read_from_conversation_data():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    function = source[source.index("async function pagePoll("):source.index('chrome.alarms.create(')]
+    harness = r'''
+const el=(id,role,text)=>({innerText:text,textContent:text,querySelectorAll:()=>[],getAttribute:k=>k==='data-message-id'?id:role});
+const nodes=[el('u1','user','prompt'),el('a1','assistant','ไม่สามารถโหลดคำตอบนี้')];
+global.location={pathname:'/c/12345678-1234-1234-1234-123456789012'};
+global.document={querySelectorAll:s=>s.includes('data-message-id')?nodes:[]};
+const message={author:{role:'assistant'},content:{content_type:'text',parts:['{"characters":[]}']},status:'finished_successfully',end_turn:true};
+global.fetch=async url=>({ok:true,json:async()=>url.includes('/api/auth/session')?{accessToken:'t'}:{mapping:{a1:{message}},current_node:'a1'}});
+pagePoll('chat',{before:[],dom_before:[],user_message_id:'u1',dom_mode:true,sentAt:Date.now()-60000,
+  dom_reply_id:'a1',dom_reply_text:'ไม่สามารถโหลดคำตอบนี้',dom_reply_since:Date.now()-30000}).then(r=>console.log(JSON.stringify(r)));
+'''
+    result = subprocess.run([node, "-e", function + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["done"] is True and data["text"] == '{"characters":[]}'
+
+
+def test_long_prompt_shown_as_pasted_file_still_waits_for_reply():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable")
+    source = (Path(__file__).resolve().parents[1] / "snapgen_modules/chrome_ext/background.js").read_text()
+    functions = source[source.index("async function pageNodes("):source.index("async function pagePoll(")]
+    harness = r'''
+let clicks=0;
+const node=(id,role,text)=>({textContent:text,innerText:text,getAttribute:k=>k==='data-message-id'?id:role});
+const messages=[node('old-user','user','old'),node('old-assistant','assistant','old reply')];
+const editor={isConnected:true,innerText:'',textContent:'',closest:()=>form,focus(){}};
+const send={disabled:false,click(){clicks++;messages.push(node('new-user','user','Pasted text'));}};
+const form={isConnected:true,querySelectorAll:()=>[],querySelector:s=>s==='button[type="submit"]'?send:null};
+global.location={pathname:'/c/existing'};
+global.setTimeout=fn=>{fn();return 0;};
+global.document={querySelectorAll:s=>s.includes('data-message-id')?messages:[],querySelector:()=>editor,
+ execCommand:(cmd,_show,value)=>{if(cmd==='selectAll')editor.innerText='';if(cmd==='insertText')editor.innerText=value;}};
+global.fetch=async()=>{throw Error('no fetch');};
+pageSend({type:'chat',conversation_id:'existing',prompt:'whole story prompt',images:[]}).then(result=>
+ console.log(JSON.stringify({result,clicks}))).catch(e=>{console.error(e);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", functions + harness], capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["clicks"] == 1
+    assert data["result"]["ok"] is True and data["result"]["user_message_id"] == "new-user"
 
 
 @pytest.mark.parametrize("clear_draft", [False, True])

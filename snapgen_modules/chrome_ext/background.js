@@ -8,7 +8,8 @@ try { importScripts("config.js"); } catch (e) { self.TZ_CONFIG = null; }
 
 const PORTS = [8766, 8767, 8768];
 const JOB_LIMIT_MS = 12 * 60 * 1000;
-const CHAT_JOB_LIMIT_MS = 3 * 60 * 1000;
+// Whole-story analysis/Context replies take 4–8 minutes; a 3-minute cut threw away answers GPT was still writing.
+const CHAT_JOB_LIMIT_MS = 12 * 60 * 1000;
 let running = false;
 let link = self.TZ_CONFIG || null;  // {port, token}
 
@@ -507,9 +508,11 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
     if (!result) continue;
     if (result.cid) state.cid = result.cid;
     if (result.idle != null) state.idle = result.idle;
+    if (result.api_read_at) state.api_read_at = result.api_read_at;
     if (result.dom_reply_id != null) {
       state.dom_reply_id = result.dom_reply_id;
       state.dom_reply_text = result.dom_reply_text;
+      state.dom_reply_since = result.dom_reply_since;
     }
     if (result.rate_limited) {
       // A prompt already went out: wait and read this same conversation, never call pageSend again.
@@ -659,6 +662,12 @@ async function pageSend(job) {
     if (!session || !session.accessToken) return {error: "ChatGPT is logged out in Chrome — log in, then try again"};
   }
   if (domReady) before = domBefore;
+  // ChatGPT itself cannot open this chat (it shows "Unable to load conversation" and its reads keep
+  // answering 429 while new chats work): report it as gone so the app starts a fresh story chat.
+  const unloadable = () => /ไม่สามารถโหลดการสนทนา|unable to load conversation|couldn.t load (?:this )?conversation/i
+    .test(String(document.body && document.body.innerText || ""));
+  if (job.conversation_id && !domReady && unloadable())
+    return {error: "ChatGPT conversation failed: 404 — ChatGPT cannot load this chat", not_found: true, send_state: "not_sent"};
   if (job.conversation_id && !domReady) {
     // A just-created chat may not yet be readable after navigation. Retry GET
     // only, never send the prompt twice or silently start another chat.
@@ -670,6 +679,8 @@ async function pageSend(job) {
       await sleep(1500);
     }
     if (check.status === 404) return {error: "ChatGPT conversation failed: 404 — not found for this account", not_found: true};
+    if (!check.ok && (unloadable() || (await sleep(3000), unloadable())))
+      return {error: "ChatGPT conversation failed: 404 — ChatGPT cannot load this chat", not_found: true, send_state: "not_sent"};
     if (!check.ok) {
       const raw = check.headers && check.headers.get("Retry-After");
       const retry = raw ? (/^\d+(\.\d+)?$/.test(raw.trim()) ? Number(raw) : (Date.parse(raw) - Date.now()) / 1000) : 0;
@@ -854,6 +865,15 @@ async function pageSend(job) {
       const attachedNow = currentButtons.filter(b => /^(ลบ|remove)\s/i.test((b.getAttribute("aria-label") || "").trim())).length;
       const draftMatches = normalized(draft) === expected;
       const textMatches = freshUsers.some(n => normalized(n.textContent || "").includes(expected));
+      // Send was clicked and ChatGPT shows evidence it took the message (a new user bubble — long
+      // prompts become a "pasted text" file so the text differs — a Stop button, or an emptied
+      // composer). Wait for that reply instead of failing; never click Send again.
+      if (freshUsers.length || activeResponse || (!draft.trim() && insertAccepted === true)) {
+        const lastUser = freshUsers[freshUsers.length - 1];
+        const id = lastUser ? lastUser.getAttribute("data-message-id") : null;
+        return {ok: true, before, oldPointers, dom_before: domBefore,
+                dom_mode: domReady && Boolean(id), user_message_id: id};
+      }
       const deliveryDebug = {
                 prompt_chars: String(job.prompt || "").length, draft_chars: draft.length,
                 draft_matches: draftMatches, insert_accepted: insertAccepted === true,
@@ -888,6 +908,7 @@ async function pagePoll(kind, state) {
   const elapsed = (Date.now() - state.sentAt) / 1000;
   if (!cid || elapsed < 6) return {done: false, cid, idle};
 
+  let domUnsure = false;
   if (kind === "chat" && state.user_message_id) {
     const previous = new Set([...(state.before || []), ...(state.dom_before || [])]);
     const nodes = [...document.querySelectorAll('[data-message-id][data-message-author-role]')];
@@ -910,16 +931,31 @@ async function pagePoll(kind, state) {
       const text = (/^[{\[]/.test(code) ? code : (block.innerText || block.textContent || "")).trim();
       if (!text) continue;
       const stable = state.dom_reply_id === id && state.dom_reply_text === text;
-      if (!stable) return {done: false, cid, idle, generating: true, dom_reply_id: id, dom_reply_text: text};
+      const since = stable && state.dom_reply_since ? state.dom_reply_since : Date.now();
+      const waiting = {done: false, cid, idle, generating: true, dom_reply_id: id, dom_reply_text: text, dom_reply_since: since};
+      if (!stable) return waiting;
       // A complete JSON object is a finished reply even if ChatGPT's Stop button is stale.
       let completeJson = false;
       try { const value = JSON.parse(text); completeJson = Boolean(value && typeof value === "object"); } catch (e) {}
-      if (busy && !completeJson) return {done: false, cid, idle, generating: true, dom_reply_id: id, dom_reply_text: text};
-      return {done: true, text, images: [], conversation_id: cid, message_id: id, source: "chatgpt_page"};
+      if (busy && !completeJson) return waiting;
+      // The Stop button is not always detectable: a JSON-looking reply that does not parse yet, or any
+      // non-JSON text, must stay unchanged for 20s so a pause mid-stream is not taken as the answer.
+      if (!completeJson && Date.now() - since < 20000) return waiting;
+      if (completeJson) return {done: true, text, images: [], conversation_id: cid, message_id: id, source: "chatgpt_page"};
+      // Not clean JSON on screen: ChatGPT can render a finished long reply as "Unable to load message"
+      // (ไม่สามารถโหลดคำตอบนี้) or cut it. The conversation data still holds the full answer: read that.
+      domUnsure = true;
+      break;
     }
     // Prefer the visible UI, but if it has no assistant node for 30s, recover from the conversation API.
     // This avoids both tight API polling and an unbounded wait on a missing/replaced DOM node.
-    if (state.dom_mode && elapsed < 30) return {done: false, cid, idle};
+    if (!domUnsure && state.dom_mode && elapsed < 30) return {done: false, cid, idle};
+  }
+  // Each read downloads the whole conversation (a full story script): reading it every 3s got the
+  // account rate-limited (429). Skip it while ChatGPT is visibly still answering, else read every 20s.
+  if (kind === "chat") {
+    if (busy) return {done: false, cid, idle, generating: true};
+    if (state.api_read_at && Date.now() - state.api_read_at < 20000) return {done: false, cid, idle};
   }
 
   const token = (await (await fetch("/api/auth/session")).json()).accessToken;
@@ -962,7 +998,8 @@ async function pagePoll(kind, state) {
     const last = [...nodes].reverse().find(m => m.author && m.author.role === "assistant" &&
       m.content && m.content.content_type === "text");
     if (!text || !last || last.status !== "finished_successfully" || last.end_turn === false)
-      return {done: false, cid, idle, generating: Boolean(last && last.status === "in_progress")};
+      return {done: false, cid, idle, api_read_at: Date.now(),
+              generating: Boolean(last && last.status === "in_progress")};
   }
   const fresh = pointers.filter(p => !skip.has(p));
   // A picture can still be drawing after the reply text: give it time unless ChatGPT answered instead.

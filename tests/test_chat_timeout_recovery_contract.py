@@ -23,7 +23,7 @@ def load_function(name, namespace):
 class ChatTimeoutRecoveryContract(unittest.TestCase):
     def test_chat_timeout_is_bounded_but_image_generation_retains_limit(self):
         code = EXT_SOURCE.read_text(encoding="utf-8")
-        self.assertIn("const CHAT_JOB_LIMIT_MS = 3 * 60 * 1000;", code)
+        self.assertIn("const CHAT_JOB_LIMIT_MS = 12 * 60 * 1000;", code)
         self.assertIn('job.type === "chat" ? CHAT_JOB_LIMIT_MS : JOB_LIMIT_MS', code)
         self.assertIn('const JOB_LIMIT_MS = 12 * 60 * 1000;', code)
         self.assertIn("ChatGPT response timed out after 3 minutes", code)
