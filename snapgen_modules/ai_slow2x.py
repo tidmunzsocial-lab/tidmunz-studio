@@ -313,17 +313,16 @@ def _run_video_process_with_progress(command, duration, backend, say, progress=N
 
 
 def _video_2x_size(width, height):
-    """Double dimensions without changing orientation; never upscale beyond UHD 4K."""
-    if max(width, height) >= 3840:
-        return width, height
-    factor = min(2.0, 3840.0 / max(width, height))
+    """Spatial resize capped at Full HD; temporal Slow 2x is unchanged."""
+    if max(width, height) >= 1920:
+        return _video_4k_size(width, height)
+    factor = min(2.0, 1920.0 / max(width, height))
     return tuple(max(2, int(round(value * factor / 2)) * 2) for value in (width, height))
 
 
 def _video_4k_size(width, height):
-    if max(width, height) >= 3840:
-        return width, height
-    return (2160, 3840) if height > width else (3840, 2160)
+    # ponytail: retain legacy API for saved jobs; output now Full HD.
+    return (1080, 1920) if height > width else (1920, 1080)
 
 
 def _fit_video_size(width, height, target_width, target_height):
@@ -339,7 +338,7 @@ def upscale_video_4k(input_video, output_video=None, log=None, progress=None):
         before = _video_dimensions(ffmpeg, src)
         after = _video_dimensions(ffmpeg, result)
         target = _video_4k_size(*before)
-        if max(before) < 3840 and after != target:
+        if after != target:
             raise RuntimeError(f"อัปสเกล 4K ไม่ผ่านการตรวจ: ได้ {after[0]}x{after[1]}, ต้องได้ {target[0]}x{target[1]}")
     return result
 
@@ -512,7 +511,7 @@ def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4",
     if duration:
         duration *= int(factor)
     tw, th = (_video_4k_size(w, h) if upscale_4k else _video_2x_size(w, h) if upscale_2x
-              else ((2160, 3840) if h > w else (3840, 2160)))
+              else ((1080, 1920) if h > w else (1920, 1080)))
     cw, ch = _fit_video_size(w, h, tw, th) if upscale_4k else (tw, th)
     env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
     # Interpolate first (cheaper at the source size), then upscale.

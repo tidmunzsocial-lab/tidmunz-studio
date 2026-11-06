@@ -2337,14 +2337,13 @@ try:
                     before = _slow2x_mod._video_dimensions(_slow2x_mod.ensure_ffmpeg_tool(log=log_fn), current_path)
                 except Exception as exc:
                     raise RuntimeError(f"อ่านความละเอียดก่อนอัปสเกลไม่ได้: {exc}") from exc
-                if max(before) >= 3840 and not slow_enabled:
-                    actual_backend[0] = "ข้าม (ไฟล์ต้นฉบับ 4K แล้ว)"
-                    # Do not upscale a completed 4K video a second time.
+                if before == _slow2x_mod._video_4k_size(*before) and not slow_enabled:
+                    actual_backend[0] = "ข้าม (ไฟล์ต้นฉบับ 1080p แล้ว)"
                 else:
                     current = _auto_upscale_video_1080p(
                         current, log_fn=log_fn, target_4k=True, upscale_enabled=True, progress=report,
                     )
-                if max(before) < 3840:
+                if before != _slow2x_mod._video_4k_size(*before):
                     after = _slow2x_mod._video_dimensions(_slow2x_mod.ensure_ffmpeg_tool(log=log_fn), current)
                     expected = _slow2x_mod._video_4k_size(*before)
                     if after != expected:
@@ -7469,9 +7468,9 @@ def _install_mute_video_checkbox():
             mute_box = add_checkbox("ปิดเสียงวิดีโอ", mute_downloaded_video_var, slow_box, 1)
         upscale_box = next((w for w in found if str(w.cget("text")).startswith("Upscale 1080p")), None)
         if upscale_box is None:
-            upscale_box = add_checkbox("Upscale 1080p (Auto: 4K)", upscale_1080p_var, mute_box, 2)
+            upscale_box = add_checkbox("Upscale 1080p (Auto: 1080p)", upscale_1080p_var, mute_box, 2)
         else:
-            upscale_box.configure(text="Upscale 1080p (Auto: 4K)")
+            upscale_box.configure(text="Upscale 1080p (Auto: 1080p)")
         _save_video_checkbox_options()
         return bool(mute_box and upscale_box)
     except Exception as e:

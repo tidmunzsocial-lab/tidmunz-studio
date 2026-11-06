@@ -11,12 +11,12 @@ from test_auto_video_merge import merge_scope
 import ai_slow2x as A
 
 
-@pytest.mark.parametrize("size,target", [((1280, 720), (3840, 2160)), ((720, 1280), (2160, 3840)),
-                                        ((3840, 2160), (3840, 2160))])
+@pytest.mark.parametrize("size,target", [((1280, 720), (1920, 1080)), ((720, 1280), (1080, 1920)),
+                                        ((1920, 1080), (1920, 1080))])
 def test_4k_target_fits_content_without_stretching_or_changing_orientation(size, target):
     assert A._video_4k_size(*size) == target
     assert A._fit_video_size(*size, *target) == target
-    assert A._fit_video_size(1264, 720, 3840, 2160) == (3792, 2160)
+    assert A._fit_video_size(1264, 720, 1920, 1080) == (1896, 1080)
 
 
 @pytest.mark.parametrize("size", [(1280, 720), (720, 1280)])
@@ -73,7 +73,7 @@ def test_topaz_4k_spatial_upscale_keeps_audio_without_slow_motion(tmp_path, monk
 def test_missing_topaz_reports_ffmpeg_backend_truthfully(tmp_path, monkeypatch):
     src = tmp_path / "clip.mp4"
     src.write_bytes(b"input")
-    target = (3840, 2160)
+    target = (1920, 1080)
 
     def run(command, **kwargs):
         return SimpleNamespace(returncode=0,
@@ -111,7 +111,7 @@ def test_missing_topaz_reports_ffmpeg_backend_truthfully(tmp_path, monkeypatch):
     assert not any("Topaz Video AI ✓" in line for line in logs)
 
 
-@pytest.mark.parametrize("aspect,expected", [("16:9", [3840, 2160]), ("9:16", [2160, 3840])])
+@pytest.mark.parametrize("aspect,expected", [("16:9", [1920, 1080]), ("9:16", [1080, 1920])])
 def test_final_merge_uses_4k_without_regenerating_assets(tmp_path, aspect, expected):
     ns, logs, commands = merge_scope(tmp_path)
     project = ns["state"]["project"]
@@ -190,7 +190,8 @@ def test_auto_postprocess_is_queued_without_waiting_for_the_next_clip(tmp_path, 
         "g": g, "Path": Path, "threading": __import__("threading"),
         "_slow2x_mod": SimpleNamespace(make_ai_slow2x=slow,
                                         ensure_ffmpeg_tool=lambda **kwargs: "ffmpeg",
-                                        _video_dimensions=lambda ffmpeg, path: (3840, 2160)),
+                                        _video_dimensions=lambda ffmpeg, path: (1920, 1080),
+                                        _video_4k_size=A._video_4k_size),
         "_auto_upscale_video_1080p": lambda path, **kwargs: path,
         "_mute_video_stream_copy": lambda path, **kwargs: path,
     }

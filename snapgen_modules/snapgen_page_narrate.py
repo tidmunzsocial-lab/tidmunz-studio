@@ -107,7 +107,7 @@ except ImportError:
 
 MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
-AUTO_VIDEO_SIZES = {"16:9": (3840, 2160), "9:16": (2160, 3840)}
+AUTO_VIDEO_SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
 SIZES_2K = {"16:9": (2560, 1440), "9:16": (1440, 2560)}
 
 
