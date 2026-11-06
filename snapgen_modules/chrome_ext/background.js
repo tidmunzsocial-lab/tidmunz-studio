@@ -532,7 +532,8 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
     throttles = 0;
     if (result.done || result.error) return result;
     // Only evidence from this reply extends the idle limit; errors/429 do not.
-    if (job.type === "chat" && result.generating)
+    // idle === 0 means ChatGPT's Stop button is visible: it is still thinking, even before any text.
+    if (job.type === "chat" && (result.generating || result.idle === 0))
       deadline = Math.min(hardDeadline, Date.now() + CHAT_JOB_LIMIT_MS);
   }
   // One final read of the same conversation can recover a reply completed at the boundary.
