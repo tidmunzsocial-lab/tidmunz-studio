@@ -1106,27 +1106,48 @@ def _ensure_status_footer():
         _status_footer.columnconfigure(3, weight=0)
     return _status_footer
 
+_version_display_cache = {"value": None, "checked": 0.0, "pending": False}
+
 def _installed_version():
+    # Receipt verification can take several seconds on a network/virtual disk.
+    # Never hash the installation on Tk's event-loop thread during layout.
+    now = time.monotonic()
+    if (_version_display_cache["value"] is not None
+            and (now - _version_display_cache["checked"] < 120.0
+                 or _version_display_cache["pending"])):
+        return _version_display_cache["value"]
     try:
         import snapgen_updater
         version = snapgen_updater.current_version(BASE_ROOT)
         receipt = snapgen_updater._installation_receipt(BASE_ROOT)
+        if receipt and receipt.get("files"):
+            _version_display_cache.update(
+                value=f"{version} (กำลังตรวจไฟล์)", checked=now, pending=True)
+            def worker():
+                try:
+                    intact, _ = snapgen_updater.verify_installed_files(BASE_ROOT)
+                    result = version if intact else f"{version} (ไฟล์ไม่ครบ)"
+                except Exception:
+                    result = f"{version} (ตรวจไฟล์ไม่ได้)"
+                _version_display_cache.update(
+                    value=result, checked=time.monotonic(), pending=False)
+                try:
+                    root.after(0, _ensure_main_version_label)
+                except Exception:
+                    pass
+            threading.Thread(target=worker, daemon=True, name="version-receipt-check").start()
+            return _version_display_cache["value"]
+        result = version
         if receipt:
-            if receipt.get("files"):
-                intact, _ = snapgen_updater.verify_installed_files(BASE_ROOT)
-                if not intact:
-                    return f"{version} (ไฟล์ไม่ครบ)"
-            else:
-                # Legacy receipt: a newer metadata label alone is not proof
-                # that the update's program files were installed.
-                marker = BASE_ROOT / "snapgen_data" / "meta" / "snapgen_version.json"
-                if marker.is_file():
-                    advertised = json.loads(marker.read_text(encoding="utf-8-sig")).get("version")
-                    if str(advertised or "") != version:
-                        return f"{version} (อัปเดตไม่ครบ)"
-        return version
+            marker = BASE_ROOT / "snapgen_data" / "meta" / "snapgen_version.json"
+            if marker.is_file():
+                advertised = json.loads(marker.read_text(encoding="utf-8-sig")).get("version")
+                if str(advertised or "") != version:
+                    result = f"{version} (อัปเดตไม่ครบ)"
     except Exception:
-        return "—"
+        result = "—"
+    _version_display_cache.update(value=result, checked=now, pending=False)
+    return result
 
 def _ensure_main_version_label():
     """Pin the installed version to the main window's bottom-right corner."""
@@ -17387,13 +17408,26 @@ if root:
             root.after(500, lambda: _fix_storyboard_btn(attempt + 1))
     root.after(100, _fix_storyboard_btn)
 
-    # Open the main window exactly in the centre of the primary display.  Run
-    # once before the first paint and once after delayed page layout settles.
+    # Keep header actions on a second row. The recovered 96-DPI header cannot
+    # contain all checkboxes + ChatGPT/Prompt-Ref/Settings in one line at 125%.
+    # Install once AFTER all controls exist; callbacks remain with their
+    # original widgets and only their presentation is moved.
+    try:
+        from snapgen_responsive_ui import install as _install_responsive_ui
+        _install_responsive_ui(root, g, font=(SNAPGEN_UI_FONT, 9, "bold"))
+    except Exception as _responsive_error:
+        print(f"[SnapGen] responsive toolbar unavailable: {_responsive_error}")
+
+    # Initial placement without an expensive nested Tk update_idletasks().
+    # On common 125% Windows laptops, prefer the full work area so the play/
+    # editing controls remain reachable, while leaving Restore available.
     def _center_main_window():
         try:
             if str(root.state()) in {"iconic", "withdrawn", "zoomed"}:
                 return
-            root.update_idletasks()
+            # This callback runs after Tk has already laid out the widgets.
+            # update_idletasks() here re-entered expensive version-file
+            # verification during startup (measured 5 seconds frozen).
             screen_width = root.winfo_screenwidth()
             screen_height = root.winfo_screenheight()
             positioned = False
@@ -17432,8 +17466,21 @@ if root:
         except Exception as _center_error:
             print(f"[SnapGen] centre window failed: {_center_error}")
 
-    _center_main_window()
-    root.after(300, _center_main_window)
+    root.after(60, _center_main_window)
+
+    def _expand_highdpi_first_window():
+        try:
+            if os.name != "nt" or root.state() != "normal":
+                return
+            import ctypes
+            h = int(str(root.frame()), 0)
+            dpi = ctypes.windll.user32.GetDpiForWindow(h)
+            if dpi > 96 and root.winfo_screenwidth() <= 1800:
+                root.state("zoomed")
+        except Exception:
+            pass
+
+    root.after(230, _expand_highdpi_first_window)
 
     # Final canonical Slot loader.  The recovered Video loader may restore an
     # Image Prompt from legacy sidecar metadata.  This wrapper is installed

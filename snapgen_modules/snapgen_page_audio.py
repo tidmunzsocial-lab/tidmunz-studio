@@ -565,18 +565,18 @@ def install(g: dict, root: tk.Misc) -> tk.Frame:
         ]
         try:
             from PIL import Image, ImageDraw, ImageTk
-            scale = 2
-            image = Image.new("RGB", (width * scale, height * scale), "#FFFFFF")
+            # At 125% DPI Windows/Tk already rasterizes in physical pixels.
+            # Supersampling a full-window bitmap 2x and LANCZOS downsampling it
+            # on every resize made dragging the window noticeably sluggish.
+            scale = 1
+            image = Image.new("RGB", (width, height), "#FFFFFF")
             painter = ImageDraw.Draw(image)
             painter.line(
-                [(margin * scale, middle * scale), ((width - margin) * scale, middle * scale)],
-                fill="#E0F2FE", width=2,
+                [(margin, middle), (width - margin, middle)],
+                fill="#E0F2FE", width=1,
             )
-            polygon = [
-                (int(x * scale), int(y * scale)) for x, y in upper + lower
-            ]
+            polygon = [(int(x), int(y)) for x, y in upper + lower]
             painter.polygon(polygon, fill="#7DD3FC")
-            image = image.resize((width, height), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image)
             waveform["wave_photo"] = photo
             canvas.create_image(0, 0, image=photo, anchor="nw")
@@ -933,7 +933,7 @@ def install(g: dict, root: tk.Misc) -> tk.Frame:
                 root.after_cancel(waveform["redraw_after"])
             except Exception:
                 pass
-        waveform["redraw_after"] = root.after(40, redraw_after_resize)
+        waveform["redraw_after"] = root.after(180, redraw_after_resize)
 
     waveform_canvas.bind("<Configure>", on_canvas_configure)
     waveform_canvas.bind("<Button-1>", waveform_press)
