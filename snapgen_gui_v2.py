@@ -8730,6 +8730,30 @@ def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, mod
                     # Retry only its initial turn, never an established history.
                     missing_chat = ("chatgpt_conversation_not_found" in bridge_error_body
                                     or "conversation_not_found" in bridge_error_body)
+                    if (_repair_retry and require_history and exc.code == 404
+                            and missing_chat and requested_conversation_id
+                            and _prompt_ref_conversation.get("story_hash")
+                            and not _prompt_ref_conversation.get("context_ready")):
+                        # The ChatGPT Chrome extension can lose a freshly created
+                        # story chat after the independent Context readers. Before
+                        # any Context/Ref/images were saved, rebuild only the SAME
+                        # story history, then retry the requested analysis turn ONCE.
+                        # Keep existing reader results; never resend a media job.
+                        from snapgen_prompt_ref_history_recovery import safe_to_rebuild_context_history
+                        candidate_story = _ensure_prompt_ref_story_text()
+                        if safe_to_rebuild_context_history(
+                                http_status=exc.code, error_message=bridge_error_body,
+                                retry_allowed=_repair_retry, require_history=require_history,
+                                context_ready=bool(_prompt_ref_conversation.get("context_ready")),
+                                conversation_id=requested_conversation_id,
+                                expected_story_hash=str(_prompt_ref_conversation.get("story_hash") or ""),
+                                current_story_hash=_prompt_ref_story_hash(candidate_story)):
+                            print("[Prompt-Ref] GPT ไม่พบประวัติ Context — ส่งบทเดิมใหม่แล้วลองขั้นนี้อีกครั้งเดียว",
+                                  flush=True)
+                            _reset_prompt_ref_conversation()
+                            _ingest_prompt_ref_story(candidate_story)
+                            return _prompt_ref_chat(messages, require_history=True,
+                                                    _repair_retry=False, model=model)
                     if (_repair_retry and not require_history and exc.code == 404
                             and missing_chat and _prompt_ref_conversation.get("new_story_requested")
                             and not _prompt_ref_conversation.get("story_hash")
