@@ -317,7 +317,8 @@ async function openPage(tabId, url, retryWithFreshTab = true, isCancelled = () =
         if (location.origin !== target.origin || location.pathname !== target.pathname)
           return {state: "navigating", page};
         if (document.querySelector('form div.ProseMirror[role="textbox"]') ||
-            document.querySelector('form #prompt-textarea[contenteditable="true"]')) return {state: "ok", page};
+            document.querySelector('form #prompt-textarea[contenteditable="true"]') ||
+            document.querySelector('form [contenteditable="true"]')) return {state: "ok", page};
         return {state: "", page};
       }, [url]);
     } catch (e) {}  // still navigating
@@ -620,7 +621,8 @@ async function pageVerifyDelivery(job, before) {
   }
 
   const editor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
-    document.querySelector('form #prompt-textarea[contenteditable="true"]');
+    document.querySelector('form #prompt-textarea[contenteditable="true"]') ||
+    document.querySelector('form [contenteditable="true"]');
   const form = editor && editor.closest("form");
   const send = form && form.querySelector('button[type="submit"]');
   const draft = normalize(editor && (editor.innerText || editor.textContent || ""));
@@ -706,7 +708,8 @@ async function pageSend(job) {
   const composerUntil = Date.now() + 15000;
   while (Date.now() < composerUntil) {
     const candidate = document.querySelector('form div.ProseMirror[role="textbox"]') ||
-      document.querySelector('form #prompt-textarea[contenteditable="true"]');
+      document.querySelector('form #prompt-textarea[contenteditable="true"]') ||
+      document.querySelector('form [contenteditable="true"]');
     const candidateForm = candidate && candidate.closest("form");
     if (candidate && candidate.isConnected && candidateForm && candidateForm.isConnected) {
       editor = candidate;
@@ -781,7 +784,8 @@ async function pageSend(job) {
   // ChatGPT can replace the composer while attachments finish uploading. Resolve the live
   // editor/form/button again immediately before clicking so a detached stale button cannot eat the send.
   const latestEditor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
-    document.querySelector('form #prompt-textarea[contenteditable="true"]');
+    document.querySelector('form #prompt-textarea[contenteditable="true"]') ||
+    document.querySelector('form [contenteditable="true"]');
   const latestForm = latestEditor && latestEditor.closest("form");
   const latestSend = latestForm && latestForm.querySelector('button[type="submit"]');
   const normalizePrompt = str => String(str || "").normalize("NFKC").replace(/[\s\p{Cf}]+/gu, "");
@@ -857,7 +861,8 @@ async function pageSend(job) {
     }
     if (!userMessageId) {
       const currentEditor = document.querySelector('form div.ProseMirror[role="textbox"]') ||
-        document.querySelector('form #prompt-textarea[contenteditable="true"]');
+        document.querySelector('form #prompt-textarea[contenteditable="true"]') ||
+      document.querySelector('form [contenteditable="true"]');
       const currentForm = currentEditor && currentEditor.closest("form");
       const currentSend = currentForm && currentForm.querySelector('button[type="submit"]');
       const draft = String(currentEditor && (currentEditor.innerText || currentEditor.textContent || "") || "");
