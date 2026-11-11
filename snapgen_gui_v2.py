@@ -13294,6 +13294,7 @@ def _restore_image_mode_latest():
                 conversation_state=conversation_state,
                 conversation_save_fn=conversation_save_fn,
                 temporary_chat=bool(payload.get("_temporary_chat", False)),
+                parallel_images=bool(payload.get("_parallel_images", False)),
             )
             if prompt_index == 11:
                 register_storyboard = g.get("_register_generated_storyboard")
@@ -14317,65 +14318,83 @@ def _restore_image_mode_latest():
                     storyboard_path = None
                 # 2. Each scene: continue the same Image AI history
                 done = 0
-                prev_path = None
-                for n in queue_nums:
-                    if _auto_gen_state["cancel"]:
-                        _img_log(f"[auto] หยุดแล้ว — เสร็จ {done}/{len(queue_nums)} ซีน")
-                        break
-                    p = prompts[n-1]
-                    root.after(0, lambda n=n: _img_log(f"[auto] ซีน {n}/{queue_nums[-1]} — กำลังสร้าง..."))
-                    root.after(0, lambda p=p: (img_prompt_text.delete("1.0", tk.END), img_prompt_text.insert("1.0", p)))
-                    try:
-                        run = _story_run_for_prompt(n)
-                        panel_path = None
-                        if run and storyboard_path and n != 11:
-                            try:
-                                panel_path = _storyboard_panel_crop(
-                                    storyboard_path, BASE, run["run_id"], n, run.get("panel_count")
+                from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+                def process_scene(n):
+                        if _auto_gen_state["cancel"]:
+                            return False
+                        p = prompts[n-1]
+                        root.after(0, lambda n=n: _img_log(f"[auto] ซีน {n}/{queue_nums[-1]} — กำลังสร้าง..."))
+                        root.after(0, lambda p=p: (img_prompt_text.delete("1.0", tk.END), img_prompt_text.insert("1.0", p)))
+                        try:
+                            run = _story_run_for_prompt(n)
+                            panel_path = None
+                            if run and storyboard_path and n != 11:
+                                try:
+                                    panel_path = _storyboard_panel_crop(
+                                        storyboard_path, BASE, run["run_id"], n, run.get("panel_count")
+                                    )
+                                except Exception as exc:
+                                    raise RuntimeError(f"Storyboard ช่องที่ {n} ใช้เป็นเรฟไม่ได้: {exc}") from exc
+                            matched=_auto_find_refs(p, img_ref_folder[0] if img_ref_folder else None)
+                            seen=set(); ref_images=[]; stems=[]
+                            for pth,stem in matched:
+                                if pth not in seen: seen.add(pth); ref_images.append(pth); stems.append(stem)
+                            for pth in img_manual_refs:
+                                if pth not in seen and os.path.exists(pth) and _story_ref_age_allowed(pth, p): seen.add(pth); ref_images.append(pth); stems.append(os.path.splitext(os.path.basename(pth))[0])
+                            # Attach the exact current panel.  The full sheet is only
+                            # a compatibility fallback when an old run has no panel metadata.
+                            storyboard_ref = panel_path or storyboard_path
+                            if storyboard_ref and os.path.exists(storyboard_ref):
+                                if storyboard_ref not in seen:
+                                    seen.add(storyboard_ref); ref_images.insert(0, storyboard_ref); stems.insert(0, f"storyboard_panel_{n:02d}" if panel_path else "storyboard")
+                            # The current scene text and run context carry
+                            # continuity; do not attach every previous image where
+                            # it can introduce an unrelated person or prop.
+                            ref_images=ref_images[:10]
+                            ctx = f"นี่คือเหตุการณ์ที่ {n} จากทั้งหมด {total} ต่อจากเหตุการณ์ {n-1}. " if n>1 else f"นี่คือเหตุการณ์ที่ {n} จากทั้งหมด {total}. "
+                            aspect = img_aspect_var.get()
+                            quality="Photorealistic, ultra detailed, sharp focus, high resolution, crisp edges, professional photography quality."
+                            full_prompt=ctx+p.rstrip(".")+". Use "+aspect+" aspect ratio composition. "+quality+" "+LIGHTING_PRESETS.get(img_lighting_var.get(),"")+"."
+                            if run:
+                                full_prompt += _story_authority_block(
+                                    _story_current_scene_text(BASE, run.get("run_id")), n, p
                                 )
-                            except Exception as exc:
-                                raise RuntimeError(f"Storyboard ช่องที่ {n} ใช้เป็นเรฟไม่ได้: {exc}") from exc
-                        matched=_auto_find_refs(p, img_ref_folder[0] if img_ref_folder else None)
-                        seen=set(); ref_images=[]; stems=[]
-                        for pth,stem in matched:
-                            if pth not in seen: seen.add(pth); ref_images.append(pth); stems.append(stem)
-                        for pth in img_manual_refs:
-                            if pth not in seen and os.path.exists(pth) and _story_ref_age_allowed(pth, p): seen.add(pth); ref_images.append(pth); stems.append(os.path.splitext(os.path.basename(pth))[0])
-                        # Attach the exact current panel.  The full sheet is only
-                        # a compatibility fallback when an old run has no panel metadata.
-                        storyboard_ref = panel_path or storyboard_path
-                        if storyboard_ref and os.path.exists(storyboard_ref):
-                            if storyboard_ref not in seen:
-                                seen.add(storyboard_ref); ref_images.insert(0, storyboard_ref); stems.insert(0, f"storyboard_panel_{n:02d}" if panel_path else "storyboard")
-                        # The current scene text and run context carry
-                        # continuity; do not attach every previous image where
-                        # it can introduce an unrelated person or prop.
-                        ref_images=ref_images[:10]
-                        ctx = f"นี่คือเหตุการณ์ที่ {n} จากทั้งหมด {total} ต่อจากเหตุการณ์ {n-1}. " if n>1 else f"นี่คือเหตุการณ์ที่ {n} จากทั้งหมด {total}. "
-                        aspect = img_aspect_var.get()
-                        quality="Photorealistic, ultra detailed, sharp focus, high resolution, crisp edges, professional photography quality."
-                        full_prompt=ctx+p.rstrip(".")+". Use "+aspect+" aspect ratio composition. "+quality+" "+LIGHTING_PRESETS.get(img_lighting_var.get(),"")+"."
-                        if run:
-                            full_prompt += _story_authority_block(
-                                _story_current_scene_text(BASE, run.get("run_id")), n, p
-                            )
-                        if storyboard_ref and os.path.exists(storyboard_ref):
-                            full_prompt += STORYBOARD_CAMERA_ONLY_OVERRIDE
-                        payload={"prompt":full_prompt,"aspect_ratio":aspect,"history_and_training_disabled":False,
-                                 "_use_story_history": True,
-                                 "_story_run_id": run.get("run_id"), "_storyboard_path": run.get("storyboard_path"),
-                                 "_reference_labels": list(stems)}
-                        if ref_images: payload["images"]=[_encode_image_b64(pp) for pp in ref_images]
-                        with _bridge_queue_lock:
-                            _wait_bridge_free(log_fn=_img_log)
+                            if storyboard_ref and os.path.exists(storyboard_ref):
+                                full_prompt += STORYBOARD_CAMERA_ONLY_OVERRIDE
+                            payload={"prompt":full_prompt,"aspect_ratio":aspect,"history_and_training_disabled":False,
+                                     "_use_story_history": False,  # isolated chat per parallel image
+                                     "_story_run_id": run.get("run_id"), "_storyboard_path": run.get("storyboard_path"),
+                                     "_reference_labels": list(stems)}
+                            if ref_images: payload["images"]=[_encode_image_b64(pp) for pp in ref_images]
+                            payload["_temporary_chat"] = True
+                            payload["_parallel_images"] = True
                             out=_do_image_request(payload,is_edit=bool(ref_images),prompt=full_prompt,name_hint=(" ".join(stems) if stems else p),raw_prompt=p,prompt_index=n)
-                        root.after(0, lambda out=out: img_gallery_add(out, True))
-                        root.after(0, lambda out=out, n=n: _img_log(f"[auto] ✅ ซีน {n} เสร็จ: {out}"))
-                        prev_path = out
-                        done += 1
-                    except Exception as e:
-                        root.after(0, lambda msg=str(e): _img_log(f"[auto] ❌ ซีน {n} error: {msg}"))
-                        done += 1
+                            root.after(0, lambda out=out: img_gallery_add(out, True))
+                            root.after(0, lambda out=out, n=n: _img_log(f"[auto] ✅ ซีน {n} เสร็จ: {out}"))
+                            return True
+                        except Exception as e:
+                            root.after(0, lambda msg=str(e): _img_log(f"[auto] ❌ ซีน {n} error: {msg}"))
+                            return False
+                remaining = iter(queue_nums)
+                pending = {}
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="image-page-two-histories") as pool:
+                    while True:
+                        while not _auto_gen_state["cancel"] and len(pending) < 2:
+                            try:
+                                n = next(remaining)
+                            except StopIteration:
+                                break
+                            pending[pool.submit(process_scene, n)] = n
+                        if not pending:
+                            break
+                        finished, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                        for future in finished:
+                            n = pending.pop(future)
+                            try:
+                                future.result()
+                            except Exception as exc:
+                                root.after(0, lambda n=n, msg=str(exc): _img_log(f"[auto] ❌ ซีน {n}: {msg}"))
+                            done += 1
                 _auto_gen_state["running"] = False
                 root.after(0, lambda: (auto_gen_btn.config(text="🎬 Auto-Gen", bg="#FF6F00"), _set_image_action_buttons_running(False)))
                 root.after(0, lambda: (_img_log(f"[auto] เสร็จทั้งหมด — {done}/{len(queue_nums)} ซีน (Storyboard+{done} รูป)"), _snapgen_notify_done()))
