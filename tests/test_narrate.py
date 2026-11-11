@@ -222,3 +222,36 @@ def test_storyboard_groups_follow_sequences_and_crop_3x3(tmp_path):
     N.crop_board(tmp_path / "s.png", 4, outs)
     assert [Image.open(p).getpixel((5, 5))[0] for p in outs] == [0, 25, 50, 75]
     assert "3 แถว x 3 คอลัมน์" in N.board_request([(1, {"prompt": "ก"})], "9:16")
+
+
+
+def test_picture_story_gpt_scene_refs_preserve_ghost_identity_and_limit():
+    scene = {"characters": ["Ghost", "Friend", "Guest", "Host"]}
+    refs = {"Ghost": "ghost.png", "Human": "human.png", "Friend": "friend.png",
+            "Guest": "guest.png", "Host": "host.png"}
+    same = {"Ghost": {"person": "Human"}}
+    assert N._non_video_scene_references(scene, refs, same) == [
+        "ghost.png", "friend.png", "guest.png", "host.png"]
+    assert N._non_video_scene_references({"characters": ["Ghost"]}, refs, same) == [
+        "ghost.png", "human.png"]
+
+
+def test_scene_executor_launches_two_independent_image_jobs():
+    import threading
+
+    gate = threading.Barrier(2, timeout=3)
+    seen = []
+    lock = threading.Lock()
+
+    def work(number):
+        gate.wait()
+        with lock:
+            seen.append(number)
+        return number * 10
+
+    output = []
+    N._run_image_jobs([1, 2], work, lambda job, result, error: output.append(
+        (job, result, error)), lambda: None, max_workers=2)
+    assert sorted(seen) == [1, 2]
+    assert sorted((job, result) for job, result, error in output if error is None) == [
+        (1, 10), (2, 20)]

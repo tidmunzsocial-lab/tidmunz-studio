@@ -420,3 +420,32 @@ def test_failed_image_drains_other_submitted_image_without_starting_third():
                           lambda:None,max_workers=2)
     assert sorted(started)==[0,1]
     assert (1,'second-image') in saved
+
+
+def test_narrate_chrome_composer_502_keeps_scene_and_never_rewrites_prompt(tmp_path):
+    scene = {"prompt": "shot 0", "characters": ["person0"]}
+    project = {"scenes": [scene], "aspect": "16:9"}
+    attempts = []
+    logs = []
+
+    def make_image(prompt, paths, folder, name, aspect, **kwargs):
+        attempts.append((prompt, paths, kwargs))
+        raise RuntimeError(
+            'HTTP 502: {"error":{"code":"chrome_error",'
+            '"message":"ChatGPT composer not found (logged out or page changed)"}}'
+        )
+
+    scope = dict(vars(N), state={"project": project, "lock": threading.RLock()},
+                 attachments_for=lambda scene, limit: ["ref0"],
+                 scene_prompt=lambda scene: scene["prompt"], make_image=make_image,
+                 check_stop=lambda: None, save_project=lambda: None,
+                 log=logs.append, set_progress=lambda *a: None,
+                 ui=lambda *a: None, refresh_table=None, follow_shot=None)
+    run = load(scope, "run_gpt_scenes")
+    with pytest.raises(RuntimeError, match="502"):
+        run([0], [scene], tmp_path, reference_map={"person0": "ref0"})
+    assert len(attempts) == 1
+    assert attempts[0][1] == ["ref0"]
+    assert attempts[0][2]["fresh_chat"] and attempts[0][2]["parallel_images"]
+    assert scene["prompt"] == "shot 0"
+    assert "502" in scene["error"]

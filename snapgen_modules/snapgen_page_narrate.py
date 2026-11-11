@@ -197,6 +197,17 @@ def gpt_image_prompt_not_delivered(error):
             or "no message reached the chat" in text)
 
 
+def _non_video_scene_references(scene, refs, same_person, limit=4):
+    """Keep the picture-story character/ghost references when batching GPT scenes."""
+    shown = list(scene.get("characters") or [])
+    shown += [
+        same_person[name]["person"] for name in list(shown)
+        if name in same_person and same_person[name].get("person")
+        and same_person[name]["person"] not in shown
+    ]
+    return [refs[name] for name in shown if name in refs][:limit]
+
+
 def _run_image_jobs(jobs, work, completed, check_stop, max_workers=5):
     """Bound in-flight requests; drain submitted jobs before raising."""
     remaining = iter(jobs)
@@ -6873,7 +6884,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if measured is not None:
                 log(f"คิว API 2 งาน: ยอดเครดิตเปลี่ยน {measured:g} ({before:g} → {after:g}) · รายการต่อรูปดู History")
 
-    def run_gpt_scenes(todo, scenes, images_dir, *, selected_redraw=False):
+    def run_gpt_scenes(todo, scenes, images_dir, *, selected_redraw=False, reference_map=None):
         """Run two independent chats; never duplicate an ambiguously timed-out submission."""
         project = state["project"]
 
@@ -6911,7 +6922,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         for i in dict.fromkeys(todo):
             check_stop()
             scene = scenes[i]
-            paths = attachments_for(scene, limit=None)
+            paths = (attachments_for(scene, limit=None) if reference_map is None else
+                     _non_video_scene_references(scene, reference_map, project.get("same_person") or {}))
             board = scene.get("board") if os.path.isfile(scene.get("board") or "") else None
             if selected_redraw:
                 board = None
@@ -7107,7 +7119,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         # picture (logged and marked on the shot), so one refused shot never stops a whole story.
         for job in jobs:
             i = job[0]
-            if image_saved(job) or not is_policy_refusal(scenes[i].get("error")):
+            if reference_map is not None or image_saved(job) or not is_policy_refusal(scenes[i].get("error")):
                 continue
             near = [j for j in sorted(range(len(scenes)), key=lambda j: (abs(j - i), j))
                     if j != i and scenes[j].get("image") and os.path.isfile(scenes[j]["image"])]
@@ -7171,12 +7183,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if indices is None:
                 verify_images()
             return
-        if video_mode and image_provider_for("images") == "gpt_web":
-            if selected_redraw:
-                run_gpt_scenes(todo, scenes, images_dir, selected_redraw=True)
-            else:
-                run_gpt_scenes(todo, scenes, images_dir)
+        # Picture-story mode used to fall through to the one-at-a-time loop below.
+        # Share the real two-worker GPT queue with video mode, without borrowing
+        # another story's image refs or conversation cursor.
+        if image_provider_for("images") == "gpt_web":
+            run_gpt_scenes(
+                todo, scenes, images_dir, selected_redraw=selected_redraw,
+                reference_map=refs if not video_mode else None,
+            )
             log(f"✓ สร้างรูปที่ขอครบ {len(todo)} ฉาก")
+            if not video_mode and indices is None:
+                verify_images()
             return
         started, failures_in_row = time.time(), 0
         for n, i in enumerate(todo, 1):
