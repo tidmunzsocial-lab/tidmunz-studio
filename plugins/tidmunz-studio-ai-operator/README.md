@@ -1,6 +1,6 @@
 # Tidmunz Studio AI Operator
 
-Portable source package for the Tidmunz Studio AI Operator ChatGPT plugin, version 0.3.9.
+Portable source package for the Tidmunz Studio AI Operator ChatGPT plugin, version 0.3.10.
 
 ## Install on another ChatGPT personal account
 
@@ -13,3 +13,6 @@ Portable source package for the Tidmunz Studio AI Operator ChatGPT plugin, versi
 Never publish tokens, Mobile Web URLs, OAuth secrets, Tailscale endpoints, personal machine IDs, or production receipts. Do not share credentials from the original computer. Importing the plugin alone does not grant remote computer access.
 
 Source repository: https://github.com/tidmunzsocial-lab/tidmunz-studio
+## Central skill source
+
+GitHub contains the portable, credential-free skill instructions. A separate ChatGPT plugin instance does **not** auto-update when these files change. An installed plugin or connected agent must explicitly fetch relevant skill instructions at task time, and updating a plugin's embedded skills requires its platform-supported release/import mechanism. Keep personal machine paths, account-specific .app.json bindings, credentials and workstation IDs out of this public source.

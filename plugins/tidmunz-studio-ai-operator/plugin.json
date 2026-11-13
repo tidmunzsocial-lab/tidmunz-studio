@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "tidmunz-studio-ai-operator",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Tidmunz Studio AI operator: Web/API first, Remote Desktop Commander second, Agent Desktop GUI fallback, verified Auto workflow, and safe skill learning.",
   "author": {
     "name": "Tidmunz Studio"
