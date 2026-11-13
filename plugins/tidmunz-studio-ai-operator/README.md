@@ -1,6 +1,6 @@
 # Tidmunz Studio AI Operator
 
-Portable source package for the Tidmunz Studio AI Operator ChatGPT plugin, version 0.3.10.
+Portable source package for the Tidmunz Studio AI Operator ChatGPT plugin, version 0.3.11.
 
 ## Install on another ChatGPT personal account
 

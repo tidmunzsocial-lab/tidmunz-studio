@@ -2,7 +2,7 @@
   "schema_version": 1,
   "plugin": "tidmunz-studio-ai-operator",
   "source": "tidmunzsocial-lab/tidmunz-studio",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "skills": [
     {
       "name": "tidmunz-agent-desktop",
