@@ -7603,16 +7603,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         # Merging consumes the completed clips; image review can regenerate paid assets.
         project, folder = state["project"], Path(state["folder"])
-        choice = run_on_ui(lambda: messagebox.askyesnocancel(
-            "เลือกรูปแบบตัดต่อ",
-            "ใช่ = แบบ 2 เพิ่มเสียงคลิปบางจุดตามพรอมต์ (ไม่เกิน 4 วินาที เว้นช็อตมีบทพูด)\n"
-            "ไม่ = แบบ 1 เสียงเดิมเหมือนก่อน\nยกเลิก = ไม่เรนเดอร์\n\n"
-            "แบบ 2 ไม่แยกเสียง: หากต้นฉบับมีเพลงหรือเสียงพูด อาจติดมาด้วย",
-            parent=page))
-        if choice is None:
-            raise Stopped()
-        project["clip_ambience"] = bool(choice)
+        # Single mandatory audio policy: original narration lossless + vetted effects only.
+        # No UI choice. All AI-generated spoken voices are excluded by the classifier,
+        # independent of which actors are visibly speaking in the video.
+        project["clip_audio_policy"] = "lossless_narration_and_classifier_verified_sfx_only"
+        project["clip_ambience"] = False
         save_project()
+        log("เสียง: เสียงพูดต้นฉบับ ALAC lossless + เอฟเฟกต์ที่ผ่านตัวกรองเสียงพูด/เพลงเท่านั้น (ไม่มีตัวเลือกแบบ 1/2)")
         finish_postprocess = state.get("_auto_video_postprocess_finalizer")
         if callable(finish_postprocess):
             finish_postprocess()
@@ -7646,33 +7643,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                   creationflags=LOW_PRIORITY)
             if proc.returncode != 0:
                 raise RuntimeError("FFmpeg: " + (proc.stderr or "").strip()[-500:])
-
-        if project.get("clip_ambience"):
-            audio_parts = []
-            for i, (scene, duration) in enumerate(zip(scenes, durations)):
-                check_stop()
-                part = work / f"ambience_{i:04d}.wav"
-                selected = clip_ambience_selected(scene, i)
-                if selected:
-                    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", scene["clip"]],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=LOW_PRIORITY)
-                    selected = "Audio:" in probe.stderr
-                if selected:
-                    # Short accents only. No looping or time stretching of source sound.
-                    span = min(4.0, duration)
-                    run(["-i", scene["clip"], "-vn", "-af",
-                         f"atrim=duration={span},asetpts=PTS-STARTPTS,afade=t=out:st={max(0, span-0.5)}:d=0.5,volume=0.22,apad",
-                         "-t", str(duration), "-ar", "48000", "-ac", "2", str(part)])
-                    log(f"เสียงคลิปช็อต {i + 1}: เปิด {span:.1f} วินาที")
-                else:
-                    run(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", str(duration), str(part)])
-                audio_parts.append(part)
-            listing = work / "ambience.txt"
-            listing.write_text("".join(f"file '{p.name}'\n" for p in audio_parts), encoding="utf-8")
-            run(["-f", "concat", "-safe", "0", "-i", str(listing), "-c:a", "pcm_s16le", str(work / "ambience.wav")])
-            run(["-i", project["audio"], "-i", str(work / "ambience.wav"), "-filter_complex",
-                 "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]", "-map", "[a]",
-                 "-c:a", "pcm_s16le", str(work / "mixed.wav")])
 
         def render_one(i, scene, length):
             check_stop()
@@ -7732,27 +7702,43 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
         set_progress("video", 0.92, "ใส่เสียงบรรยาย" + (" และซับไตเติล" if project.get("subtitles") else "") + " ...")
         final = folder / f"{safe_name(Path(project['script']).stem)}_{work_dir_name}_{time.strftime('%Y%m%d-%H%M')}.mp4"
-        audio_source = str(work / "mixed.wav") if project.get("clip_ambience") else project["audio"]
-        audio_args = ["-i", audio_source, "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "192k", "-shortest",
-                      "-movflags", "+faststart"]
+        from snapgen_audio_sfx import build_effect_track, lossless_audio_args, verify_original_pcm
+        effect_track, effect_audit = build_effect_track(
+            ffmpeg, scenes, durations, duration, work, log=log, check_stop=check_stop)
+        project["last_sfx_audit"] = effect_audit
+        audio_inputs, mux_args = lossless_audio_args(project["audio"], effect_track)
         if project.get("subtitles"):
             segments = json.loads((folder / "transcript.json").read_text(encoding="utf-8"))
             (work / "subs.ass").write_text(build_ass(segments, width, height), encoding="utf-8")
             fonts = Path(__file__).resolve().parent.parent / "assets" / "fonts"
             if fonts.is_dir():
                 shutil.copytree(fonts, work / "fonts", dirs_exist_ok=True)
-            # Run from the render folder with relative paths: FFmpeg filter
-            # syntax cannot take a Windows drive path ("C:") without escaping.
+            # Subtitle filtering requires video encoding instead of stream copy.
+            # Remove the pair -c:v copy from the lossless-audio mux arguments.
+            mux_encoded = list(mux_args)
+            video_copy_pos = mux_encoded.index("-c:v")
+            if mux_encoded[video_copy_pos + 1] != "copy":
+                raise RuntimeError("Unexpected audio mux video codec mode")
+            del mux_encoded[video_copy_pos:video_copy_pos + 2]
             proc = subprocess.run(
-                [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", *limit, "-i", str(picture), *audio_args[:6],
-                 "-vf", "ass=subs.ass:fontsdir=fonts",
-                 *encode, *audio_args[6:], str(final)],
-                cwd=str(work), capture_output=True, text=True, encoding="utf-8", errors="replace",
-                creationflags=LOW_PRIORITY)
+                [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", *limit,
+                 "-i", str(picture), *audio_inputs,
+                 "-vf", "ass=subs.ass:fontsdir=fonts", *encode,
+                 *mux_encoded, str(final)],
+                cwd=str(work), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", creationflags=LOW_PRIORITY)
             if proc.returncode != 0:
                 raise RuntimeError("FFmpeg ซับไตเติล: " + (proc.stderr or "").strip()[-500:])
         else:
-            run(["-i", str(picture), *audio_args[:6], "-c:v", "copy", *audio_args[6:], str(final)])
+            run(["-i", str(picture), *audio_inputs, *mux_args, str(final)])
+        # Verify losslessness against the source WAV samples, never against an AI clip.
+        original_audio_index = 1 if effect_track is not None else 0
+        report = verify_original_pcm(ffmpeg, project["audio"], final,
+                                     track_index=original_audio_index)
+        project["audio_source_unmodified"] = True
+        project["audio_output_codec"] = "ALAC lossless 48000Hz stereo"
+        project["last_audio_verification"] = report
+        save_project()
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(folder / "_preview", ignore_errors=True)
         project["last_video"] = str(final)
