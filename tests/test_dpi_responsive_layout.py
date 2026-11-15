@@ -120,3 +120,51 @@ def test_highdpi_startup_keeps_floating_size_without_maximizing():
     assert "outer_h = min(round(624 * ratio)" in source
     assert 'root.state("zoomed")' not in source[source.index("def _set_highdpi_floating_size():"):
                                               source.index("# Final canonical Slot loader.")]
+
+
+def test_status_cards_share_size_and_hide_old_credit_control():
+    """SnapGen credit and ChatGPT quota use one equal-size card each."""
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Window manager unavailable in CI")
+    try:
+        root.geometry("1400x700")
+        toolbar = tk.Frame(root)
+        toolbar.pack(fill="x")
+        old_credit = tk.Button(toolbar, text="...")
+        old_credit.pack(side="right")
+        for caption in ("⚙", "เปิดโฟลเดอร์", "Prompt-Ref", "🌐 ChatGPT"):
+            tk.Button(toolbar, text=caption).pack(side="right")
+        mode = tk.Frame(root)
+        mode.pack(fill="x")
+        quota = tk.StringVar(value="60 Plus")
+        quota_label = tk.Label(mode, textvariable=quota)
+        quota_label.pack(side="right")
+        balance = tk.StringVar(value="26")
+        g = {
+            "credit_status_var": balance,
+            "credit_button": old_credit,
+            "bridge_image_quota_var": quota,
+            "bridge_image_quota_label": quota_label,
+            "mode_frame": mode,
+        }
+        root.update()
+        from snapgen_responsive_ui import install
+        install(root, g)
+        root.update()
+        snapgen = g["_responsive_snapgen_credit"]
+        chatgpt = g["_responsive_chatgpt_quota_card"]
+        assert snapgen.winfo_ismapped() and chatgpt.winfo_ismapped()
+        assert snapgen.winfo_width() == chatgpt.winfo_width()
+        assert old_credit.winfo_manager() == ""
+        assert quota_label.winfo_manager() == ""
+        balance.set("1234")
+        quota.set("59 Plus")
+        root.update()
+        snapgen_labels = snapgen.winfo_children()[0].winfo_children()
+        chatgpt_labels = chatgpt.winfo_children()[0].winfo_children()
+        assert snapgen_labels[-1].cget("text") == "1234"
+        assert chatgpt_labels[-1].cget("text") == "59 Plus"
+    finally:
+        root.destroy()

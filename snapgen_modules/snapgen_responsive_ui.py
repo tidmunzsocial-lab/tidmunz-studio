@@ -107,25 +107,57 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 actions = tk.Frame(parent, bg="#FFFFFF", height=52)
                 actions.pack(side="top", fill="x", after=toolbar, padx=7, pady=(0, 2))
                 actions.pack_propagate(False)
-                # SnapGen API credit is independent of ChatGPT's "60 Plus"
-                # quota label.  Show the live SnapGen variable in a reserved
-                # control, so it is not clipped by the action buttons.
+                # A single pair of aligned, bordered status cards. Reuse the
+                # existing Tk variables rather than creating independent values.
+                def add_status_card(caption, variable):
+                    if not isinstance(variable, tk.Variable):
+                        return None
+                    border = tk.Frame(actions, bg="#CDD6E2", padx=1, pady=1)
+                    border.pack(side="right", padx=(5, 3), pady=7)
+                    inner = tk.Frame(border, bg="#F2F5FA", width=180, height=36)
+                    inner.pack()
+                    inner.pack_propagate(False)
+                    tk.Label(
+                        inner, text=caption, bg="#F2F5FA", fg="#344054",
+                        font=font, anchor="w", padx=9,
+                    ).pack(side="left")
+                    tk.Label(
+                        inner, textvariable=variable, bg="#F2F5FA",
+                        fg="#111827", font=font, anchor="e", padx=9,
+                    ).pack(side="right")
+                    return border
+
+                quota_var = g.get("bridge_image_quota_var")
                 credit_var = g.get("credit_status_var")
-                if isinstance(credit_var, tk.Variable):
-                    credit_box = tk.Frame(actions, bg="#EEF3F8")
-                    credit_box.pack(side="right", padx=(8, 4), pady=6)
-                    tk.Label(
-                        credit_box, text="SnapGen เครดิต:", bg="#EEF3F8",
-                        fg="#263445", font=font, padx=5,
-                    ).pack(side="left")
-                    tk.Label(
-                        credit_box, textvariable=credit_var, bg="#EEF3F8",
-                        fg="#111827", font=font, width=12, anchor="center",
-                        padx=6,
-                    ).pack(side="left")
-                    g["_responsive_snapgen_credit"] = credit_box
+                # Pack right-to-left: quota sits on the far right, SnapGen
+                # immediately to its left. Both use identical card geometry.
+                quota_card = add_status_card("ChatGPT", quota_var)
+                credit_card = add_status_card("SnapGen เครดิต", credit_var)
+                if quota_card is not None:
+                    g["_responsive_chatgpt_quota_card"] = quota_card
+                    quota_label = g.get("bridge_image_quota_label")
+                    if quota_label is not None:
+                        try:
+                            quota_label.pack_forget()
+                        except tk.TclError:
+                            pass
+                if credit_card is not None:
+                    g["_responsive_snapgen_credit"] = credit_card
+
+                # The legacy SnapGen credit control (sometimes rendered as
+                # "...") must not remain next to the new credit display.
+                # Only suppress controls explicitly registered as credit,
+                # never unrelated Settings/overflow actions.
+                legacy_credit = tuple(
+                    g.get(key) for key in (
+                        "credit_button", "credit_label", "credit_status_label"
+                    ) if g.get(key) is not None
+                )
                 moved = []
                 for original in originals:
+                    if original in legacy_credit and credit_card is not None:
+                        moved.append(original)
+                        continue
                     clone = _clone_action(actions, original, font)
                     if clone is None:
                         continue
@@ -136,6 +168,15 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                         original.pack_forget()
                     g["_responsive_action_bar"] = actions
                     g["_responsive_moved_toolbar"] = moved
+                    # Legacy credit may live in a separate packed toolbar
+                    # container, not in the list cloned above.
+                    if credit_card is not None:
+                        for old in legacy_credit:
+                            try:
+                                if old.winfo_exists() and old.winfo_manager() == "pack":
+                                    old.pack_forget()
+                            except tk.TclError:
+                                pass
                 else:
                     actions.destroy()
             elif attempt < 12:
