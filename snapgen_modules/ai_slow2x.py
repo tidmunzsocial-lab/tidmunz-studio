@@ -496,7 +496,7 @@ def enhance_image(path, log=None, model="rhea-1", scale=2):
 
 
 def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4", fi_model="apo-8",
-                upscale_2x=False, upscale_4k=False, progress=None):
+                upscale_2x=False, upscale_4k=False, progress=None, target_size=None):
     """Slow-mo plus spatial upscale; Auto 4K preserves orientation and content aspect."""
     found = _topaz_dirs()
     if not found:
@@ -510,7 +510,7 @@ def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4",
     duration = _video_duration_seconds(str(exe), inp)
     if duration:
         duration *= int(factor)
-    tw, th = (_video_4k_size(w, h) if upscale_4k else _video_2x_size(w, h) if upscale_2x
+    tw, th = (tuple(target_size) if target_size is not None else _video_4k_size(w, h) if upscale_4k else _video_2x_size(w, h) if upscale_2x
               else ((1080, 1920) if h > w else (1920, 1080)))
     cw, ch = _fit_video_size(w, h, tw, th) if upscale_4k else (tw, th)
     env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
@@ -655,6 +655,45 @@ def video_has_streaks(path, source=None, samples=24) -> bool:
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+
+def make_topaz_slow2x_2k(input_video, output_video=None, log=None, progress=None):
+    """Standalone Topaz-only slow motion + 2K; never touch original video."""
+    inp = Path(input_video)
+    allowed = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+    if not _video_ok(inp) or inp.suffix.lower() not in allowed:
+        raise ValueError("ต้องเป็นไฟล์วิดีโอที่มีอยู่จริง")
+    found = _topaz_dirs()
+    if not found:
+        raise RuntimeError("ไม่พบ Topaz Video AI หรือโมเดลที่ติดตั้ง")
+    exe, _model_dir = found
+    w, h = _video_dimensions(str(exe), inp)
+    ratio = 2048.0 / max(w, h)
+    target = (max(2, 2 * round(w * ratio / 2)),
+              max(2, 2 * round(h * ratio / 2)))
+    if output_video is None:
+        output = inp.with_name(inp.stem + "_Slow2x_2K.mp4")
+        index = 2
+        while output.exists():
+            output = inp.with_name(f"{inp.stem}_Slow2x_2K_{index}.mp4")
+            index += 1
+    else:
+        output = Path(output_video)
+    if output.exists():
+        raise ValueError("ไฟล์ผลลัพธ์มีอยู่แล้ว ห้ามเขียนทับ")
+    if output.resolve() == inp.resolve():
+        raise ValueError("ไม่อนุญาตให้เขียนทับไฟล์ต้นฉบับ")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fps, has_audio = _probe_video(str(exe), inp)
+    say = log if callable(log) else (lambda msg: None)
+    try:
+        result = _topaz_slow(inp, output, 2, fps, has_audio, say,
+                             target_size=target, progress=progress)
+        if not result:
+            raise RuntimeError("Topaz สร้างไฟล์ Slow 2x 2K ไม่สำเร็จ")
+        return str(result)
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
 
 def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs):
     """Create a slowed video.

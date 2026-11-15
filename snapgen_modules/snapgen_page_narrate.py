@@ -4259,9 +4259,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
     # ONE shared status/progress card: no duplicate standalone progress/status row.
     # stage_var/detail_var remain the data source for the card and mobile API.
-    status_banner = tk.Frame(box, bg="#F1F5F9", highlightthickness=1,
+    status_lane = tk.Frame(box, bg=bg) if video_mode else box
+    if video_mode:
+        status_lane.pack(fill="x", padx=8, pady=(4, 2))
+    status_banner = tk.Frame(status_lane, bg="#F1F5F9", highlightthickness=1,
                              highlightbackground="#CBD5E1")
-    status_banner.pack(fill="x", padx=8, pady=(4, 2))
+    if video_mode:
+        status_banner.pack(side="left", fill="both", expand=True)
+        from snapgen_auto_drop_slow import install as install_auto_slow_drop
+        install_auto_slow_drop(status_lane, root)
+    else:
+        status_banner.pack(fill="x", padx=8, pady=(4, 2))
     status_header = tk.Frame(status_banner, bg="#F1F5F9")
     status_header.pack(fill="x", padx=10, pady=(5, 2))
     status_title_var = tk.StringVar(value="○ พร้อมทำงาน")
