@@ -13,13 +13,13 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 def install(parent, root):
     """Create the right-side video drop card. UI events stay on Tk's thread."""
     card = tk.Frame(parent, bg="#E8F0FB", highlightbackground="#6B90BF",
-                    highlightthickness=1, width=320, height=122)
+                    highlightthickness=1, width=320, height=142)
     card.pack(side="right", fill="y", padx=(7, 0))
     card.pack_propagate(False)
-    title = tk.Label(card, text="ลากวิดีโอใส่เพื่อสโลว์", bg="#E8F0FB",
+    title = tk.Label(card, text="ลากวิดีโอเพื่อสโลว์", bg="#E8F0FB",
                      fg="#15345D", font=("TkDefaultFont", 10, "bold"))
     title.pack(pady=(7, 0))
-    hint = tk.Label(card, text="Topaz · สโลว์ 2× + ขยาย 2K", bg="#E8F0FB",
+    hint = tk.Label(card, text="Topaz · Slow 2× · 2K", bg="#E8F0FB",
                     fg="#475569", font=("TkDefaultFont", 9))
     hint.pack()
     progress_var = tk.StringVar(value="วางไฟล์วิดีโอได้เลย")
@@ -63,14 +63,14 @@ def install(parent, root):
                 def done():
                     chosen["last"] = result
                     busy["value"] = False
-                    button.configure(state="normal", text="เปิดไฟล์ที่เสร็จ")
+                    button.configure(state="normal", text="เปิดผลลัพธ์")
                     button.configure(command=lambda: os.startfile(result))
                     update("✓ เสร็จแล้ว · " + Path(result).name, 100)
                 root.after(0, done)
             except Exception as exc:
                 def failed(detail=str(exc)):
                     busy["value"] = False
-                    button.configure(state="normal", text="เลือกวิดีโอ")
+                    button.configure(state="normal", text="เลือกไฟล์")
                     button.configure(command=choose_file)
                     update("ผิดพลาด: " + detail, 0)
                     messagebox.showerror("Topaz Slow 2× / 2K", detail, parent=card)
@@ -85,10 +85,10 @@ def install(parent, root):
         if source:
             handle_video(source)
 
-    button = tk.Button(card, text="เลือกวิดีโอ", command=choose_file,
+    button = tk.Button(card, text="เลือกไฟล์", command=choose_file,
                        bg="#FFFFFF", fg="#15345D", relief="solid",
                        bd=1, padx=9, font=("TkDefaultFont", 8))
-    button.pack(pady=(3, 4))
+    button.pack(pady=(2, 3))
 
     # Uses the app's bundled tkinterdnd2 and its native tkdnd library.
     # The file-picker remains available when shell drag/drop is restricted.
@@ -103,7 +103,7 @@ def install(parent, root):
                     handle_video(paths[0])
                 return "copy"
             widget.dnd_bind("<<Drop>>", dropped)
-        hint.configure(text="Topaz · สโลว์ 2× + ขยาย 2K · วางไฟล์ได้")
+        hint.configure(text="Topaz · Slow 2× · 2K · ลากวางได้")
     except Exception:
-        hint.configure(text="Topaz · สโลว์ 2× + 2K · กดเลือกไฟล์")
+        hint.configure(text="Topaz · Slow 2× · 2K")
     return card

@@ -107,42 +107,33 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 actions = tk.Frame(parent, bg="#FFFFFF", height=52)
                 actions.pack(side="top", fill="x", after=toolbar, padx=7, pady=(0, 2))
                 actions.pack_propagate(False)
-                # A single pair of aligned, bordered status cards. Reuse the
-                # existing Tk variables rather than creating independent values.
-                def add_status_card(caption, variable):
-                    if not isinstance(variable, tk.Variable):
-                        return None
-                    border = tk.Frame(actions, bg="#CDD6E2", padx=1, pady=1)
-                    border.pack(side="right", padx=(5, 3), pady=7)
-                    inner = tk.Frame(border, bg="#F2F5FA", width=180, height=36)
+                # Keep the original layout: SnapGen credit beside Settings
+                # in the upper toolbar, ChatGPT quota in the lower mode row.
+                # Both get a border; do not combine their rows.
+                credit_var = g.get("credit_status_var")
+                credit_card = None
+                if isinstance(credit_var, tk.Variable):
+                    credit_card = tk.Frame(actions, bg="#CDD6E2", padx=1, pady=1)
+                    credit_card.pack(side="right", padx=(5, 3), pady=7)
+                    inner = tk.Frame(credit_card, bg="#F2F5FA", width=180, height=36)
                     inner.pack()
                     inner.pack_propagate(False)
-                    tk.Label(
-                        inner, text=caption, bg="#F2F5FA", fg="#344054",
-                        font=font, anchor="w", padx=9,
-                    ).pack(side="left")
-                    tk.Label(
-                        inner, textvariable=variable, bg="#F2F5FA",
-                        fg="#111827", font=font, anchor="e", padx=9,
-                    ).pack(side="right")
-                    return border
-
-                quota_var = g.get("bridge_image_quota_var")
-                credit_var = g.get("credit_status_var")
-                # Pack right-to-left: quota sits on the far right, SnapGen
-                # immediately to its left. Both use identical card geometry.
-                quota_card = add_status_card("ChatGPT", quota_var)
-                credit_card = add_status_card("SnapGen เครดิต", credit_var)
-                if quota_card is not None:
-                    g["_responsive_chatgpt_quota_card"] = quota_card
-                    quota_label = g.get("bridge_image_quota_label")
-                    if quota_label is not None:
-                        try:
-                            quota_label.pack_forget()
-                        except tk.TclError:
-                            pass
-                if credit_card is not None:
+                    tk.Label(inner, text="SnapGen เครดิต", bg="#F2F5FA",
+                             fg="#344054", font=font, padx=7).pack(side="left")
+                    tk.Label(inner, textvariable=credit_var, bg="#F2F5FA",
+                             fg="#111827", font=font, padx=7).pack(side="right")
                     g["_responsive_snapgen_credit"] = credit_card
+
+                quota_label = g.get("bridge_image_quota_label")
+                if isinstance(quota_label, tk.Label):
+                    # Style the existing lower-row widget in place: no clone,
+                    # no extra row, and no duplicate credit variable.
+                    quota_label.configure(
+                        bg="#F2F5FA", fg="#111827", relief="solid",
+                        borderwidth=1, padx=9, pady=8, width=19,
+                        anchor="e", font=font,
+                    )
+                    g["_responsive_chatgpt_quota_card"] = quota_label
 
                 # The legacy SnapGen credit control (sometimes rendered as
                 # "...") must not remain next to the new credit display.

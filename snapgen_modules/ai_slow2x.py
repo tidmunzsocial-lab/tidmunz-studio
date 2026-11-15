@@ -671,10 +671,10 @@ def make_topaz_slow2x_2k(input_video, output_video=None, log=None, progress=None
     target = (max(2, 2 * round(w * ratio / 2)),
               max(2, 2 * round(h * ratio / 2)))
     if output_video is None:
-        output = inp.with_name(inp.stem + "_Slow2x_2K.mp4")
+        output = inp.with_name(inp.stem + "_2K.mp4")
         index = 2
         while output.exists():
-            output = inp.with_name(f"{inp.stem}_Slow2x_2K_{index}.mp4")
+            output = inp.with_name(f"{inp.stem}_2K_{index}.mp4")
             index += 1
     else:
         output = Path(output_video)

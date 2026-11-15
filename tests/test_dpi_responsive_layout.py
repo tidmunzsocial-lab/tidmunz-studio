@@ -123,7 +123,7 @@ def test_highdpi_startup_keeps_floating_size_without_maximizing():
 
 
 def test_status_cards_share_size_and_hide_old_credit_control():
-    """SnapGen credit and ChatGPT quota use one equal-size card each."""
+    """Keep original two rows, add borders and suppress the old duplicate."""
     try:
         root = tk.Tk()
     except tk.TclError:
@@ -156,15 +156,18 @@ def test_status_cards_share_size_and_hide_old_credit_control():
         snapgen = g["_responsive_snapgen_credit"]
         chatgpt = g["_responsive_chatgpt_quota_card"]
         assert snapgen.winfo_ismapped() and chatgpt.winfo_ismapped()
-        assert snapgen.winfo_width() == chatgpt.winfo_width()
+        assert snapgen.master != chatgpt.master
+        assert snapgen.winfo_rooty() < chatgpt.winfo_rooty()
+        assert abs(snapgen.winfo_width() - chatgpt.winfo_width()) < 40
+        assert chatgpt is quota_label
+        assert chatgpt.cget("relief") == "solid"
         assert old_credit.winfo_manager() == ""
-        assert quota_label.winfo_manager() == ""
+        assert quota_label.winfo_manager() == "pack"
         balance.set("1234")
         quota.set("59 Plus")
         root.update()
         snapgen_labels = snapgen.winfo_children()[0].winfo_children()
-        chatgpt_labels = chatgpt.winfo_children()[0].winfo_children()
         assert snapgen_labels[-1].cget("text") == "1234"
-        assert chatgpt_labels[-1].cget("text") == "59 Plus"
+        assert chatgpt.cget("text") == "59 Plus"
     finally:
         root.destroy()
