@@ -5677,29 +5677,80 @@ def _download_github_update(info, parent=None, status_var=None):
             status_var.set("ปิดอัปเดตอัตโนมัติ — กดปุ่มตรวจอัปเดตใน Settings")
         return
 
+    # Match the first-install launcher rather than displaying terminal output
+    # or only a status line inside Settings during a potentially large download.
+    from tkinter import ttk
+    progress_win = tk.Toplevel(root)
+    progress_win.title("Tidmunz Studio - ดาวน์โหลดอัปเดต")
+    progress_win.geometry("560x200")
+    progress_win.resizable(False, False)
+    progress_win.transient(parent if parent is not None and parent.winfo_exists() else root)
+    progress_title = tk.StringVar(value="กำลังดาวน์โหลดอัปเดต ... 0%")
+    progress_detail = tk.StringVar(value="กำลังเชื่อมต่อ GitHub ...")
+    tk.Label(progress_win, textvariable=progress_title,
+             font=(SNAPGEN_UI_FONT, 13, "bold"), anchor="w").pack(
+                 fill="x", padx=20, pady=(22, 8))
+    progress_bar = ttk.Progressbar(progress_win, maximum=100, length=520)
+    progress_bar.pack(padx=20)
+    tk.Label(progress_win, textvariable=progress_detail, anchor="w",
+             justify="left", wraplength=520, fg="#555").pack(
+                 fill="x", padx=20, pady=10)
+    tk.Label(progress_win, text="กรุณาอย่าปิดหน้าต่างระหว่างอัปเดต",
+             fg="#888").pack(fill="x", padx=20)
+    progress_win.protocol("WM_DELETE_WINDOW", lambda: None)
+
     def progress(message):
         if status_var is not None:
             root.after(0, lambda m=str(message): status_var.set(m))
 
+    def show_download(message, fraction):
+        if not progress_win.winfo_exists():
+            return
+        progress_detail.set(str(message))
+        if fraction is None:
+            if str(progress_bar["mode"]) != "indeterminate":
+                progress_bar.configure(mode="indeterminate")
+                progress_bar.start(12)
+            progress_title.set("กำลังดาวน์โหลดอัปเดต ...")
+        else:
+            if str(progress_bar["mode"]) == "indeterminate":
+                progress_bar.stop()
+                progress_bar.configure(mode="determinate")
+            percent = max(0, min(100, int(fraction * 100)))
+            progress_bar["value"] = max(float(progress_bar["value"]), percent)
+            progress_title.set(f"กำลังดาวน์โหลดอัปเดต ... {int(progress_bar['value'])}%")
+
+    def fraction_progress(message, fraction):
+        root.after(0, show_download, message, fraction)
+
     def worker():
         try:
             import snapgen_updater
-            staging = snapgen_updater.download_and_stage(info, BASE_ROOT, progress=progress)
+            staging = snapgen_updater.download_and_stage(
+                info, BASE_ROOT, progress=progress,
+                fraction_progress=fraction_progress,
+            )
             def install():
                 try:
                     progress("กำลังปิดโปรแกรมและติดตั้ง...")
                     snapgen_updater.launch_apply(staging, BASE_ROOT, os.getpid())
+                    progress_win.destroy()
                     root.after(250, root.destroy)
                 except Exception as exc:
+                    if progress_win.winfo_exists():
+                        progress_win.destroy()
                     messagebox.showerror("ติดตั้ง Patch ไม่สำเร็จ", str(exc), parent=parent)
             root.after(0, install)
         except Exception as exc:
             def failed(msg=str(exc)):
+                if progress_win.winfo_exists():
+                    progress_win.destroy()
                 if status_var is not None:
                     status_var.set("ดาวน์โหลดอัปเดตไม่สำเร็จ: " + msg)
                 messagebox.showerror("ดาวน์โหลด Patch ไม่สำเร็จ", msg, parent=parent)
             root.after(0, failed)
     threading.Thread(target=worker, daemon=True).start()
+
 
 PUBLISHER_GUARD_PATH = BASE / "publisher_guard.json"
 

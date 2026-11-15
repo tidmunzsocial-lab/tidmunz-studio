@@ -16,9 +16,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import urllib.error
@@ -273,7 +275,7 @@ def _safe_relative(name):
     # can self-update without hitting path-allowlist deadlocks.
     return text
 
-def download_and_stage(info, project_root, progress=None):
+def download_and_stage(info, project_root, progress=None, fraction_progress=None):
     progress = progress or (lambda _msg: None)
     staging = Path(tempfile.mkdtemp(prefix="tidmun-update-"))
     archive = staging / ASSET_NAME
@@ -281,7 +283,21 @@ def download_and_stage(info, project_root, progress=None):
     progress(f"ดาวน์โหลด v{version}...")
     try:
         with _request(info["url"], timeout=120) as response, archive.open("wb") as out:
-            shutil.copyfileobj(response, out)
+            total = int(response.headers.get("Content-Length") or info.get("asset_size") or 0)
+            downloaded = 0
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                downloaded += len(chunk)
+                if fraction_progress is not None:
+                    fraction_progress(
+                        f"ดาวน์โหลด v{version} ... {downloaded / 1048576:.1f} MB",
+                        min(0.95, downloaded / total) if total else None,
+                    )
+        if fraction_progress is not None:
+            fraction_progress("กำลังตรวจสอบไฟล์อัปเดต ...", 0.96)
         if info.get("asset_size") and archive.stat().st_size != info["asset_size"]:
             raise UpdateError("ขนาด Patch ที่ดาวน์โหลดไม่ตรงกับ GitHub")
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -316,6 +332,8 @@ def download_and_stage(info, project_root, progress=None):
             encoding="utf-8",
         )
         progress("ตรวจสอบ Patch ผ่าน")
+        if fraction_progress is not None:
+            fraction_progress("ตรวจสอบ Patch ผ่าน", 1.0)
         return staging
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
@@ -332,6 +350,12 @@ def launch_apply(staging, project_root, parent_pid=None):
         str(Path(project_root).resolve()),
         str(int(parent_pid or os.getpid())),
     ]
+    # Prefer pythonw for the detached GUI updater: python.exe would flash
+    # a console before the progress window is created.
+    executable = Path(sys.executable)
+    windowed = executable.with_name("pythonw.exe")
+    if os.name == "nt" and windowed.is_file():
+        cmd[0] = str(windowed)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return subprocess.Popen(cmd, cwd=str(project_root), creationflags=flags)
 
@@ -366,26 +390,68 @@ def _runtime_ready(project_root):
         return False
 
 
-def _start_after_update(project_root):
+def _start_after_update(project_root, progress=None):
+    """Install dependencies headlessly, then restart Tidmunz Studio."""
+    progress = progress or (lambda _message, _fraction: None)
     setup = project_root / "setup_and_run.bat"
     setup_error = ""
     if setup.is_file():
         try:
-            result = subprocess.run([str(setup), "--no-run"], cwd=str(project_root), timeout=600, check=False)
-            if result.returncode:
-                setup_error = f" (setup exit {result.returncode})"
+            command = ["cmd.exe", "/d", "/c", "call", str(setup), "--no-run"]
+            proc = subprocess.Popen(
+                command, cwd=str(project_root), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            tail = []
+            def read_setup():
+                assert proc.stdout is not None
+                for raw in proc.stdout:
+                    line = raw.decode("oem", errors="replace").strip()
+                    if not line:
+                        continue
+                    tail.append(line)
+                    if len(tail) > 12:
+                        del tail[:-12]
+                    import re
+                    match = re.match(r"\[(\d+)/(\d+)\]", line)
+                    if match:
+                        done, total = int(match.group(1)), max(1, int(match.group(2)))
+                        progress("ติดตั้งแพ็กเกจ ... " + line[:110],
+                                 0.84 + 0.13 * min(1.0, done / total))
+                    else:
+                        progress("ติดตั้งแพ็กเกจ ... " + line[:110], 0.84)
+            reader = threading.Thread(target=read_setup, daemon=True)
+            reader.start()
+            try:
+                code = proc.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                raise UpdateError("ติดตั้งแพ็กเกจเกินเวลาที่กำหนด")
+            reader.join(timeout=3)
+            if code:
+                setup_error = f" (setup exit {code})"
         except (OSError, subprocess.SubprocessError) as exc:
             setup_error = f" ({type(exc).__name__})"
+    progress("ตรวจสอบ Python และแพ็กเกจ ...", 0.98)
     if not _runtime_ready(project_root):
         raise UpdateError("อัปเดตแล้วแต่แพ็กเกจ Python ยังไม่ครบ" + setup_error +
                           " — เปิด Tidmunz-Studio.exe เพื่อติดตั้งแพ็กเกจที่ขาด แล้วเริ่มโปรแกรมอีกครั้ง")
     main = project_root / "snapgen_gui_v2.py"
-    subprocess.Popen([sys.executable, "-B", str(main)], cwd=str(project_root))
+    pyexe = Path(sys.executable)
+    pythonw = pyexe.with_name("pythonw.exe")
+    if os.name == "nt" and pythonw.is_file():
+        pyexe = pythonw
+    subprocess.Popen([str(pyexe), "-B", str(main)], cwd=str(project_root),
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
-def _apply(staging, project_root, parent_pid):
+def _apply(staging, project_root, parent_pid, progress=None):
     staging = Path(staging).resolve()
     project_root = Path(project_root).resolve()
+    progress = progress or (lambda _message, _fraction: None)
+    progress("รอโปรแกรมเดิมปิดก่อนอัปเดต ...", 0.02)
     for _ in range(150):
         if not _pid_running(parent_pid):
             break
@@ -403,8 +469,11 @@ def _apply(staging, project_root, parent_pid):
         with tempfile.TemporaryDirectory(prefix="snapgen_update_rollback_") as rollback_name:
             rollback = Path(rollback_name)
             try:
-                for item in plan["files"]:
+                total_files = max(1, len(plan["files"]))
+                for index, item in enumerate(plan["files"]):
                     rel = _safe_relative(item["path"])
+                    progress(f"ติดตั้งไฟล์ {index + 1}/{total_files}: {rel}",
+                             0.07 + 0.68 * index / total_files)
                     src = staging / "files" / Path(*PurePosixPath(rel).parts)
                     dst = project_root / Path(*PurePosixPath(rel).parts)
                     old = rollback / Path(*PurePosixPath(rel).parts)
@@ -417,6 +486,7 @@ def _apply(staging, project_root, parent_pid):
                     shutil.copy2(src, temp_dst)
                     os.replace(temp_dst, dst)
                     changed.append((dst, old, existed))
+                progress("กำลังตรวจสอบไฟล์หลังติดตั้ง ...", 0.76)
                 # Reject a partial or silently corrupted install *before*
                 # recording it as completed. The exception path rolls back.
                 for item in plan["files"]:
@@ -451,12 +521,74 @@ def _apply(staging, project_root, parent_pid):
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-    _start_after_update(project_root)
+    progress("ติดตั้งไฟล์เสร็จ กำลังเตรียมเปิดโปรแกรม ...", 0.83)
+    _start_after_update(project_root, progress=progress)
+    progress("อัปเดตสำเร็จ กำลังเปิด Tidmunz Studio ...", 1.0)
+
+
+def _apply_with_window(staging, project_root, parent_pid):
+    """Installer-style Tk progress UI, independent from the app being replaced."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("Tidmunz Studio - กำลังอัปเดต")
+    root.geometry("560x200")
+    root.resizable(False, False)
+    title = tk.StringVar(value="กำลังอัปเดตโปรแกรม ... 0%")
+    detail = tk.StringVar(value="กำลังเตรียมไฟล์อัปเดต")
+    tk.Label(root, textvariable=title, font=("Segoe UI", 13, "bold"),
+             anchor="w").pack(fill="x", padx=20, pady=(22, 8))
+    bar = ttk.Progressbar(root, maximum=100, length=520)
+    bar.pack(padx=20)
+    tk.Label(root, textvariable=detail, anchor="w", justify="left",
+             wraplength=520, fg="#555").pack(fill="x", padx=20, pady=10)
+    tk.Label(root, text="กรุณาอย่าปิดหน้าต่างระหว่างติดตั้ง", fg="#888").pack(fill="x", padx=20)
+    root.protocol("WM_DELETE_WINDOW", lambda: None)
+    messages = queue.Queue()
+    outcome = {}
+
+    def report(message, fraction):
+        messages.put((str(message), float(fraction)))
+
+    def worker():
+        try:
+            _apply(staging, project_root, parent_pid, progress=report)
+        except Exception as exc:
+            outcome["error"] = exc
+        finally:
+            messages.put(None)
+
+    def refresh():
+        finished = False
+        while True:
+            try:
+                item = messages.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                finished = True
+                break
+            message, fraction = item
+            percent = max(int(bar["value"]), min(100, max(0, int(fraction * 100))))
+            bar["value"] = percent
+            title.set(f"กำลังอัปเดตโปรแกรม ... {percent}%")
+            detail.set(message)
+        if finished:
+            root.after(350, root.destroy)
+        else:
+            root.after(75, refresh)
+
+    threading.Thread(target=worker, daemon=True).start()
+    root.after(75, refresh)
+    root.mainloop()
+    if outcome.get("error"):
+        raise outcome["error"]
 
 
 if __name__ == "__main__" and len(sys.argv) >= 5 and sys.argv[1] == "--apply":
     try:
-        _apply(sys.argv[2], sys.argv[3], int(sys.argv[4]))
+        _apply_with_window(sys.argv[2], sys.argv[3], int(sys.argv[4]))
     except Exception as exc:
         error_file = Path(sys.argv[3]) / "snapgen_update_error.txt"
         error_file.write_text(str(exc), encoding="utf-8")
