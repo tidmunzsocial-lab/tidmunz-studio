@@ -104,15 +104,32 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
             originals = [w for w in toolbar.winfo_children() if _action_widget(w)]
             parent = toolbar.master
             if originals and toolbar.winfo_manager() == "pack":
-                actions = tk.Frame(parent, bg="#FFFFFF", height=38)
+                actions = tk.Frame(parent, bg="#FFFFFF", height=52)
                 actions.pack(side="top", fill="x", after=toolbar, padx=7, pady=(0, 2))
                 actions.pack_propagate(False)
+                # SnapGen API credit is independent of ChatGPT's "60 Plus"
+                # quota label.  Show the live SnapGen variable in a reserved
+                # control, so it is not clipped by the action buttons.
+                credit_var = g.get("credit_status_var")
+                if isinstance(credit_var, tk.Variable):
+                    credit_box = tk.Frame(actions, bg="#EEF3F8")
+                    credit_box.pack(side="right", padx=(8, 4), pady=6)
+                    tk.Label(
+                        credit_box, text="SnapGen เครดิต:", bg="#EEF3F8",
+                        fg="#263445", font=font, padx=5,
+                    ).pack(side="left")
+                    tk.Label(
+                        credit_box, textvariable=credit_var, bg="#EEF3F8",
+                        fg="#111827", font=font, width=12, anchor="center",
+                        padx=6,
+                    ).pack(side="left")
+                    g["_responsive_snapgen_credit"] = credit_box
                 moved = []
                 for original in originals:
                     clone = _clone_action(actions, original, font)
                     if clone is None:
                         continue
-                    clone.pack(side="right", padx=3, pady=1)
+                    clone.pack(side="right", padx=3, pady=7)
                     moved.append(original)
                 if moved:
                     for original in moved:
