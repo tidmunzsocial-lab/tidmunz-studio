@@ -1840,7 +1840,7 @@ GROK_CLIP_SECONDS = (6, 10, 15)  # lengths grok-lower accepts; AI Slow 2x double
 VELA_CLIP_SECONDS = 5  # vela-ai-video only makes 5 s
 VIDEO_AUTO_AVG_SECONDS = 8  # average shot length used to size the plan
 CLIP_CHOICE_LABELS = {0: "อัตโนมัติ (ตามความยาวช็อต)", 6: "6 วินาที", 10: "10 วินาที", 15: "15 วินาที"}
-VIDEO_RESOLUTIONS = ("720p", "1080p")  # Grok Lite (720p first: about 7 credits for 10 s)
+VIDEO_RESOLUTIONS = ("1080p", "720p")  # Auto defaults to full HD; lower resolution requires explicit selection.
 VIDEO_PRICE_MODELS = ("grok-1.5-lite", "grok-lower", "sd-2-lower", "sd-2-5-lower", "muse-ai-video")
 SHOT_LIMIT = 12.0  # longer shots are split into continuing shots
 CLIP_STRETCH = 1.15  # a clip may be slowed this much unnoticed to fill its shot
@@ -2800,6 +2800,31 @@ def plan_video(segments: list, duration: float, names: list, era: str, ask, horr
     scenes[:] = split
     assign_clips(scenes, duration, economy, clip_choice, video_model)
     return scenes
+
+
+def verify_script_dialogue_coverage(script: str, scenes: list) -> dict:
+    """Prevent paid video creation when the film plan drops a scripted speaker or line.
+
+    Script lines are authoritative; the original narration WAV is never edited.
+    The check permits a line to span multiple scenes and does not add dialogue.
+    """
+    expected = script_dialogues(script)
+    if not expected:
+        return {"expected": 0, "matched": 0, "missing": []}
+    available = [
+        (str(s.get("dialogue") or "").strip(),
+         re.sub(r"\\s+", "", str(s.get("line") or "").strip()))
+        for s in scenes if s.get("dialogue")
+    ]
+    missing = []
+    for speaker, line in expected:
+        key = re.sub(r"\\s+", "", str(line or "").strip())
+        if not key or not any(
+            name == speaker and (key in spoken or spoken in key and len(spoken) >= 12)
+            for name, spoken in available
+        ):
+            missing.append({"speaker": speaker, "line": str(line)[:140]})
+    return {"expected": len(expected), "matched": len(expected) - len(missing), "missing": missing}
 
 
 def speech_note(shot: dict) -> str:
@@ -3820,7 +3845,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     prices = {"data": None}
     clip_labels = {"map": dict(CLIP_CHOICE_LABELS)}  # seconds -> menu text; rebuilt from the website's price list
     clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
-    video_res_var = tk.StringVar(value="720p")
+    video_res_var = tk.StringVar(value="1080p")
     image_provider_var = tk.StringVar(value=GPT_WEB_LABEL)
     qwen_2k_var = tk.BooleanVar(value=False)
     upscale_provider_var = tk.StringVar(value=UPSCALE_LABELS["qwen"])
@@ -4093,7 +4118,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         def video_res_changed(_event=None):
             project = state.get("project")
             if project is not None:
-                project["video_resolution"] = video_res_var.get() if video_res_var.get() in VIDEO_RESOLUTIONS else "720p"
+                project["video_resolution"] = video_res_var.get() if video_res_var.get() in VIDEO_RESOLUTIONS else "1080p"
                 save_project()
             update_price_line()
 
@@ -4130,7 +4155,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             model = model if model in VIDEO_PRICE_MODELS else (
                 VIDEO_GROK_LITE_MODEL if not project else VIDEO_AUTO_MODEL)
             seconds = int(project.get("clip_choice") or 0) or 10
-            resolution = (project.get("video_resolution") or "720p") if model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else (
+            resolution = (project.get("video_resolution") or "1080p") if model in (VIDEO_GROK_LITE_MODEL, VIDEO_GROK_LOWER_MODEL) else (
                 "720p" if model in SEEDANCE_MODELS else None)
             price_line_var.set(snapgen_prices.summary(data["rows"], seconds, model, resolution,
                                                       data.get("stale", False), data.get("at", 0)))
@@ -4547,17 +4572,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(
                 project.get("storyboard_provider"), GPT_WEB_LABEL))
             if "clip_choice" not in project:
-                # A new story starts on the cheap default (Grok Lite 720p, 10 s clips); a plan that already
+                # A new story starts on full HD (Grok Lite 1080p, 10 s clips); a plan that already
                 # exists keeps the automatic length it was made with.
                 fresh = not project.get("scenes") and not project.get("done", {}).get("plan")
                 project["clip_choice"] = 10 if fresh else 0
                 if fresh and not project.get("video_model"):
-                    project["video_model"], project["video_resolution"] = VIDEO_GROK_LITE_MODEL, "720p"
+                    project["video_model"], project["video_resolution"] = VIDEO_GROK_LITE_MODEL, "1080p"
             video_model = str(project.get("video_model") or "auto")
             video_model_var.set(VIDEO_MODEL_LABELS.get(video_model, SEEDANCE_MODELS.get(
                 video_model, VIDEO_MODEL_LABELS["auto"])))
             clip_choice_var.set(clip_labels["map"].get(int(project.get("clip_choice") or 0), CLIP_CHOICE_LABELS[0]))
-            video_res_var.set(project.get("video_resolution") or "720p")
+            video_res_var.set(project.get("video_resolution") or "1080p")
             apply_price_default = state.get("_video_price_default_on_open")
             if callable(apply_price_default):
                 apply_price_default(project)
@@ -6402,6 +6427,19 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                        refs=attachment_names(), aspect=desired_aspect(), economy=economy_on(),
                        clip_choice=int(project.get("clip_choice") or 0),
                        video_model=project.get("video_model") or VIDEO_AUTO_MODEL)
+            if video_mode:
+                speech_audit = verify_script_dialogue_coverage(story_script(), scenes_so_far)
+                project["speech_coverage_audit"] = speech_audit
+                save_project()
+                if speech_audit["missing"]:
+                    missed = " / ".join(
+                        f'{item["speaker"]}: {item["line"][:55]}'
+                        for item in speech_audit["missing"][:5])
+                    raise RuntimeError(
+                        f'บทพูดในแผนไม่ครบ {speech_audit["matched"]}/{speech_audit["expected"]} '
+                        f'— หยุดก่อนสร้างวิดีโอเพื่อป้องกันคำพูดผิดคนหรือหาย: {missed}')
+                if speech_audit["expected"]:
+                    log(f'✓ ตรวจบทพูดกับแผนตรงกัน {speech_audit["matched"]}/{speech_audit["expected"]} ประโยค')
             project["planned_clip_choice"] = int(project.get("clip_choice") or 0)
             if project["direction"]:
                 (folder / "director_plan.json").write_text(
