@@ -496,7 +496,8 @@ def enhance_image(path, log=None, model="rhea-1", scale=2):
 
 
 def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4", fi_model="apo-8",
-                upscale_2x=False, upscale_4k=False, progress=None, target_size=None):
+                upscale_2x=False, upscale_4k=False, progress=None, target_size=None,
+                vram_limit=1.0, extra_instances=1):
     """Slow-mo plus spatial upscale; Auto 4K preserves orientation and content aspect."""
     found = _topaz_dirs()
     if not found:
@@ -515,9 +516,14 @@ def _topaz_slow(inp, out, factor, source_fps, has_audio, say, up_model="prob-4",
     cw, ch = _fit_video_size(w, h, tw, th) if upscale_4k else (tw, th)
     env = dict(os.environ, TVAI_MODEL_DIR=str(mdir), TVAI_MODEL_DATA_DIR=str(mdir))
     # Interpolate first (cheaper at the source size), then upscale.
-    vf = f"tvai_fi=model={fi_model}:slowmo={int(factor)}:fps={source_fps:g}:device=0:vram=1:instances=1"
+    # Standalone drag/drop jobs can reserve less VRAM and avoid additional
+    # parallel model instances without changing the main Auto pipeline.
+    vram_limit = max(0.1, min(1.0, float(vram_limit)))
+    extra_instances = max(0, min(3, int(extra_instances)))
+    gpu_budget = f":device=0:vram={vram_limit:g}:instances={extra_instances}"
+    vf = f"tvai_fi=model={fi_model}:slowmo={int(factor)}:fps={source_fps:g}{gpu_budget}"
     if (tw, th) != (w, h):
-        vf += (f",tvai_up=model={up_model}:scale=0:w={cw}:h={ch}:blend=0:device=0:vram=1:instances=1")
+        vf += (f",tvai_up=model={up_model}:scale=0:w={cw}:h={ch}:blend=0{gpu_budget}")
     vf += f",scale={cw}:{ch}:flags=lanczos,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
     cmd =[str(exe), "-hide_banner", "-y", "-i", str(inp)]
     if has_audio:
@@ -687,7 +693,8 @@ def make_topaz_slow2x_2k(input_video, output_video=None, log=None, progress=None
     say = log if callable(log) else (lambda msg: None)
     try:
         result = _topaz_slow(inp, output, 2, fps, has_audio, say,
-                             target_size=target, progress=progress)
+                             target_size=target, progress=progress,
+                             vram_limit=0.65, extra_instances=0)
         if not result:
             raise RuntimeError("Topaz สร้างไฟล์ Slow 2x 2K ไม่สำเร็จ")
         return str(result)

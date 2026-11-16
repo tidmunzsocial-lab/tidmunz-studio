@@ -18,6 +18,8 @@ def test_topaz_drop_uses_strict_model_and_2k(monkeypatch, tmp_path):
     monkeypatch.setattr(slow, "_probe_video", lambda *args: (24.0, True))
     calls = []
     def run(inp, out, factor, fps, has_audio, say, **kwargs):
+        assert kwargs.get("vram_limit") == 0.65
+        assert kwargs.get("extra_instances") == 0
         calls.append((factor, kwargs.get("target_size"), str(out)))
         return str(out)
     monkeypatch.setattr(slow, "_topaz_slow", run)
@@ -65,3 +67,31 @@ def test_auto_drop_card_is_visible_and_drag_enabled():
         assert root.tk.call("package", "present", "tkdnd")
     finally:
         root.destroy()
+
+
+def test_standalone_gpu_memory_budget_is_applied_to_both_topaz_models(monkeypatch, tmp_path):
+    """Inspect constructed FFmpeg filters without running any GPU processing."""
+    import ai_slow2x as slow
+    from types import SimpleNamespace
+    monkeypatch.setattr(slow, "_topaz_dirs", lambda: ("topaz_ffmpeg", "models"))
+    monkeypatch.setattr(slow.subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        stderr="Stream #0:0 Video: hevc, yuv420p, 1920x1080, 24 fps", stdout=""))
+    monkeypatch.setattr(slow, "_video_duration_seconds", lambda *a: 10.0)
+    monkeypatch.setattr(slow, "_video_ok", lambda *a: True)
+    monkeypatch.setattr(slow, "_video_dimensions", lambda *a: (2048, 1152))
+    commands = []
+    monkeypatch.setattr(slow, "_run_video_process_with_progress",
+                        lambda cmd, *a, **kw: commands.append(cmd))
+    source, output = tmp_path / "shot.mp4", tmp_path / "shot_2K.mp4"
+    slow._topaz_slow(source, output, 2, 24.0, False, lambda _: None,
+                     target_size=(2048, 1152),
+                     vram_limit=0.65, extra_instances=0)
+    vf = commands[-1][commands[-1].index("-vf") + 1]
+    assert vf.count("vram=0.65:instances=0") == 2
+    assert "tvai_fi=model=apo-8" in vf
+    assert "tvai_up=model=prob-4" in vf
+    # Original Auto call remains unchanged, to avoid unrelated regressions.
+    slow._topaz_slow(source, output, 2, 24.0, False, lambda _: None,
+                     target_size=(2048, 1152))
+    vf_auto = commands[-1][commands[-1].index("-vf") + 1]
+    assert vf_auto.count("vram=1:instances=1") == 2
