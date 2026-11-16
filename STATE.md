@@ -1,3 +1,4 @@
+- 2026-11-17: Footer status UI now uses one compact row: "ติดตาม: อีก N นาที" before Chrome/GPT/Tailscale. No new watcher; live program files were patched, but restart deferred while Auto was busy. Added layout/label regression checks.
 # 2026-11-16 — Chrome Extension Follow-up footer (source-only)
 
 - Adds a separate bottom-right footer status for the existing Tidmunz ChatGPT `followup.js`. It is independent of GPT image/video/SnapGen job indicators.

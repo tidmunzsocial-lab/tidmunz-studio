@@ -15,13 +15,13 @@ from snapgen_chrome_relay import _Relay
 class FollowupFooterTests(unittest.TestCase):
     def test_missing_extension_heartbeat_never_claims_active(self):
         text, colour = label_for_followup(None)
-        self.assertIn("ไม่พบข้อมูล", text)
+        self.assertEqual(text, "ติดตาม: ไม่เชื่อมต่อ")
         self.assertEqual(colour, "#9E9E9E")
 
     def test_existing_image_generation_does_not_turn_on_monitor(self):
         text, _ = label_for_followup({"enabled": False, "alarm_active": False,
                                       "phase": "idle", "next_at": 0})
-        self.assertIn("ยังไม่เปิดติดตาม", text)
+        self.assertEqual(text, "ติดตาม: ปิด")
 
     def test_active_chrome_alarm_shows_remaining_and_configured_minutes(self):
         t = 1_800_000_000_000
@@ -29,8 +29,8 @@ class FollowupFooterTests(unittest.TestCase):
             {"enabled": True, "alarm_active": True, "phase": "idle",
              "next_at": t + 4 * 60000, "interval_minutes": 15},
             now_ms=t)
-        self.assertIn("GPT ตรวจอีก 4 นาที", text)
-        self.assertIn("รอบ 15 นาที", text)
+        self.assertEqual(text, "ติดตาม: อีก 4 นาที")
+        self.assertNotIn("รอบ", text)
         self.assertEqual(colour, "#4CAF50")
 
     def test_missing_alarm_cannot_be_green(self):
@@ -38,14 +38,14 @@ class FollowupFooterTests(unittest.TestCase):
             {"enabled": True, "alarm_active": False, "phase": "idle",
              "next_at": 1_800_000_300_000, "interval_minutes": 5},
             now_ms=1_800_000_000_000)
-        self.assertIn("ไม่พบ Alarm", text)
+        self.assertEqual(text, "ติดตาม: ไม่พร้อม")
         self.assertNotEqual(colour, "#4CAF50")
 
     def test_checking_is_distinct_from_creating_media(self):
         text, colour = label_for_followup(
             {"enabled": True, "alarm_active": True, "checking": True,
              "phase": "idle"}, now_ms=1_800_000_000_000)
-        self.assertIn("กำลังตรวจความคืบหน้า", text)
+        self.assertEqual(text, "ติดตาม: กำลังตรวจ")
         self.assertNotIn("กำลังทำงาน", text)
         self.assertNotEqual(colour, "#4CAF50")
 
@@ -54,8 +54,34 @@ class FollowupFooterTests(unittest.TestCase):
             {"enabled": False, "stop_requested": True,
              "phase": "awaiting_effect_selection"})
         self.assertIn("ถึงหน้าเลือกเสียง", text)
-        self.assertIn("หยุดแล้ว", text)
+        self.assertNotIn("กำลังทำงาน", text)
         self.assertNotEqual(colour, "#4CAF50")
+
+    def test_all_statuses_use_one_short_label(self):
+        cases = [
+            None,
+            {"enabled": True, "alarm_active": False},
+            {"enabled": True, "alarm_active": True, "checking": True},
+            {"enabled": False, "phase": "uncertain"},
+            {"enabled": False, "phase": "awaiting_effect_selection"},
+            {"enabled": True, "alarm_active": True, "next_at": 0},
+            {"enabled": True, "alarm_active": True, "next_at": 1800000000000},
+        ]
+        for item in cases:
+            label, colour = label_for_followup(item, now_ms=1799999700000)
+            self.assertTrue(label.startswith("ติดตาม: "), label)
+            self.assertLessEqual(len(label), 25, label)
+            self.assertNotIn("กำลังทำงาน", label)
+
+    def test_footer_layout_has_single_row_before_chrome(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "snapgen_gui_v2.py").read_text(encoding="utf-8")
+        self.assertIn('followup_group.grid(row=1, column=1', source)
+        self.assertIn('_footer_status_light.grid(row=1, column=2', source)
+        self.assertIn('_footer_status_label.grid(row=1, column=3', source)
+        self.assertIn('_main_version_label.grid(row=1, column=4', source)
+        self.assertNotIn('followup_light.grid(row=2', source)
+        self.assertNotIn('followup_label.grid(row=2', source)
 
     def test_authenticated_relay_endpoint_accepts_only_extension_reports(self):
         import json

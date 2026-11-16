@@ -11,31 +11,29 @@ import time
 
 def label_for_followup(status: dict | None, *, now_ms: int | None = None) -> tuple[str, str]:
     if not status:
-        return "สคริปต์ติดตาม: ไม่พบข้อมูลจากส่วนขยาย", "#9E9E9E"
+        return "ติดตาม: ไม่เชื่อมต่อ", "#9E9E9E"
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
     enabled = bool(status.get("enabled"))
     phase = str(status.get("phase") or "")
     if phase == "awaiting_effect_selection":
-        return "สคริปต์ติดตาม: ถึงหน้าเลือกเสียง · หยุดแล้ว", "#9E9E9E"
+        return "ติดตาม: ถึงหน้าเลือกเสียง", "#9E9E9E"
     if phase == "uncertain":
-        return "สคริปต์ติดตาม: หยุด · ต้องตรวจข้อความก่อน", "#FFC107"
+        return "ติดตาม: รอตรวจสอบ", "#FFC107"
     if not enabled:
-        return ("สคริปต์ติดตาม: หยุดติดตาม" if status.get("stop_requested") else
-                "สคริปต์ติดตาม: ยังไม่เปิดติดตาม"), "#9E9E9E"
+        return ("ติดตาม: หยุด" if status.get("stop_requested") else
+                "ติดตาม: ปิด"), "#9E9E9E"
     if not status.get("alarm_active"):
-        return "สคริปต์ติดตาม: ยังไม่พร้อม · ไม่พบ Alarm", "#FFC107"
+        return "ติดตาม: ไม่พร้อม", "#FFC107"
     if status.get("checking") or phase == "sending":
-        return "สคริปต์ติดตาม: กำลังตรวจความคืบหน้า", "#FFC107"
+        return "ติดตาม: กำลังตรวจ", "#FFC107"
     try:
         next_at = int(status.get("next_at") or 0)
         interval = int(status.get("interval_minutes") or 0)
     except (TypeError, ValueError):
         next_at = interval = 0
     if next_at <= 0:
-        return "สคริปต์ติดตาม: เปิดอยู่ · ยังไม่ได้นัดตรวจ", "#FFC107"
+        return "ติดตาม: รอนัดตรวจ", "#FFC107"
     remaining = max(0, math.ceil((next_at - now) / 60000))
     if remaining == 0:
-        return "สคริปต์ติดตาม: ถึงรอบตรวจ · รอ GPT", "#FFC107"
-    if interval > 0:
-        return f"เฝ้าติดตาม · นัด GPT ตรวจอีก {remaining} นาที (รอบ {interval} นาที)", "#4CAF50"
-    return f"เฝ้าติดตาม · นัด GPT ตรวจอีก {remaining} นาที", "#4CAF50"
+        return "ติดตาม: ถึงรอบตรวจ", "#FFC107"
+    return f"ติดตาม: อีก {remaining} นาที", "#4CAF50"

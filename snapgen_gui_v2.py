@@ -1097,13 +1097,14 @@ _snapgen_footer_source_var = None
 def _ensure_status_footer():
     global _status_footer
     if _status_footer is None or not _status_footer.winfo_exists():
-        _status_footer = tk.Frame(root, bg="#FFFFFF", height=44)
+        _status_footer = tk.Frame(root, bg="#FFFFFF", height=32)
         _status_footer.pack(side="bottom", fill="x")
         _status_footer.pack_propagate(False)
         _status_footer.columnconfigure(0, weight=1)
         _status_footer.columnconfigure(1, weight=0)
         _status_footer.columnconfigure(2, weight=0)
         _status_footer.columnconfigure(3, weight=0)
+        _status_footer.columnconfigure(4, weight=0)
     return _status_footer
 
 _version_display_cache = {"value": None, "checked": 0.0, "pending": False}
@@ -1171,7 +1172,7 @@ def _ensure_main_version_label():
             _main_version_label.config(text=f"v{_installed_version()}")
         _main_version_label.pack_forget()
         _main_version_label.place_forget()
-        _main_version_label.grid(row=1, column=3, sticky="e", padx=(8, 10), pady=(0, 2))
+        _main_version_label.grid(row=1, column=4, sticky="e", padx=(8, 10), pady=(0, 2))
         if _update_available_label is None or not _update_available_label.winfo_exists():
             _update_available_label = tk.Label(
                 footer,
@@ -1197,7 +1198,7 @@ def _set_update_available(available: bool, latest: str = "") -> None:
             return
         if available:
             _update_available_label.config(text=f"↑ v{latest}" if latest else "↑ มีอัปเดต")
-            _update_available_label.grid(row=0, column=3, sticky="e", padx=(8, 10), pady=0)
+            _update_available_label.grid(row=0, column=4, sticky="e", padx=(8, 10), pady=0)
         else:
             _update_available_label.grid_remove()
     except Exception:
@@ -1266,7 +1267,7 @@ def _ensure_footer_status_widgets():
             )
         _footer_status_label.pack_forget()
         _footer_status_label.place_forget()
-        _footer_status_label.grid(row=1, column=2, sticky="e", padx=(3, 0), pady=(0, 2))
+        _footer_status_label.grid(row=1, column=3, sticky="e", padx=(3, 0), pady=(0, 2))
 
         # A Canvas cannot be re-parented in Tkinter. Create a footer light and
         # mirror the original light's current colour instead.
@@ -1292,7 +1293,7 @@ def _ensure_footer_status_widgets():
         _footer_status_light.itemconfig(_footer_status_light_item, fill=colour)
         _footer_status_light.pack_forget()
         _footer_status_light.place_forget()
-        _footer_status_light.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(0, 2))
+        _footer_status_light.grid(row=1, column=2, sticky="e", padx=(4, 0), pady=(0, 2))
 
         _ensure_main_version_label()
     except Exception:
@@ -14636,12 +14637,12 @@ def _install_image_bridge_status():
         parent, width=14, height=14, bg="#FFFFFF", highlightthickness=0
     )
     dot = light.create_oval(2, 2, 12, 12, fill="#9E9E9E", outline="")
-    light.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(0, 2))
+    light.grid(row=1, column=2, sticky="e", padx=(4, 0), pady=(0, 2))
     status_label = tk.Label(
         parent, textvariable=status_var, bg="#FFFFFF",
         fg="#475467", font=(SNAPGEN_UI_FONT, 9), anchor="e",
     )
-    status_label.grid(row=1, column=2, sticky="e", padx=(3, 0), pady=(0, 2))
+    status_label.grid(row=1, column=3, sticky="e", padx=(3, 0), pady=(0, 2))
     _footer_status_light = light
     _footer_status_light_item = dot
     _footer_status_label = status_label
@@ -14650,16 +14651,20 @@ def _install_image_bridge_status():
     g["snap_status_var"] = status_var
     # Dedicated Chrome Extension Follow-up status, independent of GPT jobs.
     # Never infer follow-up activity from image/video generation or scheduled tasks.
-    followup_var = tk.StringVar(value="สคริปต์ติดตาม: กำลังตรวจ...")
-    followup_light = tk.Canvas(parent, width=14, height=14,
+    # Keep monitoring BEFORE Chrome/GPT/Tailscale in the SAME footer row.
+    # Its state is sourced only from followup.js, never from image/video jobs.
+    followup_var = tk.StringVar(value="ติดตาม: ตรวจสถานะ...")
+    followup_group = tk.Frame(parent, bg="#FFFFFF")
+    followup_group.grid(row=1, column=1, sticky="e", padx=(4, 2), pady=(0, 2))
+    followup_light = tk.Canvas(followup_group, width=14, height=14,
                                bg="#FFFFFF", highlightthickness=0)
     followup_dot = followup_light.create_oval(
         2, 2, 12, 12, fill="#9E9E9E", outline="")
-    followup_light.grid(row=2, column=1, sticky="e", padx=(8, 0), pady=(0, 1))
+    followup_light.pack(side="left", padx=(0, 2))
     followup_label = tk.Label(
-        parent, textvariable=followup_var, bg="#FFFFFF", fg="#475467",
+        followup_group, textvariable=followup_var, bg="#FFFFFF", fg="#475467",
         font=(SNAPGEN_UI_FONT, 9), anchor="e")
-    followup_label.grid(row=2, column=2, sticky="e", padx=(3, 0), pady=(0, 1))
+    followup_label.pack(side="left")
     g["followup_extension_status_var"] = followup_var
 
     def refresh_extension_followup_status():
