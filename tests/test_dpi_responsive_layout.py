@@ -277,3 +277,116 @@ def test_late_prompt_ref_does_not_duplicate_credit_cards():
         assert g["_responsive_chatgpt_quota_card"] in gray_edges
     finally:
         root.destroy()
+
+
+def test_real_provider_credit_widget_creates_both_equal_grey_cards():
+    """The recovered toolbar uses _image_provider_credit_widget, not credit_button."""
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Display unavailable")
+    try:
+        root.tk.call("tk", "scaling", 1.6683)
+        root.geometry("1420x780")
+        toolbar = tk.Frame(root, bg="#FFFFFF")
+        toolbar.pack(side="top", fill="x")
+        for title in ("⚙", "โฟลเดอร์", "Prompt-Ref", "ChatGPT"):
+            tk.Button(toolbar, text=title).pack(side="right")
+        source_value = tk.StringVar(master=root, value="26")
+        source_credit = tk.Label(toolbar, textvariable=source_value, bg="#FFFFFF")
+        source_credit.pack(side="right", padx=(15, 8))
+        source_title = tk.Label(toolbar, text="SnapGen", bg="#FFFFFF")
+        source_title.pack(side="right")
+        mode = tk.Frame(root, bg="#FFFFFF")
+        mode.pack(side="top", fill="x")
+        quota = tk.StringVar(master=root, value="62 Plus")
+        quota_label = tk.Label(mode, textvariable=quota)
+        quota_label.pack(side="right", padx=(8, 12))
+        g = {
+            "_image_provider_credit_widget": source_credit,
+            "bridge_image_quota_label": quota_label,
+            "bridge_image_quota_var": quota,
+            "mode_frame": mode,
+        }
+        root.update()
+        from snapgen_responsive_ui import install
+        install(root, g)
+        root.update()
+        top = g["_responsive_snapgen_credit"]
+        bottom = g["_responsive_chatgpt_quota_card"]
+        assert g["_responsive_equal_credit_cards"]
+        assert top.winfo_ismapped() and bottom.winfo_ismapped()
+        assert top.cget("bg") == bottom.cget("bg") == "#DCE2EA"
+        assert top.winfo_width() == bottom.winfo_width()
+        assert top.winfo_height() == bottom.winfo_height()
+        assert source_credit.winfo_manager() == ""
+        assert source_title.winfo_manager() == ""
+        assert quota_label.winfo_manager() == ""
+        snap_labels = top.winfo_children()[0].winfo_children()
+        gpt_labels = bottom.winfo_children()[0].winfo_children()
+        assert root.getvar(snap_labels[0].cget("textvariable")) == "SnapGen"
+        assert root.getvar(snap_labels[-1].cget("textvariable")) == "26"
+        assert root.getvar(gpt_labels[0].cget("textvariable")) == "GPT Plus"
+        assert root.getvar(gpt_labels[-1].cget("textvariable")) == "62"
+        assert snap_labels[0].cget("font") == gpt_labels[0].cget("font")
+        assert snap_labels[-1].cget("font") == gpt_labels[-1].cget("font")
+
+        source_value.set("27")  # simulate the legacy widget updating
+        quota.set("61 Go")
+        root.update()
+        assert root.getvar(snap_labels[-1].cget("textvariable")) == "27"
+        assert root.getvar(gpt_labels[0].cget("textvariable")) == "GPT Go"
+        assert root.getvar(gpt_labels[-1].cget("textvariable")) == "61"
+        root.geometry("1160x650")
+        root.update()
+        assert top.winfo_width() == bottom.winfo_width()
+        assert source_credit.winfo_manager() == ""
+    finally:
+        root.destroy()
+
+
+def test_credit_provider_resizing_respects_equal_card_mount():
+    src = (BASE / "snapgen_gui_v2.py").read_text(encoding="utf-8")
+    assert 'and not g.get("_responsive_equal_credit_cards")' in src
+    assert 'g["_image_provider_credit_widget"] = credit' in src
+
+
+def test_credit_textvariable_discovered_without_registered_g_widget():
+    """Credit shown as 26 and SnapGen on the toolbar; no credit keys at all."""
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("No display")
+    try:
+        root.geometry("1400x700")
+        tb = tk.Frame(root)
+        tb.pack(fill="x")
+        tk.Button(tb, text="Prompt-Ref").pack(side="right")
+        live = tk.StringVar(master=root, value="26")
+        value = tk.Label(tb, textvariable=live)
+        value.pack(side="right")
+        caption = tk.Label(tb, text="SnapGen")
+        caption.pack(side="right")
+        row = tk.Frame(root)
+        row.pack(fill="x")
+        quota = tk.StringVar(master=root, value="62 Plus")
+        quota_label = tk.Label(row, textvariable=quota)
+        quota_label.pack(side="right")
+        g = {"bridge_image_quota_label":quota_label, "bridge_image_quota_var":quota,
+             "mode_frame":row}
+        root.update()
+        from snapgen_responsive_ui import install
+        install(root,g)
+        root.update()
+        assert g["_responsive_equal_credit_cards"]
+        assert value.winfo_manager()=="" and caption.winfo_manager()==""
+        a,b=g["_responsive_snapgen_credit"],g["_responsive_chatgpt_quota_card"]
+        assert a.winfo_ismapped() and b.winfo_ismapped()
+        assert (a.winfo_width(),a.winfo_height()) == (b.winfo_width(),b.winfo_height())
+        assert a.cget("bg") == b.cget("bg") == "#DCE2EA"
+        live.set("28")
+        root.update()
+        label=a.winfo_children()[0].winfo_children()[-1]
+        assert root.getvar(label.cget("textvariable"))=="28"
+    finally:
+        root.destroy()

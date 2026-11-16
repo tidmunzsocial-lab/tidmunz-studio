@@ -15469,7 +15469,8 @@ def _install_image_provider_selector():
                 menu_pack["before"] = reference
             menu.pack(**menu_pack)
 
-            if credit is not None and credit.winfo_exists():
+            if (credit is not None and credit.winfo_exists()
+                    and not g.get("_responsive_equal_credit_cards")):
                 credit_pack = {
                     "side": "right",
                     "padx": (2, 0),
