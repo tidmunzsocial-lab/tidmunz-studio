@@ -158,11 +158,11 @@ def test_status_cards_share_size_and_hide_old_credit_control():
         snapgen = g["_responsive_snapgen_credit"]
         chatgpt = g["_responsive_chatgpt_quota_card"]
         assert snapgen.winfo_ismapped() and chatgpt.winfo_ismapped()
-        assert snapgen.master != chatgpt.master
+        assert snapgen.master is root and chatgpt.master is root
         assert snapgen.winfo_rooty() < chatgpt.winfo_rooty()
         assert snapgen.winfo_width() == chatgpt.winfo_width()
         assert snapgen.winfo_height() == chatgpt.winfo_height()
-        assert snapgen.cget("bg") == chatgpt.cget("bg") == "#DCE2EA"
+        assert snapgen.cget("bg") == chatgpt.cget("bg") == "#C3CBD6"
         assert old_credit.winfo_manager() == ""
         assert quota_label.winfo_manager() == ""
         balance.set("1234")
@@ -270,7 +270,7 @@ def test_late_prompt_ref_does_not_duplicate_credit_cards():
                 yield child
                 yield from descend(child)
         gray_edges = [widget for widget in descend(root)
-                      if isinstance(widget, tk.Frame) and widget.cget("bg") == "#DCE2EA"]
+                      if isinstance(widget, tk.Frame) and widget.cget("bg") == "#C3CBD6"]
         assert len(gray_edges) == 2
         assert all(item.winfo_ismapped() for item in gray_edges)
         assert g["_responsive_snapgen_credit"] in gray_edges
@@ -316,7 +316,7 @@ def test_real_provider_credit_widget_creates_both_equal_grey_cards():
         bottom = g["_responsive_chatgpt_quota_card"]
         assert g["_responsive_equal_credit_cards"]
         assert top.winfo_ismapped() and bottom.winfo_ismapped()
-        assert top.cget("bg") == bottom.cget("bg") == "#DCE2EA"
+        assert top.cget("bg") == bottom.cget("bg") == "#C3CBD6"
         assert top.winfo_width() == bottom.winfo_width()
         assert top.winfo_height() == bottom.winfo_height()
         assert source_credit.winfo_manager() == ""
@@ -383,10 +383,57 @@ def test_credit_textvariable_discovered_without_registered_g_widget():
         a,b=g["_responsive_snapgen_credit"],g["_responsive_chatgpt_quota_card"]
         assert a.winfo_ismapped() and b.winfo_ismapped()
         assert (a.winfo_width(),a.winfo_height()) == (b.winfo_width(),b.winfo_height())
-        assert a.cget("bg") == b.cget("bg") == "#DCE2EA"
+        assert a.cget("bg") == b.cget("bg") == "#C3CBD6"
         live.set("28")
         root.update()
         label=a.winfo_children()[0].winfo_children()[-1]
         assert root.getvar(label.cget("textvariable"))=="28"
+    finally:
+        root.destroy()
+
+
+def test_credit_cards_stay_inside_window_with_matching_edges_after_resize():
+    """Visual geometry regression: real on-screen panels, not hidden pack children."""
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("No graphical display")
+    try:
+        root.geometry("1134x624")
+        toolbar = tk.Frame(root)
+        toolbar.pack(fill="x")
+        for name in ("Settings", "Folder", "Prompt-Ref"):
+            tk.Button(toolbar, text=name).pack(side="right")
+        balance = tk.StringVar(master=root, value="26")
+        source_credit = tk.Label(toolbar, textvariable=balance)
+        source_credit.pack(side="right")
+        tk.Label(toolbar, text="SnapGen").pack(side="right")
+        mode = tk.Frame(root)
+        mode.pack(fill="x")
+        quota = tk.StringVar(master=root, value="62 Plus")
+        quota_label = tk.Label(mode, textvariable=quota)
+        quota_label.pack(side="right")
+        g = {
+            "_image_provider_credit_widget": source_credit,
+            "bridge_image_quota_var": quota,
+            "bridge_image_quota_label": quota_label,
+            "mode_frame": mode,
+        }
+        root.update()
+        from snapgen_responsive_ui import install
+        install(root, g)
+        for width in (1134, 1417, 1134):
+            root.geometry(f"{width}x624")
+            root.update()
+            a, b = g["_responsive_snapgen_credit"], g["_responsive_chatgpt_quota_card"]
+            assert a.winfo_ismapped() and b.winfo_ismapped()
+            assert a.winfo_manager() == b.winfo_manager() == "place"
+            assert a.winfo_width() == b.winfo_width() == 198
+            assert a.winfo_height() == b.winfo_height() == 38
+            assert a.winfo_rootx() == b.winfo_rootx()
+            assert a.winfo_rootx()-root.winfo_rootx() == width-18-198
+            assert a.winfo_rooty() < b.winfo_rooty()
+            assert a.cget("bg") == b.cget("bg") == "#C3CBD6"
+            assert source_credit.winfo_manager() == ""
     finally:
         root.destroy()

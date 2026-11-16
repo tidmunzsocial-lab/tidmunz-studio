@@ -163,7 +163,7 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 # Reuse original live balances, retain each original toolbar
                 # row and apply the same soft-grey card treatment to both.
                 CARD_BG = "#F3F5F8"
-                CARD_EDGE = "#DCE2EA"
+                CARD_EDGE = "#C3CBD6"
                 CARD_LABEL = "#66758A"
                 CARD_VALUE = "#475569"
                 CARD_W, CARD_H = 196, 36
@@ -265,38 +265,27 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 root.after(300, lambda: attach_action_bar(attempt + 1))
 
     def ensure_equal_credit_cards(attempt=0):
-        """Restore both credit cards even when toolbar discovery happened late.
+        """Two true on-screen overlays, independent of toolbar pack order.
 
-        Credit status is provided by the recovered app, whose StringVar can be
-        registered after Prompt-Ref is made. Never require its presence to
-        create a visible card; use the original button as a live fallback.
+        Credit is on the checkbox row; GPT is on the mode-tabs row. Earlier
+        packed cards could be placed inside an unmapped or clipped toolbar.
+        Mounting directly on the visible root avoids that failure.
         """
         if g.get("_responsive_equal_credit_cards"):
-            cards = (g.get("_responsive_snapgen_credit"),
-                     g.get("_responsive_chatgpt_quota_card"))
-            if all(isinstance(card, tk.Widget) and card.winfo_exists()
-                   and card.winfo_manager() == "pack" for card in cards):
-                return
-            g["_responsive_equal_credit_cards"] = False
+            return
+
         quota_label = g.get("bridge_image_quota_label")
         quota_var = g.get("bridge_image_quota_var")
-        # The real toolbar registers its numeric credit display under this
-        # key. Older code looked ONLY for credit_button, skipped the cards,
-        # and left the plain SnapGen 26 and GPT Plus 62 from the screenshot.
         old_credit = next(
-            (g.get(k) for k in (
-                "_image_provider_credit_widget",
-                "credit_button", "credit_label", "credit_status_label",
-            ) if isinstance(g.get(k), tk.Widget)
-             and g.get(k).winfo_exists()), None
+            (widget for key in (
+                "_image_provider_credit_widget", "credit_button",
+                "credit_label", "credit_status_label",
+            ) if isinstance((widget := g.get(key)), tk.Widget)
+             and widget.winfo_exists()), None,
         )
         if old_credit is None:
             old_credit = _find_snapgen_credit_widget(root)
         credit_var = g.get("credit_status_var")
-        action_bar = g.get("_responsive_action_bar")
-        if isinstance(action_bar, tk.Frame) and not action_bar.winfo_exists():
-            action_bar = None
-
         if not isinstance(quota_label, tk.Label) or not isinstance(quota_var, tk.Variable):
             if attempt < 50:
                 root.after(400, lambda: ensure_equal_credit_cards(attempt + 1))
@@ -306,107 +295,76 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 if attempt < 50:
                     root.after(400, lambda: ensure_equal_credit_cards(attempt + 1))
                 return
-            # Share the legacy Tcl StringVar when one exists so that future
-            # balance updates are immediately reflected in the new card.
             try:
-                variable_name = str(old_credit.cget("textvariable") or "")
+                name = str(old_credit.cget("textvariable") or "")
             except tk.TclError:
-                variable_name = ""
-            if variable_name:
-                credit_var = tk.StringVar(master=root, name=variable_name)
-            else:
-                credit_var = tk.StringVar(
-                    master=root, value=str(old_credit.cget("text") or "—"))
+                name = ""
+            credit_var = (tk.StringVar(master=root, name=name) if name
+                          else tk.StringVar(master=root, value=_displayed_label_text(root, old_credit)))
             g["credit_status_var"] = credit_var
 
-        if action_bar is not None:
-            credit_host = action_bar
-            credit_right_pad = 5  # action bar already has 7 px outer padding
-        elif old_credit is not None:
-            credit_host = old_credit.master
-            credit_right_pad = 12
-        else:
-            if attempt < 50:
-                root.after(400, lambda: ensure_equal_credit_cards(attempt + 1))
-            return
-        quota_host = quota_label.master
-
-        # Supersede legacy partial cards; no dark tk relief borders.
-        for key in ("_responsive_snapgen_credit", "_responsive_chatgpt_quota_card"):
-            old = g.get(key)
-            if isinstance(old, tk.Widget):
-                try:
-                    if old.winfo_exists():
-                        old.destroy()
-                except tk.TclError:
-                    pass
-        bg, edge = "#F3F5F8", "#DCE2EA"
-        label_fg, number_fg = "#66758A", "#475569"
-        def new_card(host, title_var, amount_var, right_pad):
-            frame = tk.Frame(host, bg=edge, padx=1, pady=1)
-            frame.pack(side="right", padx=(5, right_pad), pady=7)
-            inner = tk.Frame(frame, bg=bg, width=196, height=36)
-            inner.pack()
-            inner.pack_propagate(False)
-            title_label = tk.Label(inner, textvariable=title_var, bg=bg,
-                                   fg=label_fg, font=("Segoe UI", 9),
-                                   padx=10, anchor="w")
-            title_label.pack(side="left", fill="y")
-            amount_label = tk.Label(inner, textvariable=amount_var, bg=bg,
-                                    fg=number_fg, font=("Segoe UI", 9, "bold"),
-                                    padx=10, anchor="e")
-            amount_label.pack(side="right", fill="y")
-            return frame, (inner, title_label, amount_label)
-
-        snap_title = tk.StringVar(master=root, value="SnapGen")
-        snap_card, snap_widgets = new_card(
-            credit_host, snap_title, credit_var, credit_right_pad,
-        )
-        quota_title = tk.StringVar(master=root)
-        quota_amount = tk.StringVar(master=root)
-        def refresh_quota(*_args):
-            title, amount = split_gpt_quota(quota_var.get())
-            quota_title.set(title)
-            quota_amount.set(amount)
-        quota_var.trace_add("write", refresh_quota)
-        refresh_quota()
-        quota_card, quota_widgets = new_card(
-            quota_host, quota_title, quota_amount, 12,
-        )
-
-        for widget in (quota_card, *quota_widgets):
-            widget.configure(cursor="hand2")
-            widget.bind("<Button-1>", lambda _event, original=quota_label:
-                        original.event_generate("<Button-1>"))
-        quota_label.pack_forget()
-        # Hide both old SnapGen pieces (the numeric widget and the caption).
-        # The original numeric credit is still retained for provider callbacks.
-        legacy_widgets = [
-            g.get(k) for k in (
-                "_image_provider_credit_widget",
-                "credit_button", "credit_label", "credit_status_label",
-            )
-        ]
-        if old_credit is not None:
+        size = 38                 # 36px interior plus 1px border on both sides
+        pad_right = 18
+        def vertical_center(widget, fallback):
             try:
-                credit_x = old_credit.winfo_rootx()
-                credit_y = old_credit.winfo_rooty()
-                stack = [root]
-                while stack:
-                    node = stack.pop()
-                    stack.extend(node.winfo_children())
-                    if not isinstance(node, tk.Label) or node is old_credit:
-                        continue
-                    if _displayed_label_text(root, node) != "SnapGen":
-                        continue
-                    dx = credit_x - (node.winfo_rootx() + node.winfo_width())
-                    dy = abs(credit_y - node.winfo_rooty())
-                    if -30 <= dx <= 280 and dy <= 24:
-                        legacy_widgets.append(node)
+                if widget is not None and widget.winfo_manager():
+                    return round(widget.winfo_rooty() - root.winfo_rooty()
+                                 + (widget.winfo_height() - size) / 2)
             except tk.TclError:
                 pass
-        for widget in legacy_widgets:
-            if isinstance(widget, tk.Widget) and widget.winfo_exists():
+            return fallback
+
+        quota_host = quota_label.master
+        try:
+            if quota_label.winfo_manager():
+                quota_offset = round(
+                    quota_label.winfo_rooty() - quota_host.winfo_rooty()
+                    + (quota_label.winfo_height() - size) / 2)
+            else:
+                quota_offset = max(0, round((quota_host.winfo_height() - size) / 2))
+        except tk.TclError:
+            quota_offset = 0
+        gpt_y = round(quota_host.winfo_rooty() - root.winfo_rooty() + quota_offset)
+        snap_y = vertical_center(old_credit, max(4, gpt_y - 110))
+        if snap_y >= gpt_y - 28:
+            snap_y = max(4, gpt_y - 110)
+
+        for key in ("_responsive_snapgen_credit", "_responsive_chatgpt_quota_card"):
+            old = g.get(key)
+            if isinstance(old, tk.Widget) and old.winfo_exists():
+                old.destroy()
+
+        bg, edge, label_fg, value_fg = "#F3F5F8", "#C3CBD6", "#66758A", "#475569"
+
+        def create_card(title_var, number_var, top):
+            edge_frame = tk.Frame(root, bg=edge, padx=1, pady=1)
+            edge_frame.place(relx=1.0, x=-pad_right, y=top, anchor="ne")
+            surface = tk.Frame(edge_frame, bg=bg, width=196, height=36)
+            surface.pack()
+            surface.pack_propagate(False)
+            left = tk.Label(surface, bg=bg, fg=label_fg, font=("Segoe UI", 9),
+                            anchor="w", padx=10, textvariable=title_var)
+            left.pack(side="left", fill="y")
+            right = tk.Label(surface, bg=bg, fg=value_fg, font=("Segoe UI", 9, "bold"),
+                             anchor="e", padx=10, textvariable=number_var)
+            right.pack(side="right", fill="y")
+            return edge_frame, (surface, left, right)
+
+        snap_title = tk.StringVar(master=root, value="SnapGen")
+        snap_card, snap_widgets = create_card(snap_title, credit_var, snap_y)
+        gpt_title, gpt_number = tk.StringVar(master=root), tk.StringVar(master=root)
+        def update_gpt(*_):
+            title, number = split_gpt_quota(quota_var.get())
+            gpt_title.set(title)
+            gpt_number.set(number)
+        quota_var.trace_add("write", update_gpt)
+        update_gpt()
+        gpt_card, gpt_widgets = create_card(gpt_title, gpt_number, gpt_y)
+
+        def hide_source(widget):
+            try:
+                if widget is None or not widget.winfo_exists():
+                    return
                 manager = widget.winfo_manager()
                 if manager == "pack":
                     widget.pack_forget()
@@ -414,22 +372,87 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                     widget.grid_remove()
                 elif manager == "place":
                     widget.place_forget()
-        # Preserve clicking the original credit control to refresh account.
-        if isinstance(old_credit, tk.Widget):
-            def refresh_snapgen(_event):
-                try:
-                    if isinstance(old_credit, tk.Button):
-                        old_credit.invoke()
-                    else:
-                        old_credit.event_generate("<Button-1>")
-                except tk.TclError:
-                    pass
-            for widget in (snap_card, *snap_widgets):
-                widget.configure(cursor="hand2")
-                widget.bind("<Button-1>", refresh_snapgen)
+            except tk.TclError:
+                pass
+
+        sources = [quota_label, old_credit]
+        sources.extend(g.get(k) for k in (
+            "_image_provider_credit_widget", "credit_button",
+            "credit_label", "credit_status_label",
+        ))
+        # Hide the old SnapGen title, but never any arbitrary toolbar button.
+        if old_credit is not None:
+            try:
+                cx = old_credit.winfo_rootx()
+                cy = old_credit.winfo_rooty()
+                queue = [root]
+                while queue:
+                    widget = queue.pop()
+                    queue.extend(widget.winfo_children())
+                    if not isinstance(widget, tk.Label) or widget is old_credit:
+                        continue
+                    if (str(widget).startswith(str(snap_card) + ".") or str(widget).startswith(str(gpt_card) + ".")):
+                        continue
+                    if _displayed_label_text(root, widget) != "SnapGen":
+                        continue
+                    delta_x = cx - widget.winfo_rootx() - widget.winfo_width()
+                    if -30 <= delta_x <= 330 and abs(cy-widget.winfo_rooty()) <= 30:
+                        sources.append(widget)
+            except tk.TclError:
+                pass
+        for widget in sources:
+            hide_source(widget)
+
+        def refresh_source(_event=None):
+            if not isinstance(old_credit, tk.Widget):
+                return
+            try:
+                if isinstance(old_credit, tk.Button):
+                    old_credit.invoke()
+                else:
+                    old_credit.event_generate("<Button-1>")
+            except tk.TclError:
+                pass
+        for widget in (snap_card, *snap_widgets):
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>", refresh_source)
+        for widget in (gpt_card, *gpt_widgets):
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>", lambda _event: quota_label.event_generate("<Button-1>"))
+
         g["_responsive_snapgen_credit"] = snap_card
-        g["_responsive_chatgpt_quota_card"] = quota_card
+        g["_responsive_chatgpt_quota_card"] = gpt_card
         g["_responsive_equal_credit_cards"] = True
+
+        def sync_layout():
+            try:
+                if not snap_card.winfo_exists() or not gpt_card.winfo_exists():
+                    return
+                new_gpt_y = round(quota_host.winfo_rooty() -
+                                  root.winfo_rooty() + quota_offset)
+                gpt_card.place_configure(y=new_gpt_y)
+                snap_card.lift()
+                gpt_card.lift()
+            except tk.TclError:
+                pass
+
+        def on_root_configure(event):
+            if event.widget is root:
+                root.after_idle(sync_layout)
+        root.bind("<Configure>", on_root_configure, add="+")
+
+        def maintain_cards():
+            try:
+                if not snap_card.winfo_exists() or not gpt_card.winfo_exists():
+                    return
+                for widget in sources:
+                    hide_source(widget)
+                sync_layout()
+                root.after(1800, maintain_cards)
+            except tk.TclError:
+                return
+        root.after(500, maintain_cards)
+        root.after_idle(sync_layout)
 
     # Run independently of Prompt-Ref. Previously if the toolbar button was
     # unavailable, both cards disappeared despite v2.0.30 being installed.
