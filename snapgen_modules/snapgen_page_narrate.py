@@ -3756,9 +3756,31 @@ def install_video_auto(g: dict, root: tk.Misc, slot_index: int = 1):
     tk.Label(inner, text="บท + เสียง → วิดีโอทั้งเรื่อง", bg="#EFF6FF", fg="#475569").pack()
     tk.Label(inner, textvariable=controls["stage_var"], bg="#EFF6FF", fg="#2563EB",
              font=("TkDefaultFont", 9, "bold")).pack(pady=(4, 0))
-    tk.Button(inner, text="เปิดหน้าออโต้", command=show_auto, relief="flat", bg="#2563EB", fg="#FFFFFF",
-              activebackground="#1D4ED8", activeforeground="#FFFFFF", cursor="hand2",
-              font=("TkDefaultFont", 10, "bold"), padx=18, pady=4).pack(pady=(8, 0))
+    # Keep the entry visibly green even if the global Tk theme repaints
+    # widget backgrounds: Canvas rectangle/text colors are item-owned.
+    auto_open = tk.Canvas(
+        inner, width=204, height=46, bg="#16A34A",
+        highlightthickness=0, bd=0, relief="flat",
+        cursor="hand2", takefocus=1,
+    )
+    auto_open_background = auto_open.create_rectangle(
+        1, 1, 203, 45, fill="#16A34A", outline="#15803D", width=2,
+    )
+    auto_open.create_text(
+        102, 23, text="เปิดหน้าออโต้", fill="#FFFFFF",
+        font=("TkDefaultFont", 11, "bold"),
+    )
+    auto_open.pack(pady=(8, 0))
+    auto_open.bind(
+        "<Enter>",
+        lambda _event: auto_open.itemconfigure(auto_open_background, fill="#15803D"),
+    )
+    auto_open.bind(
+        "<Leave>",
+        lambda _event: auto_open.itemconfigure(auto_open_background, fill="#16A34A"),
+    )
+    auto_open.bind("<Return>", show_auto)
+    auto_open.bind("<space>", show_auto)
     for widget in (card, inner, *inner.winfo_children()):
         if not isinstance(widget, tk.Button):
             widget.bind("<Button-1>", show_auto)
