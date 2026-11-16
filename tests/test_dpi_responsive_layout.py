@@ -162,7 +162,7 @@ def test_status_cards_share_size_and_hide_old_credit_control():
         assert snapgen.winfo_rooty() < chatgpt.winfo_rooty()
         assert snapgen.winfo_width() == chatgpt.winfo_width()
         assert snapgen.winfo_height() == chatgpt.winfo_height()
-        assert snapgen.cget("bg") == chatgpt.cget("bg") == "#C3CBD6"
+        assert snapgen.cget("bg") == chatgpt.cget("bg") == "#98A5B6"
         assert old_credit.winfo_manager() == ""
         assert quota_label.winfo_manager() == ""
         balance.set("1234")
@@ -270,7 +270,7 @@ def test_late_prompt_ref_does_not_duplicate_credit_cards():
                 yield child
                 yield from descend(child)
         gray_edges = [widget for widget in descend(root)
-                      if isinstance(widget, tk.Frame) and widget.cget("bg") == "#C3CBD6"]
+                      if isinstance(widget, tk.Frame) and widget.cget("bg") == "#98A5B6"]
         assert len(gray_edges) == 2
         assert all(item.winfo_ismapped() for item in gray_edges)
         assert g["_responsive_snapgen_credit"] in gray_edges
@@ -316,9 +316,17 @@ def test_real_provider_credit_widget_creates_both_equal_grey_cards():
         bottom = g["_responsive_chatgpt_quota_card"]
         assert g["_responsive_equal_credit_cards"]
         assert top.winfo_ismapped() and bottom.winfo_ismapped()
-        assert top.cget("bg") == bottom.cget("bg") == "#C3CBD6"
+        assert top.cget("bg") == bottom.cget("bg") == "#98A5B6"
         assert top.winfo_width() == bottom.winfo_width()
         assert top.winfo_height() == bottom.winfo_height()
+        # Real buttons reserve the same 216px right column as the cards,
+        # avoiding the previous overlap with Prompt-Ref / Settings.
+        actions = g["_responsive_action_bar"]
+        gutter = g["_responsive_credit_gutter"]
+        assert gutter.winfo_width() == 216
+        clones = [w for w in actions.pack_slaves() if isinstance(w, tk.Button)]
+        assert clones
+        assert max(w.winfo_rootx() + w.winfo_width() for w in clones) <= top.winfo_rootx()
         assert source_credit.winfo_manager() == ""
         assert source_title.winfo_manager() == ""
         assert quota_label.winfo_manager() == ""
@@ -383,7 +391,7 @@ def test_credit_textvariable_discovered_without_registered_g_widget():
         a,b=g["_responsive_snapgen_credit"],g["_responsive_chatgpt_quota_card"]
         assert a.winfo_ismapped() and b.winfo_ismapped()
         assert (a.winfo_width(),a.winfo_height()) == (b.winfo_width(),b.winfo_height())
-        assert a.cget("bg") == b.cget("bg") == "#C3CBD6"
+        assert a.cget("bg") == b.cget("bg") == "#98A5B6"
         live.set("28")
         root.update()
         label=a.winfo_children()[0].winfo_children()[-1]
@@ -433,7 +441,7 @@ def test_credit_cards_stay_inside_window_with_matching_edges_after_resize():
             assert a.winfo_rootx() == b.winfo_rootx()
             assert a.winfo_rootx()-root.winfo_rootx() == width-18-198
             assert a.winfo_rooty() < b.winfo_rooty()
-            assert a.cget("bg") == b.cget("bg") == "#C3CBD6"
+            assert a.cget("bg") == b.cget("bg") == "#98A5B6"
             assert source_credit.winfo_manager() == ""
     finally:
         root.destroy()

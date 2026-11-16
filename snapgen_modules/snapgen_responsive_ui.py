@@ -160,12 +160,16 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 actions = tk.Frame(parent, bg="#FFFFFF", height=52)
                 actions.pack(side="top", fill="x", after=toolbar, padx=7, pady=(0, 2))
                 actions.pack_propagate(False)
+                # Keep a dedicated credit column clear of toolbar actions.
+                credit_gutter = tk.Frame(actions, bg="#FFFFFF", width=216, height=1)
+                credit_gutter.pack(side="right")
+                g["_responsive_credit_gutter"] = credit_gutter
                 # Reuse original live balances, retain each original toolbar
                 # row and apply the same soft-grey card treatment to both.
-                CARD_BG = "#F3F5F8"
-                CARD_EDGE = "#C3CBD6"
-                CARD_LABEL = "#66758A"
-                CARD_VALUE = "#475569"
+                CARD_BG = "#EDF1F5"
+                CARD_EDGE = "#98A5B6"
+                CARD_LABEL = "#526176"
+                CARD_VALUE = "#334155"
                 CARD_W, CARD_H = 196, 36
                 card_font = ("Segoe UI", 9)
 
@@ -334,12 +338,12 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
             if isinstance(old, tk.Widget) and old.winfo_exists():
                 old.destroy()
 
-        bg, edge, label_fg, value_fg = "#F3F5F8", "#C3CBD6", "#66758A", "#475569"
+        bg, edge, label_fg, value_fg = "#EDF1F5", "#98A5B6", "#526176", "#334155"
 
         def create_card(title_var, number_var, top):
-            edge_frame = tk.Frame(root, bg=edge, padx=1, pady=1)
+            edge_frame = tk.Frame(root, bg=edge, padx=2, pady=2)
             edge_frame.place(relx=1.0, x=-pad_right, y=top, anchor="ne")
-            surface = tk.Frame(edge_frame, bg=bg, width=196, height=36)
+            surface = tk.Frame(edge_frame, bg=bg, width=194, height=34)
             surface.pack()
             surface.pack_propagate(False)
             left = tk.Label(surface, bg=bg, fg=label_fg, font=("Segoe UI", 9),
@@ -428,9 +432,31 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
             try:
                 if not snap_card.winfo_exists() or not gpt_card.winfo_exists():
                     return
-                new_gpt_y = round(quota_host.winfo_rooty() -
-                                  root.winfo_rooty() + quota_offset)
-                gpt_card.place_configure(y=new_gpt_y)
+                right_edge = max(400, int(root.winfo_width())) - 18
+                action_bar = g.get("_responsive_action_bar")
+                mode_row = g.get("mode_frame")
+                if isinstance(action_bar, tk.Widget) and action_bar.winfo_ismapped():
+                    snap_top = (action_bar.winfo_rooty() - root.winfo_rooty()
+                                + max(0, (action_bar.winfo_height() - 38) // 2))
+                else:
+                    snap_top = 48
+                if isinstance(mode_row, tk.Widget) and mode_row.winfo_ismapped():
+                    mode_top = (mode_row.winfo_rooty() - root.winfo_rooty()
+                                + max(0, (mode_row.winfo_height() - 38) // 2))
+                    gpt_top = max(snap_top + 44, mode_top)
+                else:
+                    gpt_top = snap_top + 52
+                snap_card.place_configure(relx=0.0, x=right_edge,
+                                          y=snap_top, anchor="ne")
+                gpt_card.place_configure(relx=0.0, x=right_edge,
+                                         y=gpt_top, anchor="ne")
+                # App-wide theme refreshes must not wash out the pale-grey
+                # cards or their stronger, equal-width outlines.
+                for card, parts in ((snap_card, snap_widgets), (gpt_card, gpt_widgets)):
+                    card.configure(bg=edge)
+                    parts[0].configure(bg=bg)
+                    parts[1].configure(bg=bg, fg=label_fg)
+                    parts[2].configure(bg=bg, fg=value_fg)
                 snap_card.lift()
                 gpt_card.lift()
             except tk.TclError:
@@ -453,6 +479,8 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 return
         root.after(500, maintain_cards)
         root.after_idle(sync_layout)
+        root.after(1500, sync_layout)
+        root.after(3500, sync_layout)
 
     # Run independently of Prompt-Ref. Previously if the toolbar button was
     # unavailable, both cards disappeared despite v2.0.30 being installed.
