@@ -6772,6 +6772,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
                 def work(job):
                     grp, first, last, refs, prompt = job
+                    # A paid sheet can be downloaded successfully but fail
+                    # during crop/save because Windows temporarily locks it.
+                    # Reuse and finish the saved sheet; never submit it again.
+                    existing_sheet = board_dir / f"sheet_{first:03d}-{last:03d}.png"
+                    if existing_sheet.is_file():
+                        from PIL import Image
+                        try:
+                            with Image.open(existing_sheet) as saved_sheet:
+                                saved_sheet.load()
+                                if saved_sheet.width < 600 or saved_sheet.height < 300:
+                                    raise ValueError("incomplete storyboard sheet")
+                        except (OSError, ValueError) as exc:
+                            raise ImageProviderError(
+                                f"สตอรี่ชีต {first}-{last} มีไฟล์เดิมแต่เปิดไม่ได้ "
+                                "ตรวจไฟล์และ History ก่อนส่งงานซ้ำ") from exc
+                        log(f"✓ สตอรี่ชีต {first}-{last}: ใช้ภาพที่ได้จากงานเดิม ไม่หักเครดิตสร้างซ้ำ")
+                        return str(existing_sheet)
                     options = {"fresh_chat": True, "parallel_images": True} if provider == "gpt_web" else {}
                     return make_image(prompt, refs, board_dir, f"sheet_{first:03d}-{last:03d}",
                                       project["aspect"], grid_template=bool(grid_template), **options)

@@ -105,3 +105,67 @@ def test_refused_sheet_is_safely_rewritten_after_other_finishes_but_unknown_fail
         with pytest.raises(RuntimeError,match='timeout unknown'):stage()
         assert not rewrites and len(calls)==2 and scenes[1].get('board')
     assert [s['prompt'] for s in scenes]==['original zero','original one']
+
+
+def test_reuses_downloaded_paid_sheet_without_submitting_again(tmp_path):
+    """A sheet downloaded before WinError 32 must be cropped, not re-generated."""
+    from PIL import Image
+
+    board_dir=tmp_path/'storyboard'
+    board_dir.mkdir()
+    existing=board_dir/'sheet_001-001.png'
+    Image.new('RGB',(900,510),'white').save(existing)
+    scenes=[{'prompt':'already paid'}]
+    state={'project':{'scenes':scenes,'aspect':'16:9'},
+           'folder':str(tmp_path),'lock':threading.RLock()}
+    submitted=[]
+    def make_image(*args,**kwargs):
+        submitted.append(args)
+        raise AssertionError('must not submit a second paid image job')
+    def crop(sheet,_count,panels):
+        assert Path(sheet)==existing
+        for panel in panels:
+            panel.write_text('recovered')
+    noop=lambda *a,**k:None
+    scope=dict(vars(N),state=state,video_mode=True,
+        board_groups=lambda *a,**k:[[0]],
+        check_script_matches_audio=noop,ensure_story_in_history=noop,
+        ensure_continuity=noop,ensure_bodies=noop,
+        ensure_board_template=lambda *a:'grid.png',character_refs=lambda:{},
+        image_provider_for=lambda stage:'snapgen',
+        previous_board_sheet=lambda *a:None,
+        attachments_for=lambda scene:[],
+        board_request=lambda *a,**k:'board prompt',style_text=lambda:'style',
+        make_image=make_image,crop_board=crop,check_stop=noop,
+        save_project=noop,set_progress=noop,log=noop)
+    load(scope,'stage_storyboard')()
+    assert submitted==[]
+    assert Path(scenes[0]['board']).read_text()=='recovered'
+
+
+def test_corrupt_completed_sheet_aborts_before_new_paid_submission(tmp_path):
+    board_dir=tmp_path/'storyboard'
+    board_dir.mkdir()
+    (board_dir/'sheet_001-001.png').write_bytes(b'incomplete PNG')
+    scenes=[{'prompt':'already paid'}]
+    state={'project':{'scenes':scenes,'aspect':'16:9'},
+           'folder':str(tmp_path),'lock':threading.RLock()}
+    submitted=[]
+    def make_image(*args,**kwargs):
+        submitted.append(1)
+        raise AssertionError('must not resend a possibly paid job')
+    noop=lambda *a,**k:None
+    scope=dict(vars(N),state=state,video_mode=True,
+        board_groups=lambda *a,**k:[[0]],
+        check_script_matches_audio=noop,ensure_story_in_history=noop,
+        ensure_continuity=noop,ensure_bodies=noop,
+        ensure_board_template=lambda *a:'grid.png',character_refs=lambda:{},
+        image_provider_for=lambda stage:'snapgen',
+        previous_board_sheet=lambda *a:None,
+        attachments_for=lambda scene:[],
+        board_request=lambda *a,**k:'board prompt',style_text=lambda:'style',
+        make_image=make_image,crop_board=noop,check_stop=noop,
+        save_project=noop,set_progress=noop,log=noop)
+    with pytest.raises(N.ImageProviderError,match='History'):
+        load(scope,'stage_storyboard')()
+    assert submitted==[]
