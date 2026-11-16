@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """SnapGen story face page.
 
 This module owns the widgets, state, and callbacks for this page only.
@@ -595,7 +595,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         "Hair fully pulled and secured behind the head; absolutely no bangs or loose strands covering the forehead, "
         "temples, eyebrows, cheeks, jawline or ears. Full hairline and both ears visible. 85mm portrait lens. "
         "Age-accurate unretouched skin microdetail: visible pores, fine lines, wrinkles, crow's-feet, nasolabial folds, "
-        "spots, freckles, moles, scars and uneven texture where appropriate. Older faces show pronounced authentic age "
+        "natural uneven skin texture where appropriate; do not invent facial moles, boils, beauty marks, birthmarks or scars unless explicitly required by script or reference. Older faces show pronounced authentic age "
         "lines. No beauty filter, no airbrushing, no waxy, porcelain, plastic or excessively smooth skin. "
         "Shadowless color-calibrated white studio lighting at neutral D55 white balance: two identical extra-large "
         "softboxes symmetrically left and right with equal height, angle, distance and power, plus centered on-axis fill. "
@@ -1300,7 +1300,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "Hair must stay fully behind the head and ears with the complete hairline, forehead, temples, eyebrows, "
             "cheeks, jawline, and ears visible; no bangs, fringe, wisps, curls, side locks, or stray strands crossing "
             "the face. Preserve only natural skin features and identity marks explicitly required by the target, such "
-            "as pores, fine lines, wrinkles, freckles, moles, scars, or texture. Do not replace skin detail with "
+            "as pores, fine lines, wrinkles, texture; preserve freckles, moles or scars only when explicitly specified by the script or reference. Do not replace skin detail with "
             "smooth beauty skin. This clean-face instruction overrides earlier clothing, grooming, accessory, "
             "headwear, jewelry, and hairstyle details."
             + (" EXCEPTION: the STORY MAKEUP EFFECT above is required non-graphic film makeup for the story — "
@@ -1456,9 +1456,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "very obese face with a big double chin", "emaciated thin face with sunken cheeks", "stocky heavy-set face",
             "average face", "plump chubby baby-face", "lean wiry face with visible bones")),
         ("distinct mark", (
-            "a large mole on the cheek", "heavy freckles", "deep old acne pits", "a visible scar across the brow",
+            "prominent high cheekbones", "a broad angular forehead", "a strong square jawline", "deeply set brow ridge",
             "big protruding ears", "a deep cleft chin", "very deep dimples", "dark heavy under-eye bags",
-            "a large birthmark near the jaw", "a unibrow", "very bushy eyebrows")),
+            "a long tapered chin", "a unibrow", "very bushy eyebrows")),
     )
     _FACE_STRIDES = (1, 3, 5, 3, 5, 5, 5, 7)
 
@@ -2449,7 +2449,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "absolutely no visible teeth, no open mouth, no smile. Forehead, cheeks, hairline and both ears visible. "
             "Hair fully pulled and secured behind head; no bangs or loose strands over forehead, temples, eyebrows, "
             "cheeks, jawline or ears. Age-accurate unretouched skin microdetail: visible pores, fine lines, wrinkles, "
-            "crow's-feet, nasolabial folds, spots, freckles, moles, scars and uneven texture where appropriate. "
+            "crow's-feet, nasolabial folds, natural uneven skin texture where appropriate; do not invent facial moles, boils, beauty marks, birthmarks or scars unless explicitly required by script or reference. "
             "Older faces show pronounced authentic age lines. No beauty filter, airbrushing, waxy, porcelain, plastic "
             "or excessively smooth skin. Photorealistic Thai identity, color-accurate natural skin, neutral light-gray "
             "background. Shadowless calibrated white studio light at D55: identical large softboxes symmetrically left "

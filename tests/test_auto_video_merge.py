@@ -81,6 +81,19 @@ def merge_scope(tmp_path):
                  stage_images=forbidden, stage_clips=forbidden, image_provider_for=forbidden)
     for name in ("relink_or_report_missing_clips", "stage_video", "render_video_selected", "start_pipeline"):
         load(scope, name)
+    # Fake bytes used by the merge and 4K layout tests are not valid audio files.
+    # Mock only these audio-only functions *during stage_video*, preserving the
+    # production lossless policy and separate WAV sample-verification tests.
+    actual_stage = scope["stage_video"]
+    def stage_with_mock_audio(*args, **kwargs):
+        import snapgen_audio_sfx as sfx
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sfx, "build_effect_track", lambda *_args, **_kwargs: (None, {"selected": []}))
+            mp.setattr(sfx, "verify_original_pcm", lambda *_args, **_kwargs: {"verified": True, "test_double": True})
+            return actual_stage(*args, **kwargs)
+    scope["stage_video"] = stage_with_mock_audio
+    if isinstance(scope.get("STAGE_FUNCS"), dict):
+        scope["STAGE_FUNCS"]["video"] = stage_with_mock_audio
     return scope, logs, commands
 
 

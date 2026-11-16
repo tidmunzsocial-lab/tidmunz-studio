@@ -47,7 +47,9 @@
     const port=Number(active&&active.port);
     if(!Number.isInteger(port) || port<1000 || port>65535)return true;
     try{
-      const res=await fetch("http://127.0.0.1:"+port+"/status",{cache:"no-store"});
+      const token=String(active&&active.token||"");
+      if(!token)return true;
+      const res=await fetch("http://127.0.0.1:"+port+"/status?token="+encodeURIComponent(token),{cache:"no-store"});
       if(!res.ok)return true;
       const j=await res.json();
       return !j.connected || Number(j.busy||0)>0 || Number(j.queue||0)>0;
@@ -133,7 +135,7 @@
     const text=String(edit&&(edit.innerText||edit.textContent)||"").trim();
     const isOwn=text.startsWith("[Tidmunz Studio | สคริปต์ติดตามงานอัตโนมัติ | "+marker+"]") ||
       text.startsWith("[Tidmunz Auto Follow-up: "+marker+"]");
-    if(!form || !isOwn || !text.includes("บท - ศึกอสูระกับเทวดา"))
+    if(!form || !isOwn || !/เครื่อง:.*; โปรเจกต์:/.test(text))
       return {attempted:false,reason:"not_owned_monitor_draft"};
     if([...document.querySelectorAll('[data-message-author-role="user"]')]
         .some(x=>(x.innerText||x.textContent||"").includes(marker)))

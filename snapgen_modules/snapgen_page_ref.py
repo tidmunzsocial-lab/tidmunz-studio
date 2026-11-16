@@ -144,8 +144,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     g["ref_folder"] = _ref_output_folder
     # Programmatic Auto always names its Ref folder after the selected
     # Prompt-Ref source, never the separate Ref page's possibly stale chat.
-    g["ref_folder_for_auto"] = lambda: ref_story_folder(
-        g.get("EXPORT_REF", export_ref_dir), _prompt_ref_story_title())
+    def _ref_folder_for_auto():
+        owner = g.get("auto_ref_project_folder")
+        selected = owner() if callable(owner) else None
+        return Path(selected) if selected else ref_story_folder(
+            g.get("EXPORT_REF", export_ref_dir), _prompt_ref_story_title())
+    g["ref_folder_for_auto"] = _ref_folder_for_auto
     ref_page = tk.Frame(root, bg="#FAFAF7")
     g["ref_page"] = ref_page
     ref_name_var = tk.StringVar(value="")
@@ -2108,7 +2112,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     def _ref_done_load(story_title=None, folder=None):
         title = str(story_title or _ref_done_story())
         output = Path(folder) if folder is not None else _ref_output_folder()
-        for path in (output / "_ref_done.json", ref_done_path):
+        # An Auto project cannot inherit another project\u0027s global Ref receipts.
+        paths = (output / "_ref_done.json",) if folder is not None else (output / "_ref_done.json", ref_done_path)
+        for path in paths:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("story") == title and isinstance(data.get("items"), dict):
@@ -2124,10 +2130,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     def _ref_mark_done(kind, name, path, story_title=None, folder=None):
         title = str(story_title or _ref_done_story())
         output = Path(folder) if folder is not None else _ref_output_folder()
-        items = _ref_done_load(title, output)
+        items = _ref_done_load(title, output if folder is not None else None)
         items[f"{kind}:{name}"] = str(path)
         try:
-            for ledger in (output / "_ref_done.json", ref_done_path):
+            targets = (output / "_ref_done.json",) if folder is not None else (output / "_ref_done.json", ref_done_path)
+            for ledger in targets:
                 ledger.parent.mkdir(parents=True, exist_ok=True)
                 ledger.write_text(json.dumps({"story": title, "items": items},
                                              ensure_ascii=False, indent=1), encoding="utf-8")
@@ -2173,7 +2180,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             return
         auto_story = _prompt_ref_story_title() if automatic_provider is not None else None
         output_folder = (
-            ref_story_folder(g.get("EXPORT_REF", export_ref_dir), auto_story)
+            Path(g["ref_folder_for_auto"]()) if auto and entity_kind in ("character", "location")
+            else ref_story_folder(g.get("EXPORT_REF", export_ref_dir), auto_story)
             if auto_story else _ref_output_folder())
         if auto and entity_kind in ("character", "location"):
             # Resume only this story's ledger; stale Ref-page chat names are ignored.
@@ -2356,7 +2364,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     if callable(on_item):
                         on_item(name, idx, len(names), str(out))
                     root.after(0, lambda out=out, ghost=bool(ghost_design): (
-                        _ref_log(f"✓ {out}"), _ref_gallery_add(out, True, is_ghost=ghost), _notify_done()
+                        _ref_log(f"✓ {out}"),
+                        (None if auto else _ref_gallery_add(out, True, is_ghost=ghost)), _notify_done()
                     ))
                 def run_all():
                     for idx, name in enumerate(names, 1):

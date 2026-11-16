@@ -341,7 +341,8 @@ class _Handler(BaseHTTPRequestHandler):
         return url.path, {k: v[-1] for k, v in parse_qs(url.query, keep_blank_values=True).items()}
 
     def _allowed(self, query) -> bool:
-        return secrets.compare_digest(str(query.get("token") or ""), RELAY.token)
+        # Empty startup token must NEVER authenticate an unauthenticated request.
+        return bool(RELAY.token) and secrets.compare_digest(str(query.get("token") or ""), RELAY.token)
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
