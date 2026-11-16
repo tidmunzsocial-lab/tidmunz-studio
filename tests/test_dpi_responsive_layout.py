@@ -26,7 +26,7 @@ def test_gui_dpi_does_not_repeatedly_block_on_receipt_checks():
     assert '"_responsive_action_bar"' in (BASE / "snapgen_modules" / "snapgen_responsive_ui.py").read_text()
 
 
-def test_mode_tabs_and_toolbar_split_keep_commands():
+def test_mode_tabs_and_original_toolbar_keep_commands_without_extra_row():
     try:
         root = tk.Tk()
     except tk.TclError:
@@ -54,13 +54,17 @@ def test_mode_tabs_and_toolbar_split_keep_commands():
             tabs[text] = tab
         g = {"mode_frame": nav, "mode_buttons": tabs}
         root.update()
+        original_nav_y = nav.winfo_rooty()
+        original_host_y = host.winfo_rooty()
         install(root, g)
         root.after(280, root.quit)
         root.mainloop()
         bar = g.get("_responsive_action_bar")
-        assert bar is not None
-        assert len(g["_responsive_moved_toolbar"]) == 5
-        assert all(b.winfo_manager() == "" for b in originals)
+        assert bar is host
+        assert g["_responsive_moved_toolbar"] == []
+        assert all(b.winfo_manager() == "pack" for b in originals)
+        assert nav.winfo_rooty() == original_nav_y
+        assert host.winfo_rooty() == original_host_y
         assert all(b.winfo_manager() == "pack" for b in tabs.values())
         assert all(int(b.cget("width")) == 0 for b in tabs.values())
         # None of the eight tabs may clip its Thai text at 1180 px.
@@ -324,9 +328,11 @@ def test_real_provider_credit_widget_creates_both_equal_grey_cards():
         actions = g["_responsive_action_bar"]
         gutter = g["_responsive_credit_gutter"]
         assert gutter.winfo_width() == 216
-        clones = [w for w in actions.pack_slaves() if isinstance(w, tk.Button)]
-        assert clones
-        assert max(w.winfo_rootx() + w.winfo_width() for w in clones) <= top.winfo_rootx()
+        original_actions = [w for w in actions.pack_slaves()
+                            if isinstance(w, tk.Button)]
+        assert original_actions
+        assert max(w.winfo_rootx() + w.winfo_width()
+                   for w in original_actions) <= top.winfo_rootx()
         assert source_credit.winfo_manager() == ""
         assert source_title.winfo_manager() == ""
         assert quota_label.winfo_manager() == ""

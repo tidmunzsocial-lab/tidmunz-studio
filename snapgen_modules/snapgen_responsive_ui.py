@@ -1,10 +1,7 @@
-"""Keep every Tidmunz toolbar action reachable at 125%+ Windows DPI.
+"""Keep Tidmunz toolbar controls on their existing rows at high DPI.
 
-The recovered Tk app supplies a single packed header that was designed for
-96 DPI. Extra Chrome/Prompt-Ref/microphone controls grew that one row past the
-window edge. This adapter creates a second action row, leaving checkboxes in
-the first. Existing callback-owning widgets stay alive but hidden: clones
-invoke them, so no workflow, credit balance or settings state is rewritten.
+Compact original callback-owning actions in place, reserving right-side
+space for two aligned live credit cards without adding another toolbar row.
 """
 from __future__ import annotations
 
@@ -143,129 +140,48 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
     mode_frame = g.get("mode_frame")
     modes = g.get("mode_buttons") or {}
     def attach_action_bar(attempt=0):
+        """Keep the existing action row. Never clone it into a second row."""
         if g.get("_responsive_action_bar") is not None:
             return
         prompt_ref = _find_prompt_ref(root)
         if prompt_ref is None:
-            # Recovered bytecode sometimes creates the top bar a few hundred
-            # milliseconds after modular pages. Never permanently skip it.
-            if attempt < 12:
+            if attempt < 16:
                 root.after(300, lambda: attach_action_bar(attempt + 1))
             return
         toolbar = prompt_ref.master
         try:
-            originals = [w for w in toolbar.winfo_children() if _action_widget(w)]
-            parent = toolbar.master
-            if originals and toolbar.winfo_manager() == "pack":
-                actions = tk.Frame(parent, bg="#FFFFFF", height=52)
-                actions.pack(side="top", fill="x", after=toolbar, padx=7, pady=(0, 2))
-                actions.pack_propagate(False)
-                # Keep a dedicated credit column clear of toolbar actions.
-                credit_gutter = tk.Frame(actions, bg="#FFFFFF", width=216, height=1)
-                credit_gutter.pack(side="right")
-                g["_responsive_credit_gutter"] = credit_gutter
-                # Reuse original live balances, retain each original toolbar
-                # row and apply the same soft-grey card treatment to both.
-                CARD_BG = "#EDF1F5"
-                CARD_EDGE = "#98A5B6"
-                CARD_LABEL = "#526176"
-                CARD_VALUE = "#334155"
-                CARD_W, CARD_H = 196, 36
-                card_font = ("Segoe UI", 9)
-
-                def create_credit_card(host, title, variable, *, padding):
-                    if not isinstance(variable, tk.Variable):
-                        return None
-                    border = tk.Frame(host, bg=CARD_EDGE, padx=1, pady=1)
-                    border.pack(side="right", padx=padding, pady=7)
-                    content = tk.Frame(border, bg=CARD_BG, width=CARD_W, height=CARD_H)
-                    content.pack()
-                    content.pack_propagate(False)
-                    label = tk.Label(
-                        content, text=title, bg=CARD_BG, fg=CARD_LABEL,
-                        font=card_font, anchor="w", padx=10,
+            if toolbar.winfo_manager() != "pack":
+                return
+            existing = toolbar.pack_slaves()
+            actions = [w for w in existing if _action_widget(w)]
+            if not actions:
+                return
+            # Reserve the credit card's 198px width on the SAME original row.
+            # Position before the rightmost widget; otherwise it would pack
+            # to the left of Settings instead of reserving the right margin.
+            first_right = next((w for w in existing
+                                if w.pack_info().get("side") == "right"), None)
+            gutter = tk.Frame(toolbar, bg="#FFFFFF", width=216, height=1)
+            if first_right is not None:
+                gutter.pack(side="right", before=first_right)
+            else:
+                gutter.pack(side="right")
+            for original in actions:
+                if isinstance(original, tk.Button):
+                    label = str(original.cget("text") or "")
+                    short = {"?? ChatGPT": "ChatGPT",
+                             "????????????": "????????"}
+                    original.configure(
+                        text=short.get(label, label),
+                        font=font, padx=8,
                     )
-                    label.pack(side="left", fill="y")
-                    value = tk.Label(
-                        content, textvariable=variable, bg=CARD_BG, fg=CARD_VALUE,
-                        font=("Segoe UI", 9, "bold"), anchor="e", padx=10,
-                    )
-                    value.pack(side="right", fill="y")
-                    return border, (label, value)
-
-                credit_card = None
-                credit_result = (None if g.get("_responsive_equal_credit_cards")
-                                 else create_credit_card(
-                                     actions, "SnapGen", g.get("credit_status_var"),
-                                     padding=(5, 3),
-                                 ))
-                if credit_result is not None:
-                    credit_card, _ = credit_result
-                    g["_responsive_snapgen_credit"] = credit_card
-
-                quota_label = g.get("bridge_image_quota_label")
-                quota_var = g.get("bridge_image_quota_var")
-                if (not g.get("_responsive_equal_credit_cards")
-                        and isinstance(quota_label, tk.Label)
-                        and isinstance(quota_var, tk.Variable)):
-                    # Keep the bottom row exactly where it was. Hide only
-                    # the original quota label, preserve its click-to-refresh
-                    # callback and render the balance in an equally sized card.
-                    quota_host = quota_label.master
-                    quota_label.pack_forget()
-                    quota_result = create_credit_card(
-                        quota_host, "GPT", quota_var, padding=(8, 12),
-                    )
-                    if quota_result is not None:
-                        quota_card, quota_parts = quota_result
-                        for widget in (quota_card, quota_card.winfo_children()[0], *quota_parts):
-                            widget.configure(cursor="hand2")
-                            widget.bind(
-                                "<Button-1>",
-                                lambda _event, original=quota_label:
-                                    original.event_generate("<Button-1>"),
-                            )
-                        g["_responsive_chatgpt_quota_card"] = quota_card
-                # The legacy SnapGen credit control (sometimes rendered as
-                # "...") must not remain next to the new credit display.
-                # Only suppress controls explicitly registered as credit,
-                # never unrelated Settings/overflow actions.
-                legacy_credit = tuple(
-                    g.get(key) for key in (
-                        "credit_button", "credit_label", "credit_status_label",
-                        "_image_provider_credit_widget",
-                    ) if g.get(key) is not None
-                )
-                moved = []
-                for original in originals:
-                    if original in legacy_credit:
-                        moved.append(original)
-                        continue
-                    clone = _clone_action(actions, original, font)
-                    if clone is None:
-                        continue
-                    clone.pack(side="right", padx=3, pady=7)
-                    moved.append(original)
-                if moved:
-                    for original in moved:
-                        original.pack_forget()
-                    g["_responsive_action_bar"] = actions
-                    g["_responsive_moved_toolbar"] = moved
-                    # Legacy credit may live in a separate packed toolbar
-                    # container, not in the list cloned above.
-                    if credit_card is not None:
-                        for old in legacy_credit:
-                            try:
-                                if old.winfo_exists() and old.winfo_manager() == "pack":
-                                    old.pack_forget()
-                            except tk.TclError:
-                                pass
-                else:
-                    actions.destroy()
-            elif attempt < 12:
-                root.after(300, lambda: attach_action_bar(attempt + 1))
+            g["_responsive_credit_gutter"] = gutter
+            g["_responsive_action_bar"] = toolbar
+            g["_responsive_anchor_prompt_ref"] = prompt_ref
+            # The original widgets and their commands stay packed and live.
+            g["_responsive_moved_toolbar"] = []
         except tk.TclError:
-            if attempt < 12:
+            if attempt < 16:
                 root.after(300, lambda: attach_action_bar(attempt + 1))
 
     def ensure_equal_credit_cards(attempt=0):
@@ -433,11 +349,15 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 if not snap_card.winfo_exists() or not gpt_card.winfo_exists():
                     return
                 right_edge = max(400, int(root.winfo_width())) - 18
+                anchor = g.get("_responsive_anchor_prompt_ref")
                 action_bar = g.get("_responsive_action_bar")
                 mode_row = g.get("mode_frame")
-                if isinstance(action_bar, tk.Widget) and action_bar.winfo_ismapped():
+                if isinstance(anchor, tk.Widget) and anchor.winfo_ismapped():
+                    snap_top = (anchor.winfo_rooty() - root.winfo_rooty()
+                                + (anchor.winfo_height() - 38) // 2)
+                elif isinstance(action_bar, tk.Widget) and action_bar.winfo_ismapped():
                     snap_top = (action_bar.winfo_rooty() - root.winfo_rooty()
-                                + max(0, (action_bar.winfo_height() - 38) // 2))
+                                + (action_bar.winfo_height() - 38) // 2)
                 else:
                     snap_top = 48
                 if isinstance(mode_row, tk.Widget) and mode_row.winfo_ismapped():
