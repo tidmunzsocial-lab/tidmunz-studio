@@ -5,13 +5,13 @@ description: Use when the user asks the Tidmunz Studio AI Operator to watch a li
 
 # Tidmunz Studio: live work and safe recovery
 
-Use the **connected TailScale app** for the user's Windows machine. Never assume the app is running just because a percentage is shown. Prefer the real local operator adapter rather than simulated clicks.
+Use the **selected authenticated computer bot** for the user's Windows machine. Never assume the app is running just because a percentage is shown. Prefer the real local operator adapter rather than simulated clicks.
 
 ## Verified machine and command
 
 The user's connected workstation is `<VERIFIED_DEVICE_ID_OR_LABEL>` and the source checkout is `<TIDMUNZ_SOURCE_DIR>`.
 
-Use TailScale `shell` (`powershell.exe -NoProfile -Command`) to run the local operator in that checkout:
+Use the selected connector's `shell` (`powershell.exe -NoProfile -Command`) to run the local operator in that checkout:
 
 ```powershell
 $python = '<TIDMUNZ_INSTALL_DIR>\.venv312\Scripts\python.exe'
@@ -35,7 +35,7 @@ These three commands were executed against the live machine and return sanitized
 
 ## What the plugin can and cannot do
 
-**In a ChatGPT session:** read status, classify faults, control authorized existing operations through TailScale, inspect the GUI, and write/test repairs on the connected machine when user requests. A cover, scene or video can be launched using the real desktop GUI if its controls are inspected, not by making up an API method.
+**In a ChatGPT session:** read status, classify faults, control authorized existing operations through the verified connector, inspect the GUI, and write/test repairs on the connected machine when user requests. A cover, scene or video can be launched using the real desktop GUI if its controls are inspected, not by making up an API method.
 
 **After a ChatGPT session ends:** the desktop Auto process may keep rendering. The local `watch` or `naka_auto_supervisor` is deterministic status checking, not a live GPT model. A private plugin alone does not provide independent 24/7 AI reasoning, computer control or repair of unexpected bugs. Do not claim otherwise. When the user returns, resume diagnosis from the saved status and journal rather than restarting media requests.
 

@@ -5,18 +5,18 @@ description: Use when a user asks ChatGPT to monitor, diagnose, operate, resume,
 
 # Tidmunz Studio control: connected Windows workstation
 
-This is a **private, human-directed agent workflow**. Use the already connected **TailScale** app to interact with the user's Windows machine. Prefer native status APIs and a local shell to arbitrary UI clicking. The plugin does not itself run a persistent language model or own a guaranteed 24/7 agent; a local rule-based watcher may run while ChatGPT is offline. Do not imply otherwise.
+This is a **private, human-directed agent workflow**. Use the currently selected authenticated computer connector to interact with the user's Windows machine. Prefer native status APIs and a local shell to arbitrary UI clicking. Auto follow-up uses the existing Chrome extension; do not create a duplicate watcher. The plugin does not itself run a persistent language model or own a guaranteed 24/7 agent; a local rule-based watcher may run while ChatGPT is offline. Do not imply otherwise.
 
 ## Known workstation and source
 
 - Source repository: `<TIDMUNZ_SOURCE_DIR>` (branch `main`). Read `AGENTS.md`, `STATE.md`, then relevant module before edits.
 - Installed data folder: `%LOCALAPPDATA%\Tidmunz Studio\snapgen_data`. User output is under `%LOCALAPPDATA%\Tidmunz Studio\export`.
 - Running app exposes local Mobile Web status/commands on `127.0.0.1:8765`. Its URL and bearer query are stored in `snapgen_data\mobile_web_url.txt`. **Read the credential locally and never print it, paste it in chat, commit it, or send it to another host.** Always call loopback, never Funnel or a public URL.
-- Use TailScale's `shell` action with `powershell -NoProfile -Command ...` for read-only health. If the desktop is disconnected, say so and stop. Optional Desktop Commander tools may also be used when available. TailScale CLI itself is not required.
+- Use the selected verified connector's `shell` action with `powershell -NoProfile -Command ...` for read-only health. If the desktop is disconnected, say so and stop. Optional Desktop Commander tools may also be used when available. TailScale CLI itself is not required.
 
 ## Preferred native operator CLI (real adapter, not just instructions)
 
-Run this file via the connected **TailScale shell** from the user's Windows PC:
+Run this file via the verified **selected connector shell** from the user's Windows PC:
 
 `<TIDMUNZ_SOURCE_DIR>\snapgen_modules\snapgen_ai_operator.py`
 

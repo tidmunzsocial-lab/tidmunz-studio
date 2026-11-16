@@ -5,6 +5,9 @@ description: Use when the user tells Tidmunz Studio to "ทำให้เสร
 
 # Tidmunz Studio — Finish the authorized job
 
+**Current Auto scope override (2026-11-16):** Stop at the native human sound-effect chooser. Disable the Chrome follow-up and cancel its alarm. Do not automatically confirm the chooser or render a final film unless the user separately authorizes it after selection.
+
+
 ## Primary operational goal: produce a verifiably finished result
 
 When the user gives Tidmunz Studio an authorized production task, **prioritize completing that same task to its verified deliverable**. Do not consider a queued request, a waiting GPT response, a progress percentage, or a successful button click to be the deliverable. Keep track of the actual job, project, current scene, missing assets, receipts, and next recovery step. Do not abandon the job or repeatedly ask which ordinary production step to take when the user's established instructions already resolve that choice.

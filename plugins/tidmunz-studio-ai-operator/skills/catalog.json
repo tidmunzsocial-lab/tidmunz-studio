@@ -2,7 +2,7 @@
   "schema_version": 1,
   "plugin": "tidmunz-studio-ai-operator",
   "source": "tidmunzsocial-lab/tidmunz-studio",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "skills": [
     {
       "name": "tidmunz-agent-desktop",
@@ -21,6 +21,10 @@
       "path": "skills/tidmunz-chrome-404-diagnostics/SKILL.md"
     },
     {
+      "name": "tidmunz-chrome-followup",
+      "path": "skills/tidmunz-chrome-followup/SKILL.md"
+    },
+    {
       "name": "tidmunz-control",
       "path": "skills/tidmunz-control/SKILL.md"
     },
@@ -35,6 +39,10 @@
     {
       "name": "tidmunz-finish-job",
       "path": "skills/tidmunz-finish-job/SKILL.md"
+    },
+    {
+      "name": "tidmunz-plugin-source-fidelity",
+      "path": "skills/tidmunz-plugin-source-fidelity/SKILL.md"
     },
     {
       "name": "tidmunz-provider-status",

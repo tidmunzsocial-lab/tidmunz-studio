@@ -9,10 +9,12 @@ Source inspected on 2026-11-06: installed `snapgen_modules/snapgen_page_narrate.
 
 ## Select the correct PC and application
 
-- The ChatGPT connector named **Tailscale** is the owner's MyComp Bot integration; call this tool first when available. The connector name does not mean a hardcoded machine or a fixed hostname.
+- Discover the user-selected computer connector dynamically and verify unique device identity before any remote action; never hardcode a Tailscale or Dino plugin alias.
 - Enumerate/verify the intended device using stable device identity, not a matching device name or shared login/email alone. Confirm Tidmunz Studio is running on that device. If ambiguous, ask which device before making writes. Resolve the connected PC's own local URL/token only on that PC; never copy a different PC's credential or publish a token.
 - **Prefer direct Web/API and native local status/commands** via the authenticated connection for normal work. Use **Agent Desktop** only when an authorized step requires desktop-only UI or direct APIs cannot perform it; resolve whatever installed plugin/tool exposes the Agent Desktop capability at runtime, regardless of its user-chosen plugin name. Do not hardcode a connector/plugin ID, alias, machine name, hostname or endpoint. Avoid screenshot polling when API status or accessibility observations suffice.
 - Prefer real local status/API and safely inspected native UI via the connector. Where supported, `auto_open`, `auto_start`, `auto_stop` work only for existing project operations; don't invent API endpoints for picking files, creating Prompt-Ref Context, references or modifying model controls. Use the actual UI on the authenticated PC when needed. A command is successful only after readback from GUI/project status.
+
+**Current human-review stop:** Video Auto ends the authorized unattended handoff at the actual sound-effect selection screen. Clear the Chrome follow-up alarm and wait for the human; do not click confirmation or render. Use tidmunz-chrome-followup, not a second watcher.
 
 ## Preflight — avoid duplicate work
 

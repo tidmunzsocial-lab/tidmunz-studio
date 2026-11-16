@@ -5,7 +5,7 @@ description: Mandatory for any request to start, run, resume, monitor, rescue, d
 
 # Auto video supervision, root-cause diagnosis, and cross-chat continuity
 
-**Standing owner instruction, verified 2026-11-07:** When the user authorizes one Auto production, continue its existing flow to an actually verified output without making them repeat routine steps or ask whether it stopped. This is a workflow obligation **within available tools and authorizations**, not a claim that a skill runs independently or that ChatGPT can remain live after a chat ends. Install/confirm a local deterministic watcher and, where available, a scheduled ChatGPT automation for out-of-session checks. Don't wait for the user to spot a stop. When the watcher detects a stop, repair *only* a proven safe cause; if root cause is unknown, retain the receipts and report that block instead of looping.
+**Updated owner rule (2026-11-16):** For authorized Auto jobs, follow up through the existing Tidmunz ChatGPT Chrome extension, not another watcher. The job is handed off and the extension stops permanently at the human sound-effect selection window. Do not select or confirm audio, merge or render without subsequent human action. See tidmunz-chrome-followup.
 
 ## 1. Verify and attach to the current job, never invent a new one
 
@@ -15,13 +15,12 @@ description: Mandatory for any request to start, run, resume, monitor, rescue, d
 4. **Installed source differs by version.** Auto v2.0.16+ introduces stages `analysis → context → ref_characters → transcribe → plan → storyboard → images → motion → clips → video`, automatically makes same-story Context and character/location Refs, and binds the Image AI Ref folder. Older releases require manually preparing Prompt-Ref and Ref. Read **installed** `VIDEO_STAGES`, `stage_context`, and `stage_auto_ref_characters` at runtime. The older companion `tidmunz-auto-workflow` description of eight stages is version-scoped, not an instruction to manually redo those steps on v2.0.16+.
 5. If `auto_busy=true`, monitor the actual current stage; **never send another start**. If `false`, classify the stop and inspect cloud provider receipts/UUID before any paid resume. `202/pending` uses the **same request ID** with the receipt endpoint. Stop/restart/retry provider clips only if verified safe. Never redo successful images or clips.
 
-## 2. Start a watcher automatically for user-authorized unattended production
+## 2. Reuse the existing Chrome follow-up, with a terminal stop
 
-- When the user wants 'finish without asking me again', create/verify a **single-instance native watcher** for this exact project, if a supported local or scheduled execution mechanism is available. A verified example is a Python watcher using the on-device operator, writing `snapgen_data/logs/<project>-watch.json` plus event history; **20-second local polling** was tested on 2026-11-07. The watcher must contain the selected project identity, detect project switches, write latest status atomically, guard duplicate processes with a lifetime lock, and verify an output before declaring success. A task at Windows logon may restart the watcher after reboot but cannot keep the computer awake or recover a disconnected device.
-- Don't install multiple watchers just because the chat is new. Inspect existing watcher process, state log, last poll, logon task, and attempt journal first. A stale JSON file is not proof of an active watcher. A healthy program's long GPT response is not automatically a failure.
-- When connected task/automation tools support scheduled checks, configure them for the user-requested follow-up; **ChatGPT automations have their own minimum cadence (hourly for checks), not the native 20-second cadence**. Say which part is a deterministic local process and which is a periodic ChatGPT model execution. Never claim to have a live AI repairing tasks between visits unless an actual connected persistent agent exists and has been verified.
-- Persist the exact story, current stage, error class, last progress change, watcher timestamp, attempt count, last command ID/receipt, and next safe action in an accessible project state/journal. A new chat must start by reading it and the app's current status; do **not** ask the user to repeat standing directions.
-- Notify only on important progress/stops/final output. If the user returns before an automation check, diagnose immediately instead of saying to wait for the hourly timer. Resume only after preflight.
+- Verify the actual extension service worker loads followup.js, and check its bound conversation, the authenticated /monitor/status endpoint, the selected Auto project and device. This extension owns the scheduling; do not create another Python watcher, scheduled task or ChatGPT automation for this job.
+- The extension may send a tagged follow-up to the same ChatGPT conversation only while the authorized project is active and not at its human sound-effect selector. Avoid duplicate paid submissions, human drafts, ambiguous messages and unverified machine switches.
+- While effect_review_pending is true, disable follow-up in extension storage and clear its follow-up Chrome alarm. Do not touch the regular Chrome text/image queue alarm. The native Auto worker is already waiting at the modal.
+- If Chrome is closed or the local app is unavailable, a skill cannot keep GPT actively reasoning. Diagnose honestly and retry only in bounded, authorized fashion; keep receipts and progress in existing project state.
 
 ## 3. Diagnose ChatGPT Chrome Bridge `404 conversation_not_found` at the source
 
@@ -42,8 +41,8 @@ Trace every layer, keeping credentials out of logs:
 
 - Resume from the saved stage only when the app is idle, authorized for this exact job, no duplicate pending generation, and the project still matches. After any recovery, follow `analysis/context → character/location refs → select same-story folder → speech/storyboard/images/clips → render` in the **actual installed version**; no manual Image AI attachments on new Auto once the ref-folder binding was verified.
 - If work stops mid-ref/image/clip, count files and receipts and **resume missing work only**. Follow provider's rate/capacity statuses. Never turn a watcher into an uncontrolled paid retry engine.
-- Long-running activity should not silently end because a chat turn ends. Delegate deterministic checks to the verified local watcher, optional future-task automation, and record state. A current interactive agent can only continue actively while its turn/tool execution remains active.
-- Complete only when final media exists, nonempty, is playable, expected duration/resolution and audio are verified and the app indicates completion. Include location/format and remaining warnings. `100%`, `pending`, `busy=false`, or queued is not completion.
+- Long-running activity should not silently end because a chat turn ends. Use the existing extension followup.js alarm for the selected story and record state; do not create a duplicate watcher. A current interactive agent can only continue actively while its turn/tool execution remains active.
+- For the current Auto handoff, completion means reaching the audio-effect chooser and stopping follow-up. Only if the human later authorizes export should the final media be verified for existence, playback, duration, resolution and original narration quality. Include location/format and remaining warnings. `100%`, `pending`, `busy=false`, or queued is not completion.
 
 ## 5. Skill learning is part of finishing the job
 

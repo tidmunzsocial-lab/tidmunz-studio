@@ -9173,11 +9173,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     on_status=on_status,
                 )
 
-            return request_selection(
-                root, page, scenes, statuses,
-                selected=state["project"].get("effect_selected_clips"),
-                scan=scan_later,
-            )
+            state["effect_review_pending"] = True
+            try:
+                return request_selection(
+                    root, page, scenes, statuses,
+                    selected=state["project"].get("effect_selected_clips"),
+                    scan=scan_later,
+                )
+            finally:
+                state["effect_review_pending"] = False
         state["_premerge_effect_review"] = review_audio_effects_before_merge
 
     STAGE_FUNCS = {"analysis": stage_auto_analysis, "context": stage_context,
@@ -10556,9 +10560,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             except (tk.TclError, ValueError):
                 percent = 0.0
             return {"title": Path(state["folder"]).name if state.get("folder") else "", "busy": bool(state["busy"]),
-                    "stage": stage_var.get(), "detail": detail_var.get(), "percent": percent,
+                    "stage": stage_var.get(), "detail": detail_var.get(),
+                    "effect_review_pending": bool(state.get("effect_review_pending")), "percent": percent,
                     "log": log_box.get("1.0", "end").strip()[-3000:], "shots": shots,
                     "video": video if video and os.path.isfile(video) else "",
+                    "done_video": bool((project.get("done") or {}).get("video")),
                     "stories": [p.name for p in stories]}
 
         def mobile_open(name: str) -> str:

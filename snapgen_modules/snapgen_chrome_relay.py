@@ -285,6 +285,41 @@ def estimate_left(email: str, reset: str, reported: str) -> str:
         return str(max(0, min(int(reported), limit - made_today)))
 
 
+def project_monitor_status() -> dict:
+    """Expose only selected Auto progress via this installation's existing authenticated relay."""
+    import socket
+    from urllib.parse import quote
+    from urllib.request import urlopen
+
+    access = (data_dir() / "mobile_web_token.txt").read_text(encoding="utf-8").strip()
+    if not access:
+        raise RuntimeError("mobile token missing")
+    url = "http://127.0.0.1:8765/api/status?access=" + quote(access, safe="")
+    with urlopen(url, timeout=3) as response:
+        snapshot = json.load(response)
+    if not snapshot.get("ready"):
+        raise RuntimeError("Tidmunz Mobile Web not ready")
+    auto = snapshot.get("auto") or {}
+    if not auto.get("title"):
+        raise RuntimeError("No active Auto project")
+    shots = auto.get("shots") or []
+    clips = sum(bool(shot.get("clip")) for shot in shots)
+    images = sum(bool(shot.get("image")) for shot in shots)
+    stage = str(auto.get("stage") or "")
+    detail = str(auto.get("detail") or "")
+    final_exists = bool(auto.get("video"))
+    return {
+        "ready": True, "host": socket.gethostname(), "story": str(auto["title"]),
+        "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "busy": auto.get("busy"), "stage": stage, "detail": detail,
+        "images": images, "clips": clips, "total": len(shots),
+        "done_video": bool(auto.get("done_video")),
+        "effect_review_pending": bool(auto.get("effect_review_pending")),
+        "final_exists": final_exists,
+        "complete": bool(auto.get("done_video") and final_exists and shots and clips == len(shots)),
+    }
+
+
 RELAY = _Relay()
 
 
@@ -348,6 +383,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, {"token": RELAY.token})
         if not self._allowed(query):
             return self._send(403, {"error": "bad token"})
+        if path == "/monitor/status":
+            try:
+                return self._send(200, project_monitor_status())
+            except Exception:
+                return self._send(503, {"error": "Tidmunz Auto status unavailable"})
         if path == "/next":
             RELAY.version = str(query.get("v") or RELAY.version)
             if "email" in query:

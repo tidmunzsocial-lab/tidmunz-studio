@@ -1,14 +1,15 @@
 ---
 name: tidmunz-device-routing
-description: Mandatory device selection and verification for any Tidmunz Studio operation through the connected user-named Tailscale/MyComp Bot plugin, including when PCs share hostnames or a ChatGPT/MyComp account. Use before status checks, remote reads, GUI interactions, file edits, or paid video production.
+description: Mandatory device selection and verification for any Tidmunz Studio operation through the authenticated user-selected computer connector, including when PCs share hostnames or a ChatGPT/MyComp account. Use before status checks, remote reads, GUI interactions, file edits, or paid video production.
 ---
 
 # Tidmunz Studio — select the correct computer every time
 
 ## Which tool to call
 
-- The user named their connected **MyComp Bot** ChatGPT plugin **`Tailscale`**. When authorized to operate Tidmunz Studio, use the connected **`@Tailscale` plugin/tool** (`mcp__TailScale__...` where available), not a guessed Windows program with that name. MyComp Bot is the access mechanism; Tailscale networking and its MagicDNS names are separate concepts.
-- Available plugin actions may be HTTP/API, shell, browser, vision, or desktop control; inspect which actions are actually exposed before using them. Prefer verified app APIs for commands. If the Tailscale plugin cannot operate the target Windows computer, a separately authorized Remote Desktop Commander connection can be used — but verify its target identity independently. **Do not silently jump to a different machine or plugin** just because the preferred path is unavailable.
+- Discover the selected computer connector dynamically. User-named Dino Bot, Tailscale, PS Bot and Bot Wen are examples, not universal defaults. Do not assume a plugin name or a device from another user's session.
+- Verify actual authenticated device identity before all state-changing work. Prefer direct native app API and safe shell to GUI. Do not silently jump to another plugin or machine if the preferred connector is unavailable.
+- For Auto, read tidmunz-chrome-followup: the Chrome extension sends scheduled check-in messages to a bound chat; the connected computer bot performs authorized inspections and fixes. They are different components.
 
 ## Mandatory target selection: never use a name or email as identity
 
@@ -35,4 +36,4 @@ description: Mandatory device selection and verification for any Tidmunz Studio 
 
 ## Operator checklist
 
-**Connected tool:** `@Tailscale` (user-named MyComp Bot plugin), if enabled. **Selected device:** verified unique ID, not the display name. **App:** verified Tidmunz Studio on the same device. **Project:** verified currently selected story. **Action:** within user authorization; receipt-aware for paid work. If any item is unknown, do not claim safe remote control succeeded.
+**Connected tool:** dynamically selected and authenticated computer bot. **Selected device:** verified unique ID, not the display name. **App:** verified Tidmunz Studio on the same device. **Project:** verified currently selected story. **Action:** within user authorization; receipt-aware for paid work. If any item is unknown, do not claim safe remote control succeeded.

@@ -5,6 +5,7 @@
 // Pairing: a folder install gets port + token from config.js; the Chrome Web Store build
 // asks Tidmunz for them at /pair (Tidmunz only answers requests coming from an extension).
 try { importScripts("config.js"); } catch (e) { self.TZ_CONFIG = null; }
+try { importScripts("followup.js"); } catch (e) { self.tmFollowupInit = null; }
 
 const PORTS = [8766, 8767, 8768];
 const JOB_LIMIT_MS = 12 * 60 * 1000;
@@ -1037,3 +1038,7 @@ chrome.alarms.onAlarm.addListener(() => loop());
 chrome.runtime.onStartup.addListener(() => loop());
 chrome.runtime.onInstalled.addListener(() => loop());
 loop();
+
+// Follow-up is optional and never starts another watcher or video job.
+if(self.tmFollowupInit) self.tmFollowupInit({inPage, pageSend:pageSend,
+  getLink:async()=>{if(!link)link=await pair();return link;}});
