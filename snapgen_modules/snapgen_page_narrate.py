@@ -7633,6 +7633,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         work.mkdir()
         duration = float(project["duration"])
         durations = segment_durations([s["start"] for s in scenes], duration)
+        # Video Auto asks the user which clip sounds to include before merging.
+        # This optional callback avoids changing the Narrate-only pipeline.
+        effect_selected_numbers = None
+        effect_review = state.get("_premerge_effect_review") if video_mode else None
+        if callable(effect_review):
+            effect_selected_numbers = effect_review(scenes, durations, ffmpeg)
+            if effect_selected_numbers is None:  # canceled; leave clips intact
+                raise Stopped()
+            project["effect_selected_clips"] = effect_selected_numbers
+            save_project()
         # Each shot runs on under the next one for as long as that transition lasts.
         kinds = [transition_into(scenes[i - 1] if i else None, s) for i, s in enumerate(scenes)]
         overlaps = [TRANSITIONS[kinds[i + 1]][1] for i in range(len(scenes) - 1)] + [0.0]
@@ -7712,7 +7722,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         final = folder / f"{safe_name(Path(project['script']).stem)}_{work_dir_name}_{time.strftime('%Y%m%d-%H%M')}.mp4"
         from snapgen_audio_sfx import build_effect_track, lossless_audio_args, verify_original_pcm
         effect_track, effect_audit = build_effect_track(
-            ffmpeg, scenes, durations, duration, work, log=log, check_stop=check_stop)
+            ffmpeg, scenes, durations, duration, work, log=log, check_stop=check_stop,
+            selected_scene_numbers=effect_selected_numbers)
         project["last_sfx_audit"] = effect_audit
         audio_inputs, mux_args = lossless_audio_args(project["audio"], effect_track)
         if project.get("subtitles"):
@@ -9121,6 +9132,21 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 raise RuntimeError(f"ฉาก {index + 1} อัปสเกลไม่ผ่าน จึงยังไม่รวมวิดีโอ: {exc}") from exc
 
     state["_auto_video_postprocess_finalizer"] = finalize_auto_video_postprocesses
+
+    if video_mode:
+        def review_audio_effects_before_merge(scenes, durations, ffmpeg):
+            from snapgen_ambient_selector import scan_effect_statuses, request_selection
+            log("กำลังตรวจเสียงประกอบของแต่ละช็อตก่อนเปิดตารางเลือก ...")
+            statuses = scan_effect_statuses(
+                ffmpeg, scenes, durations, log=log, check_stop=check_stop,
+                progress=lambda done, total: set_progress(
+                    "video", 0.01, f"ตรวจเสียงประกอบ {done}/{total}"),
+            )
+            return request_selection(
+                root, page, scenes, statuses,
+                selected=state["project"].get("effect_selected_clips"),
+            )
+        state["_premerge_effect_review"] = review_audio_effects_before_merge
 
     STAGE_FUNCS = {"analysis": stage_auto_analysis, "context": stage_context,
                    "ref_characters": stage_auto_ref_characters, "transcribe": stage_transcribe,

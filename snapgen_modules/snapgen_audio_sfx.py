@@ -117,7 +117,7 @@ def _vad_max_probability(audio, session, np):
     return max_prob
 
 
-def _analyze_one(scene, ffmpeg, duration, runtime):
+def _analyze_one(scene, ffmpeg, duration, runtime, *, preview_only=False):
     np, yamnet, vad, labels, events, _ = runtime
     path = str(scene.get("clip") or "")
     source_length = max(0.0, min(float(duration), _MAX_AUDIO_PER_SCENE))
@@ -177,6 +177,9 @@ def _analyze_one(scene, ffmpeg, duration, runtime):
         mask[start:end]=1.0
     if float(mask.mean()) < 0.07:
         return {"reason":"no_audible_effect_window"}
+    if preview_only:
+        # Recommendation only: avoid decoding 48 kHz stereo while scanning.
+        return {"reason":"included", "event_frames":int(safe_frame.sum())}
     # Expand to the 48 kHz stereo source and fade each edge to prevent clicks.
     try:
         stereo=_decode(ffmpeg,path,duration=source_length,rate=48000,channels=2)
@@ -210,7 +213,7 @@ def _analyze_one(scene, ffmpeg, duration, runtime):
 
 
 def build_effect_track(ffmpeg, scenes, durations, total_seconds, render_folder, *,
-                       log=lambda text:None, check_stop=lambda:None, audit_only=False):
+                       log=lambda text:None, check_stop=lambda:None, audit_only=False, selected_scene_numbers=None):
     """Return lossless stereo WAV effect track or None.
 
     Never mixes an unclassified clip. If models cannot run, original narration
@@ -226,8 +229,14 @@ def build_effect_track(ffmpeg, scenes, durations, total_seconds, render_folder, 
     candidates=[]
     counts={}
     count=min(len(scenes),len(durations))
+    selected = (None if selected_scene_numbers is None
+                else {int(i) for i in selected_scene_numbers
+                      if str(i).isdigit() and 1 <= int(i) <= count})
     for i in range(count):
         check_stop()
+        if selected is not None and i + 1 not in selected:
+            counts["not_selected"] = counts.get("not_selected", 0) + 1
+            continue
         scene=scenes[i]
         # Explicit user exclusion of dialogue and source-clip human voices.
         # Speech and music screening runs even for visually silent dialogue.
