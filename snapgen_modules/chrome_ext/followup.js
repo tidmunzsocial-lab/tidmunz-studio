@@ -88,8 +88,13 @@
     const pending=Array.isArray(s.pending)?(s.pending.slice(0,18).join(", ")||"ไม่มี"):"ต้องตรวจ UUID จากโปรเจกต์";
     const holds=Array.isArray(s.holds)?(s.holds.slice(0,18).map(x=>String(x.shot)+":"+String(x.reason)).join(", ")||"ไม่มี"):"ต้องตรวจสถานะช็อตจากโปรเจกต์";
     return "[Tidmunz Studio | สคริปต์ติดตามงานอัตโนมัติ | "+marker+"]\n"+
-      "นี่คือข้อความติดตามอัตโนมัติจากส่วนขยาย Tidmunz ChatGPT ในแชทเดิม ไม่ใช่งานใหม่ของผู้ใช้ "+
-      "ให้อ่านประวัติแชทนี้และตรวจสถานะจริงด้วยบอทของเครื่องเดิม ห้ามเดาหรือสลับเครื่อง.\n"+
+      "นี่คือข้อความติดตามอัตโนมัติของ Tidmunz Studio ไม่ใช่งานใหม่ของผู้ใช้ "+
+      "ไม่จำเป็นต้องอ่านแชทเดิม ให้ตรวจสถานะจริงจากเครื่องมือของเครื่องนี้.\n"+
+      "บอทของเครื่องนี้: @"+s.monitor_bot+" เท่านั้น สำหรับเครื่อง "+s.host+
+      " ห้ามเรียกบอทของเครื่องอื่นหรือเดาชื่อเครื่อง.\n"+
+      "ลิงก์ Tailscale ของเครื่องนี้: "+s.tailscale_url+"\n"+
+      "เว็บ Tailscale ใช้ดูสถานะประกอบการตรวจ ส่วนการแก้ไขต้องใช้ @"+
+      s.monitor_bot+" ของเครื่อง "+s.host+" โดยตรงเท่านั้น.\n"+
       "เครื่อง: "+s.host+"; โปรเจกต์: "+s.story+"; ตรวจเมื่อ: "+s.checked_at+
       "; ภาพ "+s.images+"/"+s.total+"; คลิป "+s.clips+"/"+s.total+
       "; กำลังทำ="+s.busy+"; ขั้นตอน="+s.stage+"; รายละเอียด="+s.detail+
@@ -106,66 +111,70 @@
     const a=await chrome.scripting.executeScript({target:{tabId},world:"MAIN",func:fn,args});
     return a[0]&&a[0].result;
   }
+  // Chrome can render two independent composers for the same ChatGPT chat.
+  // Check ALL visible/connected forms: a Stop button in the second form means
+  // GPT is replying even if the first blank composer looks idle.
   function composer(cid){
     if(location.hostname!=="chatgpt.com"||!location.pathname.endsWith("/c/"+cid))
       return {ok:false,why:"wrong_conversation"};
-    const editor=document.querySelector('form div.ProseMirror[role="textbox"]')||
-      document.querySelector('form #prompt-textarea[contenteditable="true"]')||
-      document.querySelector('form [contenteditable="true"]');
-    const form=editor&&editor.closest("form");
-    if(!form)return {ok:false,why:"composer_unavailable"};
-    const busy=[...form.querySelectorAll("button")].some(b=>b.dataset.testid==="stop-button"||
-      /^(stop|หยุด|停止)/i.test(b.getAttribute("aria-label")||""));
-    const draft=(editor.innerText||editor.textContent||"").trim();
+    const editors=[...document.querySelectorAll('form div.ProseMirror[role="textbox"],form #prompt-textarea[contenteditable="true"],form [contenteditable="true"]')]
+      .filter(e=>e.isConnected&&e.closest("form"));
+    if(!editors.length)return {ok:false,why:"composer_unavailable"};
+    const busy=[...document.querySelectorAll("form button")].some(b=>
+      b.dataset.testid==="stop-button" || /^(stop|หยุด|停止)/i.test(b.getAttribute("aria-label")||""));
+    const draft=editors.some(e=>String(e.innerText||e.textContent||"").trim().length>0);
     return {ok:!busy&&!draft,why:busy?"assistant_busy":draft?"draft_exists":""};
   }
   function inspectComposer(cid){
     if(location.hostname!=="chatgpt.com")return {error:"not_chatgpt"};
-    const edit=document.querySelector('form div.ProseMirror[role="textbox"]')||
-      document.querySelector('form #prompt-textarea[contenteditable="true"]')||
-      document.querySelector('form [contenteditable="true"]');
-    const form=edit && edit.closest("form");
-    const buttons=form ? [...form.querySelectorAll("button")] : [];
+    const editors=[...document.querySelectorAll('form div.ProseMirror[role="textbox"],form #prompt-textarea[contenteditable="true"],form [contenteditable="true"]')]
+      .filter(e=>e.isConnected&&e.closest("form"));
+    const edit=editors.find(e=>/\bTMF-[0-9]{13}-[0-9]+\b/.test(String(e.innerText||e.textContent||""))) ||
+      editors.find(e=>String(e.innerText||e.textContent||"").trim()) || editors[0];
+    const form=edit&&edit.closest("form");
+    const buttons=form?[...form.querySelectorAll("button")]:[];
+    const draft=String(edit&&(edit.innerText||edit.textContent)||"").trim();
+    const newer=draft.match(/^\[Tidmunz Studio \| สคริปต์ติดตามงานอัตโนมัติ \| (TMF-[0-9]{13}-[0-9]+)\]/);
+    const legacy=draft.match(/^\[Tidmunz Auto Follow-up: (TMF-[0-9]{13}-[0-9]+)\]/);
     return {
-      route:location.pathname, match:location.pathname.endsWith("/c/"+cid),
+      route:location.pathname,match:location.pathname.endsWith("/c/"+cid),
       formCount:document.querySelectorAll("form").length,
       editor:edit?{tag:edit.tagName,id:edit.id,role:edit.getAttribute("role"),
         editable:edit.getAttribute("contenteditable"),className:String(edit.className).slice(0,85),
-        draftLength:String(edit.innerText||edit.textContent||"").trim().length,
-        monitorMarker:(()=>{
-          const draft=String(edit.innerText||edit.textContent||"").trim();
-          const newer=draft.match(/^\[Tidmunz Studio \| สคริปต์ติดตามงานอัตโนมัติ \| (TMF-[0-9]{13}-[0-9]+)\]/);
-          const legacy=draft.match(/^\[Tidmunz Auto Follow-up: (TMF-[0-9]{13}-[0-9]+)\]/);
-          return (newer&&newer[1])||(legacy&&legacy[1])||null;
-        })()}:null,
+        draftLength:draft.length,monitorMarker:(newer&&newer[1])||(legacy&&legacy[1])||null}:null,
       buttons:buttons.map(b=>({type:b.type,testid:b.dataset.testid||"",
         aria:(b.getAttribute("aria-label")||"").slice(0,65),
         title:(b.getAttribute("title")||"").slice(0,65),
         text:(b.innerText||"").slice(0,30),disabled:b.disabled,
         html:b.outerHTML.slice(0,180)})).slice(-25),
-      submitCount:form?form.querySelectorAll('button[type="submit"]').length:0
+      submitCount:form?form.querySelectorAll('button[type="submit"],button[data-testid="send-button"],button[aria-label="ส่งข้อความ"]').length:0
     };
   }
-  function submitOwnedMonitorDraft(cid,marker){
+  function submitOwnedMonitorDraft(cid,marker,story,host){
     if(location.hostname!=="chatgpt.com" || !location.pathname.endsWith("/c/"+cid))
       return {attempted:false,reason:"wrong_conversation"};
-    const edit=document.querySelector('form div.ProseMirror[role="textbox"]')||
-      document.querySelector('form #prompt-textarea[contenteditable="true"]')||
-      document.querySelector('form [contenteditable="true"]');
+    const editors=[...document.querySelectorAll('form div.ProseMirror[role="textbox"],form #prompt-textarea[contenteditable="true"],form [contenteditable="true"]')]
+      .filter(e=>e.isConnected&&e.closest("form"));
+    const edit=editors.find(e=>{
+      const draft=String(e.innerText||e.textContent||"").trim();
+      return draft.startsWith("[Tidmunz Studio | สคริปต์ติดตามงานอัตโนมัติ | "+marker+"]") ||
+        draft.startsWith("[Tidmunz Auto Follow-up: "+marker+"]");
+    });
     const form=edit&&edit.closest("form");
     const text=String(edit&&(edit.innerText||edit.textContent)||"").trim();
-    const isOwn=text.startsWith("[Tidmunz Studio | สคริปต์ติดตามงานอัตโนมัติ | "+marker+"]") ||
-      text.startsWith("[Tidmunz Auto Follow-up: "+marker+"]");
-    if(!form || !isOwn || !/เครื่อง:.*; โปรเจกต์:/.test(text))
+    if(!form || !story || !host || !text.includes("เครื่อง: "+host+"; โปรเจกต์: "+story+";"))
       return {attempted:false,reason:"not_owned_monitor_draft"};
     if([...document.querySelectorAll('[data-message-author-role="user"]')]
         .some(x=>(x.innerText||x.textContent||"").includes(marker)))
       return {attempted:false,reason:"marker_already_visible"};
-    const busy=[...form.querySelectorAll("button")].some(btn=>
-      btn.dataset.testid==="stop-button" || /^(stop|หยุด|停止)/i.test(btn.getAttribute("aria-label")||""));
-    const send=form.querySelector('button[type="submit"],button[data-testid="send-button"]');
-    if(busy || !send || send.disabled)
-      return {attempted:false,reason:"composer_not_ready"};
+    const busy=[...document.querySelectorAll("form button")].some(b=>
+      b.dataset.testid==="stop-button" || /^(stop|หยุด|停止)/i.test(b.getAttribute("aria-label")||""));
+    const send=[...form.querySelectorAll("button")].find(b=>
+      !b.disabled && (b.type==="submit" || b.dataset.testid==="send-button" ||
+        b.id==="composer-submit-button" ||
+        /^(send|ส่ง)/i.test((b.getAttribute("aria-label")||"").trim())));
+    if(busy || !send)
+      return {attempted:false,reason:busy?"assistant_busy":"composer_not_ready"};
     send.click();
     return {attempted:true};
   }
@@ -265,6 +274,11 @@
         await save(c);return;
       }
       if(!force&&Date.now()<(c.nextAt||0))return;
+      // Do not send an unbound bot name or a Tailscale link for another PC.
+      if(!live.monitor_bot || !live.tailscale_url){
+        c.lastError="ไม่ได้ตั้งค่าบอทและลิงก์ Tailscale ของเครื่องนี้";
+        c.nextAt=Date.now()+5*MIN;await save(c);return;
+      }
       const s=live,now=Date.now(),m=minutes(s,c.lastProgress);
       c.lastProgress={clips:s.clips,images:s.images,at:now};
       if(s.complete&&c.lastResult==="finished_sent"){
@@ -296,7 +310,7 @@
           }
           c.phase="sending";c.marker=owned;c.lastAt=now;c.lastError="";
           await save(c);
-          const sent=await inPage(t.id,submitOwnedMonitorDraft,[c.cid,owned]);
+          const sent=await inPage(t.id,submitOwnedMonitorDraft,[c.cid,owned,c.story,c.host]);
           if(!sent || !sent.attempted){
             c.phase="idle";c.marker="";c.nextAt=Date.now()+2*MIN;
             c.lastError="ยังไม่ได้ส่งร่างของระบบ: "+String(sent&&sent.reason||"unknown");

@@ -316,6 +316,34 @@ def estimate_left(email: str, reset: str, reported: str) -> str:
         return str(max(0, min(int(reported), limit - made_today)))
 
 
+def followup_device_target(host: str, access: str, folder: Path | None = None) -> dict:
+    """Return the bot and Tailscale URL from THIS PC, never a guessed other machine."""
+    import re
+    result = {"monitor_bot": "", "tailscale_url": ""}
+    folder = folder or data_dir()
+    try:
+        cfg = json.loads((folder / "followup_device_bot.json").read_text(encoding="utf-8"))
+        target = str(cfg.get("host") or "").strip()
+        bot = str(cfg.get("bot") or "").strip()
+        raw_url = (folder / "mobile_web_url.txt").read_text(encoding="utf-8").strip()
+        parsed = urlparse(raw_url)
+        hostname = str(parsed.hostname or "").lower()
+        query = parse_qs(parsed.query)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return result
+    if not host or target.casefold() != host.casefold():
+        return result
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9 ._-]{1,60}", bot):
+        return result
+    if not (parsed.scheme == "https" and hostname.startswith(host.lower() + ".")
+            and hostname.endswith(".ts.net") and not parsed.username
+            and not parsed.password and not parsed.fragment and not parsed.port
+            and query.get("access") == [access] and bool(access)):
+        return result
+    result.update(monitor_bot=bot, tailscale_url=raw_url)
+    return result
+
+
 def project_monitor_status() -> dict:
     """Expose only selected Auto progress via this installation's existing authenticated relay."""
     import socket
@@ -341,6 +369,7 @@ def project_monitor_status() -> dict:
     final_exists = bool(auto.get("video"))
     return {
         "ready": True, "host": socket.gethostname(), "story": str(auto["title"]),
+        **followup_device_target(socket.gethostname(), access),
         "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "busy": auto.get("busy"), "stage": stage, "detail": detail,
         "images": images, "clips": clips, "total": len(shots),
