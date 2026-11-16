@@ -105,6 +105,37 @@ class _Relay:
         self.opened_at = 0.0
         self.token = ""
         self.port = 0
+        # Only Chrome Extension followup.js can report this independently of GPT jobs.
+        self.followup_payload = None
+        self.followup_heartbeat = 0.0
+
+    def update_followup(self, payload: dict) -> None:
+        """Authenticated heartbeat from the existing Chrome Extension, not a watcher."""
+        if not isinstance(payload, dict):
+            raise ValueError("invalid follow-up report")
+        phase = str(payload.get("phase") or "")[:48]
+        data = {
+            "enabled": payload.get("enabled") is True,
+            "alarm_active": payload.get("alarm_active") is True,
+            "stop_requested": payload.get("stop_requested") is True,
+            "checking": payload.get("checking") is True,
+            "phase": phase,
+            "next_at": max(0, int(payload.get("next_at") or 0)),
+            "interval_minutes": max(0, min(1440, int(payload.get("interval_minutes") or 0))),
+            "story": str(payload.get("story") or "")[:120],
+            "host": str(payload.get("host") or "")[:100],
+        }
+        with self.lock:
+            self.followup_payload = data
+            self.followup_heartbeat = time.monotonic()
+
+    def followup_snapshot(self) -> dict | None:
+        """Stale/absent service-worker report is UNKNOWN, never an active indicator."""
+        with self.lock:
+            if not self.followup_payload or time.monotonic() - self.followup_heartbeat > 90:
+                return None
+            return dict(self.followup_payload)
+
 
     # extension side
     def next_job(self, wait: float):
@@ -384,6 +415,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, {"token": RELAY.token})
         if not self._allowed(query):
             return self._send(403, {"error": "bad token"})
+        if path == "/followup/status":
+            return self._send(200, RELAY.followup_snapshot() or {"available": False})
         if path == "/monitor/status":
             try:
                 return self._send(200, project_monitor_status())
@@ -418,6 +451,14 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._body()
         except ValueError:
             return self._send(400, {"error": "bad json"})
+        if path == "/followup/status":
+            if int(self.headers.get("Content-Length") or 0) > 4096:
+                return self._send(413, {"error": "report too large"})
+            try:
+                RELAY.update_followup(body)
+            except (ValueError, TypeError, OverflowError):
+                return self._send(400, {"error": "bad follow-up status"})
+            return self._send(200, {"ok": True})
         if path == "/result":
             RELAY.finish(body)
             return self._send(200, {"ok": True})

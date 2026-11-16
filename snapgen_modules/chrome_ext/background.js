@@ -1034,7 +1034,11 @@ async function pagePoll(kind, state) {
 }
 
 chrome.alarms.create("tidmunz-wake", {periodInMinutes: 0.5});
-chrome.alarms.onAlarm.addListener(() => loop());
+chrome.alarms.onAlarm.addListener(() => {
+  loop();
+  // Existing Chrome wake Alarm, no extra watcher or scheduler.
+  if(self.tmFollowupReport)self.tmFollowupReport();
+});
 chrome.runtime.onStartup.addListener(() => loop());
 chrome.runtime.onInstalled.addListener(() => loop());
 loop();

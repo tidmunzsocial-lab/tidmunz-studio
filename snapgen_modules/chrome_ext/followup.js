@@ -6,19 +6,40 @@
   const delay=ms=>new Promise(done=>setTimeout(done,ms));
   const defaults=()=>({enabled:false,url:"",cid:"",phase:"idle",nextAt:0,lastAt:0,
     confirmedAt:0,lastError:"",lastResult:"",lastProgress:null,tabId:0,
-    marker:"",sentCount:0,day:"",dailyCount:0,story:"",host:"",errors:0,stopRequested:false});
+    marker:"",sentCount:0,day:"",dailyCount:0,story:"",host:"",errors:0,stopRequested:false,intervalMinutes:0});
   async function load(){const x=(await chrome.storage.local.get(STORE))[STORE];return Object.assign(defaults(),x||{});}
   async function save(x){
     const previous=(await chrome.storage.local.get(STORE))[STORE]||{};
     if(previous.stopRequested===true && x.stopRequested!==false){
       x.enabled=false;x.stopRequested=true;x.nextAt=0;
     }
+    // Persist the actual schedule, not the status of a GPT image/video job.
+    if(!x.nextAt)x.intervalMinutes=0;
+    else if(Number(x.nextAt)!==Number(previous.nextAt))
+      x.intervalMinutes=Math.max(1,Math.ceil((Number(x.nextAt)-Date.now())/MIN));
     await chrome.storage.local.set({[STORE]:x});
+    reportState().catch(()=>{});
+  }
+  async function reportState(){
+    if(!injected||!injected.getLink)return;
+    const link=await injected.getLink();
+    const port=Number(link&&link.port), token=String(link&&link.token||"");
+    if(!Number.isInteger(port)||port<1000||port>65535||!token)return;
+    const c=await load(),alarm=await chrome.alarms.get(ALARM);
+    await fetch("http://127.0.0.1:"+port+"/followup/status?token="+encodeURIComponent(token),{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        enabled:!!c.enabled,alarm_active:!!alarm,stop_requested:!!c.stopRequested,
+        checking:running,phase:c.phase,next_at:c.nextAt||0,
+        interval_minutes:c.intervalMinutes||0,story:c.story||"",host:c.host||""
+      })
+    });
   }
   async function finishFollowup(c,phase,reason){
     c.enabled=false;c.stopRequested=true;c.phase=phase;c.nextAt=0;
     c.lastError=reason||"";
     await save(c);await chrome.alarms.clear(ALARM);
+    reportState().catch(()=>{});
   }
   function parse(raw){
     try{const u=new URL(String(raw||"").trim());
@@ -211,6 +232,7 @@
     if(running)return;
     running=true;
     let c=await load();
+    reportState().catch(()=>{});
     try{
       if(!c.enabled||!c.cid||!injected)return;
       // Always check the terminal stage before any next message, even if nextAt is in the future.
@@ -353,12 +375,19 @@
       }
       await save(c);
       if(!c.enabled)await chrome.alarms.clear(ALARM);
-    }finally{running=false;}
+    }finally{
+      running=false;
+      reportState().catch(()=>{});
+    }
   }
+  self.tmFollowupReport=()=>reportState().catch(()=>{});
   self.tmFollowupInit=(callbacks)=>{
     if(injected)return;
     injected={page:callbacks.inPage,send:callbacks.pageSend,getLink:callbacks.getLink};
-    load().then(c=>{if(c.enabled)chrome.alarms.create(ALARM,{periodInMinutes:1});}).catch(()=>{});
+    load().then(async c=>{
+      if(c.enabled)await chrome.alarms.create(ALARM,{periodInMinutes:1});
+      await reportState();
+    }).catch(()=>{});
     chrome.alarms.onAlarm.addListener(a=>{if(a.name===ALARM)tick().catch(()=>{});});
     chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
       if(!msg||!String(msg.type||"").startsWith("tm_followup_"))return;

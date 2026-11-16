@@ -14648,6 +14648,38 @@ def _install_image_bridge_status():
     g["snap_light"] = light
     g["snap_light_item"] = dot
     g["snap_status_var"] = status_var
+    # Dedicated Chrome Extension Follow-up status, independent of GPT jobs.
+    # Never infer follow-up activity from image/video generation or scheduled tasks.
+    followup_var = tk.StringVar(value="สคริปต์ติดตาม: กำลังตรวจ...")
+    followup_light = tk.Canvas(parent, width=14, height=14,
+                               bg="#FFFFFF", highlightthickness=0)
+    followup_dot = followup_light.create_oval(
+        2, 2, 12, 12, fill="#9E9E9E", outline="")
+    followup_light.grid(row=2, column=1, sticky="e", padx=(8, 0), pady=(0, 1))
+    followup_label = tk.Label(
+        parent, textvariable=followup_var, bg="#FFFFFF", fg="#475467",
+        font=(SNAPGEN_UI_FONT, 9), anchor="e")
+    followup_label.grid(row=2, column=2, sticky="e", padx=(3, 0), pady=(0, 1))
+    g["followup_extension_status_var"] = followup_var
+
+    def refresh_extension_followup_status():
+        try:
+            import snapgen_chrome_relay
+            from snapgen_followup_footer import label_for_followup
+            report = snapgen_chrome_relay.RELAY.followup_snapshot()
+            description, colour = label_for_followup(report)
+        except Exception:
+            description, colour = "สคริปต์ติดตาม: ตรวจสถานะไม่ได้", "#F44336"
+        try:
+            followup_var.set(description)
+            followup_light.itemconfigure(followup_dot, fill=colour)
+        except tk.TclError:
+            return
+        _snapgen_after(10000, refresh_extension_followup_status)
+
+    g["refresh_extension_followup_status"] = refresh_extension_followup_status
+    _snapgen_after(1000, refresh_extension_followup_status)
+
 
     quota_var = tk.StringVar(value="โควตารูป: —")
     quota_parent = mode_frame or parent
