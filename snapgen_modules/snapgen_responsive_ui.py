@@ -8,7 +8,17 @@ invoke them, so no workflow, credit balance or settings state is rewritten.
 """
 from __future__ import annotations
 
+import re
 import tkinter as tk
+
+
+def split_gpt_quota(value):
+    """Convert the live quota string to a short title and right-aligned count."""
+    raw = str(value or "").strip()
+    plan = re.search(r"\b(Plus|Pro|Go|Free|Business|Enterprise)\b", raw, re.I)
+    title = "GPT" + (" " + plan.group(1).title() if plan else "")
+    count = re.search(r"\d[\d,]*(?:\.\d+)?", raw)
+    return title, (count.group() if count else "—")
 
 
 def _find_prompt_ref(root):
@@ -137,16 +147,20 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                     return border, (label, value)
 
                 credit_card = None
-                credit_result = create_credit_card(
-                    actions, "SnapGen", g.get("credit_status_var"), padding=(5, 3),
-                )
+                credit_result = (None if g.get("_responsive_equal_credit_cards")
+                                 else create_credit_card(
+                                     actions, "SnapGen", g.get("credit_status_var"),
+                                     padding=(5, 3),
+                                 ))
                 if credit_result is not None:
                     credit_card, _ = credit_result
                     g["_responsive_snapgen_credit"] = credit_card
 
                 quota_label = g.get("bridge_image_quota_label")
                 quota_var = g.get("bridge_image_quota_var")
-                if isinstance(quota_label, tk.Label) and isinstance(quota_var, tk.Variable):
+                if (not g.get("_responsive_equal_credit_cards")
+                        and isinstance(quota_label, tk.Label)
+                        and isinstance(quota_var, tk.Variable)):
                     # Keep the bottom row exactly where it was. Hide only
                     # the original quota label, preserve its click-to-refresh
                     # callback and render the balance in an equally sized card.
@@ -176,7 +190,7 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 )
                 moved = []
                 for original in originals:
-                    if original in legacy_credit and credit_card is not None:
+                    if original in legacy_credit:
                         moved.append(original)
                         continue
                     clone = _clone_action(actions, original, font)
@@ -207,6 +221,113 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 root.after(300, lambda: attach_action_bar(attempt + 1))
 
     attach_action_bar()
+
+    def ensure_equal_credit_cards(attempt=0):
+        """Restore both credit cards even when toolbar discovery happened late.
+
+        Credit status is provided by the recovered app, whose StringVar can be
+        registered after Prompt-Ref is made. Never require its presence to
+        create a visible card; use the original button as a live fallback.
+        """
+        if g.get("_responsive_equal_credit_cards"):
+            return
+        quota_label = g.get("bridge_image_quota_label")
+        quota_var = g.get("bridge_image_quota_var")
+        old_credit = next(
+            (g.get(k) for k in ("credit_button", "credit_label", "credit_status_label")
+             if isinstance(g.get(k), (tk.Button, tk.Label))), None
+        )
+        credit_var = g.get("credit_status_var")
+        action_bar = g.get("_responsive_action_bar")
+        if isinstance(action_bar, tk.Frame) and not action_bar.winfo_exists():
+            action_bar = None
+
+        if not isinstance(quota_label, tk.Label) or not isinstance(quota_var, tk.Variable):
+            if attempt < 50:
+                root.after(400, lambda: ensure_equal_credit_cards(attempt + 1))
+            return
+        if not isinstance(credit_var, tk.Variable):
+            if old_credit is None:
+                if attempt < 50:
+                    root.after(400, lambda: ensure_equal_credit_cards(attempt + 1))
+                return
+            text = str(old_credit.cget("text") or "—")
+            credit_var = tk.StringVar(master=root, value=text)
+            g["credit_status_var"] = credit_var
+
+        if action_bar is not None:
+            credit_host = action_bar
+            credit_right_pad = 5  # action bar already has 7 px outer padding
+        elif old_credit is not None:
+            credit_host = old_credit.master
+            credit_right_pad = 12
+        else:
+            if attempt < 50:
+                root.after(400, lambda: ensure_equal_credit_cards(attempt + 1))
+            return
+        quota_host = quota_label.master
+
+        # Supersede legacy partial cards; no dark tk relief borders.
+        for key in ("_responsive_snapgen_credit", "_responsive_chatgpt_quota_card"):
+            old = g.get(key)
+            if isinstance(old, tk.Widget):
+                try:
+                    if old.winfo_exists():
+                        old.destroy()
+                except tk.TclError:
+                    pass
+        bg, edge = "#F3F5F8", "#DCE2EA"
+        label_fg, number_fg = "#66758A", "#475569"
+        def new_card(host, title_var, amount_var, right_pad):
+            frame = tk.Frame(host, bg=edge, padx=1, pady=1)
+            frame.pack(side="right", padx=(5, right_pad), pady=7)
+            inner = tk.Frame(frame, bg=bg, width=196, height=36)
+            inner.pack()
+            inner.pack_propagate(False)
+            title_label = tk.Label(inner, textvariable=title_var, bg=bg,
+                                   fg=label_fg, font=("Segoe UI", 9),
+                                   padx=10, anchor="w")
+            title_label.pack(side="left", fill="y")
+            amount_label = tk.Label(inner, textvariable=amount_var, bg=bg,
+                                    fg=number_fg, font=("Segoe UI", 9, "bold"),
+                                    padx=10, anchor="e")
+            amount_label.pack(side="right", fill="y")
+            return frame, (inner, title_label, amount_label)
+
+        snap_title = tk.StringVar(master=root, value="SnapGen")
+        snap_card, snap_widgets = new_card(
+            credit_host, snap_title, credit_var, credit_right_pad,
+        )
+        quota_title = tk.StringVar(master=root)
+        quota_amount = tk.StringVar(master=root)
+        def refresh_quota(*_args):
+            title, amount = split_gpt_quota(quota_var.get())
+            quota_title.set(title)
+            quota_amount.set(amount)
+        quota_var.trace_add("write", refresh_quota)
+        refresh_quota()
+        quota_card, quota_widgets = new_card(
+            quota_host, quota_title, quota_amount, 12,
+        )
+
+        for widget in (quota_card, *quota_widgets):
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>", lambda _event, original=quota_label:
+                        original.event_generate("<Button-1>"))
+        quota_label.pack_forget()
+        for widget in (g.get("credit_button"), g.get("credit_label"),
+                       g.get("credit_status_label")):
+            if isinstance(widget, tk.Widget) and widget.winfo_exists():
+                if widget.winfo_manager() == "pack":
+                    widget.pack_forget()
+        g["_responsive_snapgen_credit"] = snap_card
+        g["_responsive_chatgpt_quota_card"] = quota_card
+        g["_responsive_equal_credit_cards"] = True
+
+    # Run independently of Prompt-Ref. Previously if the toolbar button was
+    # unavailable, both cards disappeared despite v2.0.30 being installed.
+    root.after_idle(ensure_equal_credit_cards)
+    root.after(900, ensure_equal_credit_cards)
 
     # The original mode tabs have width=13 characters, consuming more than
     # 1536 physical pixels at 125% DPI. Set widths only when the breakpoint

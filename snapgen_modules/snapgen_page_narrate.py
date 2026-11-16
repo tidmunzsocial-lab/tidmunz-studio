@@ -7617,32 +7617,34 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project["clip_audio_policy"] = "lossless_narration_and_classifier_verified_sfx_only"
         project["clip_ambience"] = False
         save_project()
-        log("เสียง: เสียงพูดต้นฉบับ ALAC lossless + เอฟเฟกต์ที่ผ่านตัวกรองเสียงพูด/เพลงเท่านั้น (ไม่มีตัวเลือกแบบ 1/2)")
+        log("เสียง: บรรยายต้นฉบับ ALAC lossless + เอฟเฟกต์จากช็อตที่เลือกและผ่านตัวกรองเสียงพูด/เพลง")
+        # Give the user the numbered chooser immediately on entering the
+        # video stage. The old synchronous 109-clip classifier scan could take
+        # minutes before displaying anything and looked like a broken button.
+        ffmpeg = ffmpeg_path()
+        scenes = project["scenes"]
+        duration = float(project["duration"])
+        durations = segment_durations([s["start"] for s in scenes], duration)
+        effect_selected_numbers = None
+        effect_review = state.get("_premerge_effect_review") if video_mode else None
+        if callable(effect_review):
+            effect_selected_numbers = effect_review(scenes, durations, ffmpeg)
+            if effect_selected_numbers is None:
+                raise Stopped()
+            project["effect_selected_clips"] = effect_selected_numbers
+            save_project()
+        # Postprocess and clip relinking run only after the user confirms.
         finish_postprocess = state.get("_auto_video_postprocess_finalizer")
         if callable(finish_postprocess):
             finish_postprocess()
-        ffmpeg = ffmpeg_path()
         width, height = (AUTO_VIDEO_SIZES.get(project["aspect"], AUTO_VIDEO_SIZES["16:9"]) if video_mode
                          else narrate_video_size(project))
         log(f"ส่งออกวิดีโอ {width}×{height}")
-        scenes = project["scenes"]
         if video_mode:
             relink_or_report_missing_clips(scenes, folder)
         work = folder / "_render"
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
-        duration = float(project["duration"])
-        durations = segment_durations([s["start"] for s in scenes], duration)
-        # Video Auto asks the user which clip sounds to include before merging.
-        # This optional callback avoids changing the Narrate-only pipeline.
-        effect_selected_numbers = None
-        effect_review = state.get("_premerge_effect_review") if video_mode else None
-        if callable(effect_review):
-            effect_selected_numbers = effect_review(scenes, durations, ffmpeg)
-            if effect_selected_numbers is None:  # canceled; leave clips intact
-                raise Stopped()
-            project["effect_selected_clips"] = effect_selected_numbers
-            save_project()
         # Each shot runs on under the next one for as long as that transition lasts.
         kinds = [transition_into(scenes[i - 1] if i else None, s) for i, s in enumerate(scenes)]
         overlaps = [TRANSITIONS[kinds[i + 1]][1] for i in range(len(scenes) - 1)] + [0.0]
@@ -9136,15 +9138,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     if video_mode:
         def review_audio_effects_before_merge(scenes, durations, ffmpeg):
             from snapgen_ambient_selector import scan_effect_statuses, request_selection
-            log("กำลังตรวจเสียงประกอบของแต่ละช็อตก่อนเปิดตารางเลือก ...")
-            statuses = scan_effect_statuses(
-                ffmpeg, scenes, durations, log=log, check_stop=check_stop,
-                progress=lambda done, total: set_progress(
-                    "video", 0.01, f"ตรวจเสียงประกอบ {done}/{total}"),
-            )
+            from snapgen_ambient_selector import suggested_status
+            statuses = [suggested_status(scene, None) for scene in scenes]
+
+            def scan_later(on_status, stop_scan):
+                def do_stop():
+                    if stop_scan.is_set():
+                        raise Stopped()
+                    check_stop()
+                scan_effect_statuses(
+                    ffmpeg, scenes, durations, log=log, check_stop=do_stop,
+                    on_status=on_status,
+                )
+
             return request_selection(
                 root, page, scenes, statuses,
                 selected=state["project"].get("effect_selected_clips"),
+                scan=scan_later,
             )
         state["_premerge_effect_review"] = review_audio_effects_before_merge
 

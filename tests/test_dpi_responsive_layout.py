@@ -171,12 +171,109 @@ def test_status_cards_share_size_and_hide_old_credit_control():
         snapgen_labels = snapgen.winfo_children()[0].winfo_children()
         chatgpt_labels = chatgpt.winfo_children()[0].winfo_children()
         assert snapgen_labels[0].cget("text") == "SnapGen"
-        assert chatgpt_labels[0].cget("text") == "GPT"
+        assert chatgpt_labels[0].cget("text") == "GPT Plus"
         assert snapgen_labels[-1].cget("text") == "1234"
-        assert chatgpt_labels[-1].cget("text") == "59 Plus"
+        assert chatgpt_labels[-1].cget("text") == "59"
         assert snapgen_labels[0].cget("fg") == chatgpt_labels[0].cget("fg")
         chatgpt_labels[-1].event_generate("<Button-1>")
         root.update()
         assert quota_clicks == [True]
+    finally:
+        root.destroy()
+
+
+def test_status_cards_install_without_prompt_ref_or_credit_stringvar():
+    """The recovered header may register a credit Button but no StringVar."""
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Window manager unavailable")
+    try:
+        root.tk.call("tk", "scaling", 1.6683)
+        root.geometry("1300x720")
+        toolbar = tk.Frame(root)
+        toolbar.pack(fill="x")
+        old = tk.Button(toolbar, text="26")
+        old.pack(side="right")
+        mode = tk.Frame(root)
+        mode.pack(fill="x")
+        quota = tk.StringVar(value="โควตารูป: 60 Plus")
+        source = tk.Label(mode, textvariable=quota)
+        source.pack(side="right")
+        g = {
+            "credit_button": old,
+            "bridge_image_quota_label": source,
+            "bridge_image_quota_var": quota,
+            "mode_frame": mode,
+        }
+        from snapgen_responsive_ui import install
+        install(root, g)
+        root.update()
+        snap = g["_responsive_snapgen_credit"]
+        gpt = g["_responsive_chatgpt_quota_card"]
+        assert snap.winfo_ismapped() and gpt.winfo_ismapped()
+        assert snap.winfo_width() == gpt.winfo_width()
+        assert snap.winfo_height() == gpt.winfo_height()
+        assert abs((snap.winfo_rootx() + snap.winfo_width())
+                   - (gpt.winfo_rootx() + gpt.winfo_width())) <= 2
+        assert old.winfo_manager() == ""
+        assert source.winfo_manager() == ""
+        snap_widgets = snap.winfo_children()[0].winfo_children()
+        gpt_widgets = gpt.winfo_children()[0].winfo_children()
+        assert root.getvar(snap_widgets[0].cget("textvariable")) == "SnapGen"
+        assert root.getvar(snap_widgets[-1].cget("textvariable")) == "26"
+        assert root.getvar(gpt_widgets[0].cget("textvariable")) == "GPT Plus"
+        assert root.getvar(gpt_widgets[-1].cget("textvariable")) == "60"
+        g["credit_status_var"].set("28")
+        quota.set("โควตารูป: 55 Go")
+        root.update()
+        assert root.getvar(snap_widgets[-1].cget("textvariable")) == "28"
+        assert root.getvar(gpt_widgets[0].cget("textvariable")) == "GPT Go"
+        assert root.getvar(gpt_widgets[-1].cget("textvariable")) == "55"
+    finally:
+        root.destroy()
+
+
+def test_late_prompt_ref_does_not_duplicate_credit_cards():
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Window manager unavailable")
+    try:
+        root.geometry("1400x720")
+        toolbar = tk.Frame(root)
+        toolbar.pack(fill="x")
+        credit = tk.Button(toolbar, text="31")
+        credit.pack(side="right")
+        mode = tk.Frame(root)
+        mode.pack(fill="x")
+        quota = tk.StringVar(value="60 Plus")
+        label = tk.Label(mode, textvariable=quota)
+        label.pack(side="right")
+        g = {
+            "credit_button": credit,
+            "bridge_image_quota_label": label,
+            "bridge_image_quota_var": quota,
+            "mode_frame": mode,
+        }
+        from snapgen_responsive_ui import install
+        install(root, g)
+        root.update()
+        assert g["_responsive_equal_credit_cards"]
+        tk.Button(toolbar, text="Prompt-Ref").pack(side="right")
+        root.after(650, root.quit)
+        root.mainloop()
+        root.update_idletasks()
+        def descend(node):
+            for child in node.winfo_children():
+                yield child
+                yield from descend(child)
+        gray_edges = [widget for widget in descend(root)
+                      if isinstance(widget, tk.Frame) and widget.cget("bg") == "#DCE2EA"]
+        assert len(gray_edges) == 2
+        assert all(item.winfo_ismapped() for item in gray_edges)
+        assert g["_responsive_snapgen_credit"] in gray_edges
+        assert g["_responsive_chatgpt_quota_card"] in gray_edges
     finally:
         root.destroy()

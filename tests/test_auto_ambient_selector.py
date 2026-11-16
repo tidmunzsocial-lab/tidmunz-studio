@@ -125,3 +125,62 @@ def test_compact_selector_has_eight_columns_and_short_legend():
         assert result == [2,5,9,14,17,22,26,31]
     finally:
         root.destroy()
+
+
+def test_merge_prompts_for_effects_before_any_video_postprocess(tmp_path):
+    from test_auto_video_merge import merge_scope
+    scope, logs, commands = merge_scope(tmp_path)
+    project = scope["state"]["project"]
+    snapshots = []
+    def chooser(scenes, durations, ffmpeg):
+        snapshots.append((len(scenes), len(durations), ffmpeg))
+        return None  # cancel => preserve clips and do not start rendering
+    def forbidden_postprocess():
+        pytest.fail("Video postprocess began before effect selection")
+    scope["state"]["_premerge_effect_review"] = chooser
+    scope["state"]["_auto_video_postprocess_finalizer"] = forbidden_postprocess
+    original_clips = [scene["clip"] for scene in project["scenes"]]
+    scope["start_pipeline"](only="video")
+    assert snapshots == [(2, 2, "ffmpeg")]
+    assert not commands
+    assert [scene["clip"] for scene in project["scenes"]] == original_clips
+    assert not project["done"].get("video")
+    assert any("หยุดแล้ว" in value for value in logs)
+
+
+def test_background_audio_scan_does_not_block_picker():
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("No graphical window manager")
+    try:
+        root.withdraw()
+        from snapgen_ambient_selector import show_selector
+        called = []
+        observed = {}
+        def scan(on_status, stop_scan):
+            called.append("scan-started")
+            on_status(1, "effect")
+            called.append("scan-completed")
+        def confirm():
+            dialog = next(c for c in root.winfo_children() if isinstance(c, tk.Toplevel))
+            try:
+                def walk(widget):
+                    for c in widget.winfo_children():
+                        yield c
+                        yield from walk(c)
+                widgets = list(walk(dialog))
+                checks = [c for c in widgets if isinstance(c, tk.Checkbutton)]
+                observed["bg"] = checks[1].cget("bg")
+                button = next(w for w in widgets if isinstance(w, tk.Button)
+                              and w.cget("text") == "ยืนยันและรวมวิดีโอ")
+                button.invoke()
+            finally:
+                if dialog.winfo_exists():
+                    dialog.destroy()
+        root.after(650, confirm)
+        assert show_selector(root, [{}]*3, ["unknown"]*3, scan=scan) == [2]
+        assert observed["bg"] == "#ECF8EF"
+        assert "scan-completed" in called
+    finally:
+        root.destroy()

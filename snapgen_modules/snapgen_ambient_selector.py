@@ -8,6 +8,7 @@ clips before mixing to prevent speech/music leaking into the narration.
 from __future__ import annotations
 
 import math
+import queue
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -21,11 +22,14 @@ def suggested_status(scene, result):
     reason = str((result or {}).get("reason") or "not_checked")
     if scene.get("dialogue") or reason in SPEECH_REASONS:
         return "speech"
+    if result is None:
+        # A prompt is only a hint until the sound itself has been inspected.
+        return "effect" if str(scene.get("sound_effects") or "").strip() else "unknown"
     return "effect" if reason == "included" else "unknown"
 
 
 def scan_effect_statuses(ffmpeg, scenes, durations, *, log=lambda _msg: None,
-                         check_stop=lambda: None, progress=None):
+                         check_stop=lambda: None, progress=None, on_status=None):
     """Read clip audio on CPU; no paid generation or GPU processing."""
     from snapgen_audio_sfx import _analyze_one, _load
 
@@ -47,7 +51,10 @@ def scan_effect_statuses(ffmpeg, scenes, durations, *, log=lambda _msg: None,
                                       preview_only=True)
         except Exception:
             result = {"reason": "scan_failed"}
-        statuses.append(suggested_status(scene, result))
+        status = suggested_status(scene, result)
+        statuses.append(status)
+        if callable(on_status):
+            on_status(index, status)
         if callable(progress):
             progress(index + 1, total)
     return statuses
@@ -59,7 +66,7 @@ def normalized_selection(selected, count):
                    if str(number).isdigit() and 1 <= int(number) <= count})
 
 
-def show_selector(parent, scenes, statuses, selected=None):
+def show_selector(parent, scenes, statuses, selected=None, scan=None):
     """Tk main-thread modal; None means canceled, [] means no clip effects."""
     count = len(scenes)
     initial = normalized_selection(
@@ -70,7 +77,13 @@ def show_selector(parent, scenes, statuses, selected=None):
     dialog.configure(bg="#FFFFFF")
     dialog.resizable(False, True)
     dialog.transient(parent.winfo_toplevel())
-    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+    stop_scan = threading.Event()
+
+    def dismiss():
+        stop_scan.set()
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", dismiss)
 
     outer = tk.Frame(dialog, bg="#FFFFFF")
     outer.pack(fill="both", expand=True, padx=15, pady=13)
@@ -134,12 +147,52 @@ def show_selector(parent, scenes, statuses, selected=None):
 
     def finish():
         result["selected"] = [i + 1 for i, var in enumerate(values) if var.get()]
-        dialog.destroy()
+        dismiss()
+
+    def update_status(index, status):
+        if stop_scan.is_set() or not dialog.winfo_exists():
+            return
+        if index < 0 or index >= len(cards):
+            return
+        bg, fg = colors.get(status, colors["unknown"])
+        cards[index].configure(bg=bg, fg=fg, activebackground=bg)
+
+    updates = queue.Queue()
+
+    def poll_updates():
+        if stop_scan.is_set() or not dialog.winfo_exists():
+            return
+        while not updates.empty():
+            index, status = updates.get_nowait()
+            update_status(index, status)
+        dialog.after(60, poll_updates)
+
+    def begin_scan():
+        if scan is None or stop_scan.is_set():
+            return
+
+        def send_update(index, status):
+            if not stop_scan.is_set():
+                # Tk controls must never be touched by a classifier worker.
+                updates.put((index, status))
+
+        def analyze():
+            try:
+                scan(send_update, stop_scan)
+            except Exception:
+                # No classifier result is treated as a guaranteed safe effect.
+                pass
+
+        threading.Thread(target=analyze, name="AudioEffectPreview",
+                         daemon=True).start()
+
+    dialog.after_idle(begin_scan)
+    dialog.after(60, poll_updates)
 
     tk.Button(footer, text="ยืนยันและรวมวิดีโอ", command=finish,
               bg="#2563EB", fg="#FFFFFF", relief="flat",
               padx=13, pady=6, font=("Segoe UI", 9, "bold")).pack(side="right")
-    tk.Button(footer, text="ยกเลิก", command=dialog.destroy,
+    tk.Button(footer, text="ยกเลิก", command=dismiss,
               bg="#F3F4F6", fg="#475467", relief="flat",
               padx=12, pady=6, font=("Segoe UI", 9)).pack(side="right", padx=7)
     dialog.grab_set()
@@ -147,14 +200,14 @@ def show_selector(parent, scenes, statuses, selected=None):
     return result["selected"]
 
 
-def request_selection(root, page, scenes, statuses, selected=None):
+def request_selection(root, page, scenes, statuses, selected=None, scan=None):
     """Pause worker until the main-thread reviewer confirms or cancels."""
     completed = threading.Event()
     answer = {"selected": None}
 
     def ask():
         try:
-            answer["selected"] = show_selector(page, scenes, statuses, selected)
+            answer["selected"] = show_selector(page, scenes, statuses, selected, scan=scan)
         finally:
             completed.set()
     root.after(0, ask)
