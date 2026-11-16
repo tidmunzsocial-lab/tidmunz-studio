@@ -141,6 +141,8 @@ def test_status_cards_share_size_and_hide_old_credit_control():
         quota = tk.StringVar(value="60 Plus")
         quota_label = tk.Label(mode, textvariable=quota)
         quota_label.pack(side="right")
+        quota_clicks = []
+        quota_label.bind("<Button-1>", lambda _event: quota_clicks.append(True))
         balance = tk.StringVar(value="26")
         g = {
             "credit_status_var": balance,
@@ -158,16 +160,23 @@ def test_status_cards_share_size_and_hide_old_credit_control():
         assert snapgen.winfo_ismapped() and chatgpt.winfo_ismapped()
         assert snapgen.master != chatgpt.master
         assert snapgen.winfo_rooty() < chatgpt.winfo_rooty()
-        assert abs(snapgen.winfo_width() - chatgpt.winfo_width()) < 40
-        assert chatgpt is quota_label
-        assert chatgpt.cget("relief") == "solid"
+        assert snapgen.winfo_width() == chatgpt.winfo_width()
+        assert snapgen.winfo_height() == chatgpt.winfo_height()
+        assert snapgen.cget("bg") == chatgpt.cget("bg") == "#DCE2EA"
         assert old_credit.winfo_manager() == ""
-        assert quota_label.winfo_manager() == "pack"
+        assert quota_label.winfo_manager() == ""
         balance.set("1234")
         quota.set("59 Plus")
         root.update()
         snapgen_labels = snapgen.winfo_children()[0].winfo_children()
+        chatgpt_labels = chatgpt.winfo_children()[0].winfo_children()
+        assert snapgen_labels[0].cget("text") == "SnapGen"
+        assert chatgpt_labels[0].cget("text") == "GPT"
         assert snapgen_labels[-1].cget("text") == "1234"
-        assert chatgpt.cget("text") == "59 Plus"
+        assert chatgpt_labels[-1].cget("text") == "59 Plus"
+        assert snapgen_labels[0].cget("fg") == chatgpt_labels[0].cget("fg")
+        chatgpt_labels[-1].event_generate("<Button-1>")
+        root.update()
+        assert quota_clicks == [True]
     finally:
         root.destroy()

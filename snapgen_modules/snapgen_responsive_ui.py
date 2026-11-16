@@ -107,34 +107,64 @@ def install(root, g, *, font=("Segoe UI", 9, "bold")):
                 actions = tk.Frame(parent, bg="#FFFFFF", height=52)
                 actions.pack(side="top", fill="x", after=toolbar, padx=7, pady=(0, 2))
                 actions.pack_propagate(False)
-                # Keep the original layout: SnapGen credit beside Settings
-                # in the upper toolbar, ChatGPT quota in the lower mode row.
-                # Both get a border; do not combine their rows.
-                credit_var = g.get("credit_status_var")
+                # Reuse original live balances, retain each original toolbar
+                # row and apply the same soft-grey card treatment to both.
+                CARD_BG = "#F3F5F8"
+                CARD_EDGE = "#DCE2EA"
+                CARD_LABEL = "#66758A"
+                CARD_VALUE = "#475569"
+                CARD_W, CARD_H = 196, 36
+                card_font = ("Segoe UI", 9)
+
+                def create_credit_card(host, title, variable, *, padding):
+                    if not isinstance(variable, tk.Variable):
+                        return None
+                    border = tk.Frame(host, bg=CARD_EDGE, padx=1, pady=1)
+                    border.pack(side="right", padx=padding, pady=7)
+                    content = tk.Frame(border, bg=CARD_BG, width=CARD_W, height=CARD_H)
+                    content.pack()
+                    content.pack_propagate(False)
+                    label = tk.Label(
+                        content, text=title, bg=CARD_BG, fg=CARD_LABEL,
+                        font=card_font, anchor="w", padx=10,
+                    )
+                    label.pack(side="left", fill="y")
+                    value = tk.Label(
+                        content, textvariable=variable, bg=CARD_BG, fg=CARD_VALUE,
+                        font=("Segoe UI", 9, "bold"), anchor="e", padx=10,
+                    )
+                    value.pack(side="right", fill="y")
+                    return border, (label, value)
+
                 credit_card = None
-                if isinstance(credit_var, tk.Variable):
-                    credit_card = tk.Frame(actions, bg="#CDD6E2", padx=1, pady=1)
-                    credit_card.pack(side="right", padx=(5, 3), pady=7)
-                    inner = tk.Frame(credit_card, bg="#F2F5FA", width=180, height=36)
-                    inner.pack()
-                    inner.pack_propagate(False)
-                    tk.Label(inner, text="SnapGen เครดิต", bg="#F2F5FA",
-                             fg="#344054", font=font, padx=7).pack(side="left")
-                    tk.Label(inner, textvariable=credit_var, bg="#F2F5FA",
-                             fg="#111827", font=font, padx=7).pack(side="right")
+                credit_result = create_credit_card(
+                    actions, "SnapGen", g.get("credit_status_var"), padding=(5, 3),
+                )
+                if credit_result is not None:
+                    credit_card, _ = credit_result
                     g["_responsive_snapgen_credit"] = credit_card
 
                 quota_label = g.get("bridge_image_quota_label")
-                if isinstance(quota_label, tk.Label):
-                    # Style the existing lower-row widget in place: no clone,
-                    # no extra row, and no duplicate credit variable.
-                    quota_label.configure(
-                        bg="#F2F5FA", fg="#111827", relief="solid",
-                        borderwidth=1, padx=9, pady=8, width=19,
-                        anchor="e", font=font,
+                quota_var = g.get("bridge_image_quota_var")
+                if isinstance(quota_label, tk.Label) and isinstance(quota_var, tk.Variable):
+                    # Keep the bottom row exactly where it was. Hide only
+                    # the original quota label, preserve its click-to-refresh
+                    # callback and render the balance in an equally sized card.
+                    quota_host = quota_label.master
+                    quota_label.pack_forget()
+                    quota_result = create_credit_card(
+                        quota_host, "GPT", quota_var, padding=(8, 12),
                     )
-                    g["_responsive_chatgpt_quota_card"] = quota_label
-
+                    if quota_result is not None:
+                        quota_card, quota_parts = quota_result
+                        for widget in (quota_card, quota_card.winfo_children()[0], *quota_parts):
+                            widget.configure(cursor="hand2")
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _event, original=quota_label:
+                                    original.event_generate("<Button-1>"),
+                            )
+                        g["_responsive_chatgpt_quota_card"] = quota_card
                 # The legacy SnapGen credit control (sometimes rendered as
                 # "...") must not remain next to the new credit display.
                 # Only suppress controls explicitly registered as credit,
