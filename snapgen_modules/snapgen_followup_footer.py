@@ -25,7 +25,13 @@ def label_for_followup(status: dict | None, *, now_ms: int | None = None) -> tup
     if not status.get("alarm_active"):
         return "ติดตาม: ไม่พร้อม", "#FFC107"
     if status.get("checking") or phase == "sending":
-        return "ติดตาม: กำลังตรวจ", "#FFC107"
+        return "ติดตาม: กำลังส่งตรวจ", "#FFC107"
+    if status.get("tool_state") == "awaiting_proof":
+        return "ติดตาม: รอ GPT เรียกบอท", "#FFC107"
+    if status.get("tool_state") == "not_verified":
+        return "ติดตาม: บอทยังไม่ยืนยัน", "#FFC107"
+    if status.get("tool_state") == "repair_unverified":
+        return "ติดตาม: รอตรวจผลแก้", "#FFC107"
     try:
         next_at = int(status.get("next_at") or 0)
         interval = int(status.get("interval_minutes") or 0)

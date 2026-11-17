@@ -38,3 +38,27 @@ def test_auto_only_pauses_for_requested_review(review, only, planned, confirm):
         assert project["done"]["video"] is True
     assert ("confirm" in calls) is confirm
     assert scope["state"]["busy"] is False
+
+def test_effect_selection_always_stops_before_render():
+    """Even a confirmed SFX choice must not start the merge automatically."""
+    calls = []
+    noop = lambda *args, **kwargs: None
+    project = {"done": {"clips": True}}
+    stages = [("effects", "เลือกเสียงเอฟเฟกต์", 1), ("video", "ตัดต่อ", 1)]
+    scope = dict(vars(N), video_mode=True, project=project,
+                 state={"busy": True, "effect_review_pending": True},
+                 only=None, character_limit=None, stages=stages,
+                 review_var=Value(False), stage_var=Value(), detail_var=Value(),
+                 start_btn=Value(), bar=Value(), g={},
+                 ui=lambda fn, *args: fn(*args), refresh_snapgen_credit_warning=noop,
+                 image_provider_for=noop, confirm_credits=lambda **kw: True,
+                 refresh_stages=noop, log=noop, save_project=noop, refresh_all=noop,
+                 set_progress=noop, ask_image_limit_fallback=lambda *args: False)
+    scope["STAGE_FUNCS"] = {"effects": lambda: calls.append("effects"),
+                            "video": lambda: calls.append("video")}
+    load(scope, "worker", parent="start_pipeline")()
+    assert calls == ["effects"]
+    assert project["done"]["effects"] is True
+    assert project["done"].get("video") is None
+    assert project["effect_review_pending"] is True
+    assert scope["state"]["busy"] is False

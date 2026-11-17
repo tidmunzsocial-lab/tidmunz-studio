@@ -5,6 +5,7 @@
 // Pairing: a folder install gets port + token from config.js; the Chrome Web Store build
 // asks Tidmunz for them at /pair (Tidmunz only answers requests coming from an extension).
 try { importScripts("config.js"); } catch (e) { self.TZ_CONFIG = null; }
+try { importScripts("monitor_apps.js"); } catch (e) { self.tmMonitorComposeWithApps = null; }
 try { importScripts("followup.js"); } catch (e) { self.tmFollowupInit = null; }
 
 const PORTS = [8766, 8767, 8768];
@@ -107,7 +108,11 @@ async function loop() {
   async function perform(job, workerKey) {
     let result;
     try {
-      if (job.type === "image" && Date.now() < imagePauseUntil) {
+      if (job.type === "monitor_bootstrap") {
+        result = typeof self.tmFollowupBootstrap==="function" ?
+          await self.tmFollowupBootstrap(job) :
+          {error:"Story-monitor bootstrap not installed"};
+      } else if (job.type === "image" && Date.now() < imagePauseUntil) {
         result = {error: "ChatGPT image queue is cooling down — message not sent", provider_status: 429,
                   send_state: "not_sent", retry_after: Math.ceil((imagePauseUntil - Date.now()) / 1000)};
       } else {
@@ -131,7 +136,7 @@ async function loop() {
     }
     if (job.type === "image" && result && result.provider_status === 429) pauseImages(result.retry_after);
     try { await relay("/result", {id: job.id, ...result}); } catch (e) {}
-    if (!result || !result.error) {
+    if (job.type !== "monitor_bootstrap" && (!result || !result.error)) {
       try {
         const saved = (await chrome.storage.local.get(workerKey))[workerKey];
         if (saved) await chrome.tabs.update(saved, {url: "https://chatgpt.com/"});

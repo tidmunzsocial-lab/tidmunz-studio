@@ -535,8 +535,10 @@ class MobileController:
             self._find_flags(self.root)
         actions = g["mobile_image_actions"]
         slots = []
-        # These are the two real visible slots, not invented slots 3..10.
-        for i in range(min(2, len(g.get("slot_cfg_vars", [])))):
+        # Report every real core Video Slot (the recovered core has three),
+        # never fictional slots. This also exposes the third parallel API job
+        # to mobile status and the AI operator for independent verification.
+        for i in range(len(g.get("slot_cfg_vars", []))):
             cfg = {key: str(value(g["slot_cfg_vars"][i].get(key))) for key in CONFIG_KEYS}
             path = value(g["slot_images"][i])
             buttons = g.get("video_prompt_ai_buttons", [])

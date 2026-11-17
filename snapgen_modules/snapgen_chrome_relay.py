@@ -124,6 +124,10 @@ class _Relay:
             "interval_minutes": max(0, min(1440, int(payload.get("interval_minutes") or 0))),
             "story": str(payload.get("story") or "")[:120],
             "host": str(payload.get("host") or "")[:100],
+            "tool_state": (str(payload.get("tool_state"))
+                           if payload.get("tool_state") in
+                           ("awaiting_proof", "verified_dino", "repair_unverified", "not_verified", "not_checked")
+                           else "not_checked"),
         }
         with self.lock:
             self.followup_payload = data

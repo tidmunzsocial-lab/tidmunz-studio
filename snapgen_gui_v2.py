@@ -3333,8 +3333,33 @@ if callable(_original_poll_and_download) and not getattr(_original_poll_and_down
                 status = str(history.get("status") or "").strip().lower()
                 if status in {"3", "failed", "error", "cancelled", "canceled"}:
                     raise RuntimeError(str(history.get("status_desc") or f"{provider} สร้างวิดีโอไม่สำเร็จ"))
-                pct = history.get("status_percentage") or 0
-                root.after(0, lambda slot=i, value=pct: g["set_slot_state"](slot, "loading", f"{provider} {value}%"))
+                # Provider percentage is per accepted UUID, not overall Auto
+                # progress. Never invent 0% if this model omits the field.
+                raw_pct = history.get("status_percentage")
+                if raw_pct is None and isinstance(detail, dict):
+                    raw_pct = detail.get("status_percentage")
+                pct = None
+                if raw_pct is not None:
+                    try:
+                        number = float(str(raw_pct).strip().rstrip("%"))
+                        if 0 <= number <= 100:
+                            pct = int(number)
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                if pct is not None:
+                    root.after(0, lambda slot=i, value=pct:
+                               g["set_slot_state"](slot, "loading", f"{provider} {value}%"))
+                    record = (g.get("_auto_video_receipt_by_slot") or {}).get(i) or {}
+                    if str(record.get("uuid") or "") == str(uuid):
+                        callback = g.get("_auto_video_generation_progress")
+                        if callable(callback):
+                            try:
+                                callback(i, str(uuid), pct)
+                            except Exception as progress_exc:
+                                g["append_log"](i, f"แสดงเปอร์เซ็นต์คลิปไม่ได้: {str(progress_exc)[:100]}")
+                else:
+                    root.after(0, lambda slot=i:
+                               g["set_slot_state"](slot, "loading", f"{provider} · กำลังสร้าง"))
 
             time.sleep(5)
 

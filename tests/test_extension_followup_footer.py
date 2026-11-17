@@ -45,8 +45,25 @@ class FollowupFooterTests(unittest.TestCase):
         text, colour = label_for_followup(
             {"enabled": True, "alarm_active": True, "checking": True,
              "phase": "idle"}, now_ms=1_800_000_000_000)
-        self.assertEqual(text, "ติดตาม: กำลังตรวจ")
+        self.assertEqual(text, "ติดตาม: กำลังส่งตรวจ")
         self.assertNotIn("กำลังทำงาน", text)
+        self.assertNotEqual(colour, "#4CAF50")
+
+    def test_monitor_does_not_claim_tool_call_until_provider_history_proves_it(self):
+        waiting, colour = label_for_followup(
+            {"enabled": True, "alarm_active": True, "phase": "idle",
+             "tool_state": "awaiting_proof", "next_at": 1800000300000})
+        self.assertEqual(waiting, "ติดตาม: รอ GPT เรียกบอท")
+        self.assertNotEqual(colour, "#4CAF50")
+        unverified, colour = label_for_followup(
+            {"enabled": True, "alarm_active": True, "phase": "idle",
+             "tool_state": "not_verified", "next_at": 1800000300000})
+        self.assertEqual(unverified, "ติดตาม: บอทยังไม่ยืนยัน")
+        self.assertNotEqual(colour, "#4CAF50")
+        repair, colour = label_for_followup(
+            {"enabled": True, "alarm_active": True, "phase": "idle",
+             "tool_state": "repair_unverified", "next_at": 1800000300000})
+        self.assertEqual(repair, "ติดตาม: รอตรวจผลแก้")
         self.assertNotEqual(colour, "#4CAF50")
 
     def test_sound_effect_selector_stops_monitor(self):

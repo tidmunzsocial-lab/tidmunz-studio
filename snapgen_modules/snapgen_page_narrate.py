@@ -190,6 +190,43 @@ def snapgen_temporarily_unavailable(error):
     ))
 
 
+def video_slots_for_auto(selected_slot, available_slots, maximum=3):
+    """Unique real GUI/API Slots for concurrent video jobs, preference first.
+
+    A distinct Slot/receipt is required for each in-flight paid request.  Do
+    not invent a third Slot when the core exposes only two.
+    """
+    try:
+        count = int(available_slots)
+        chosen = int(selected_slot)
+        limit = int(maximum)
+    except (TypeError, ValueError, OverflowError):
+        return ()
+    if count < 1 or not 0 <= chosen < count or limit < 1:
+        return ()
+    return tuple([chosen] + [i for i in range(count) if i != chosen])[:limit]
+
+
+def snapgen_terminal_zero_credit_capacity(history):
+    """Only a terminal, zero-credit provider receipt can unlock a capacity retry."""
+    if not isinstance(history, dict) or str(history.get("status")) != "3":
+        return False
+    if "used_credit" not in history:
+        return False
+    try:
+        if float(history["used_credit"]) != 0.0:
+            return False
+    except (ValueError, TypeError, OverflowError):
+        return False
+    error = str(history.get("error_message") or "").casefold()
+    if "moderat" in error or "content polic" in error or "violat" in error:
+        return False
+    return any(piece in error for piece in (
+        "high traffic", "too many requests", "rate limit",
+        "service temporarily unavailable", "model_under_maintenance",
+    ))
+
+
 def gpt_image_prompt_not_delivered(error):
     """A narrowly classified GPT delivery rejection; unknown outcomes must not be replayed."""
     text = str(error).casefold()
@@ -859,7 +896,8 @@ STAGES = (
 )
 # Slot 2 auto mode: the same pipeline, plus one AI video clip per scene.
 VIDEO_STAGES = (
-    ("analysis", "วิเคราะห์บท", 2),
+    ("monitor", "สร้างแชตติดตามเรื่องและเรียกบอทจริง", 1),
+    ("analysis", "วิเคราะห์บท", 1),
     ("context", "สร้าง Context", 5),
     ("ref_characters", "สร้างตัวละคร", 8),
     ("transcribe", "ฟังเสียง", 6),
@@ -867,20 +905,23 @@ VIDEO_STAGES = (
     ("storyboard", "สตอรี่ชีต", 5),
     ("images", "สร้างรูปฉาก", 19),
     ("motion", "พรอมต์วิดีโอ", 5),
-    ("clips", "สร้างคลิปวิดีโอ", 37),
+    ("clips", "สร้างคลิปวิดีโอ", 36),
+    ("effects", "เลือกเสียงเอฟเฟกต์", 1),
     ("video", "ตัดต่อ", 3),
     ("covers", "สร้างหน้าปก YouTube", 5),
 )
 # Preserve the original visual progress scale for existing unfinished films.
 # New one-page runs explicitly use the expanded stage scale.
 LEGACY_VIDEO_STAGES = (
+    ("monitor", "สร้างแชตติดตามเรื่องและเรียกบอทจริง", 1),
     ("context", "วิเคราะห์บท", 4),
     ("transcribe", "ฟังเสียง", 6),
     ("plan", "วางแผนฉาก", 5),
     ("storyboard", "สตอรี่ชีต", 5),
     ("images", "สร้างรูปฉาก", 20),
     ("motion", "พรอมต์วิดีโอ", 5),
-    ("clips", "สร้างคลิปวิดีโอ", 45),
+    ("clips", "สร้างคลิปวิดีโอ", 43),
+    ("effects", "เลือกเสียงเอฟเฟกต์", 1),
     ("video", "ตัดต่อ", 5),
     ("covers", "สร้างหน้าปก YouTube", 5),
 )
@@ -3686,7 +3727,11 @@ def auto_saved_percent(project, stages):
     # Old project.json files predate the one-page Context/Ref stages. Keep
     # their formerly reported progress (including partial clip work) stable.
     if stages is VIDEO_STAGES and project.get("auto_progress_version") != "one_page":
-        stages = LEGACY_VIDEO_STAGES
+        # Monitoring and SFX review are new user handoffs. Preserve historical
+        # percent for unfinished legacy projects, rather than moving it back.
+        stages = tuple((key, title, weight + (2 if key == "clips" else 0))
+                       for key, title, weight in LEGACY_VIDEO_STAGES
+                       if key not in ("monitor", "effects"))
     done = project.get("done") or {}
     scenes = project.get("scenes") or []
     total = sum(weight for _key, _title, weight in stages)
@@ -4278,7 +4323,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     make_styled_button(run_row, "DANGER", "⏸ หยุด", command=lambda: request_stop()).pack(side="left", padx=6)
     make_styled_button(run_row, "SECONDARY", "เปิดโปรเจกต์", command=lambda: choose_saved_project()).pack(side="left", padx=6)
     if video_mode:
-        make_styled_button(run_row, "SECONDARY", "🖼 เรฟตัวละครใน Auto",
+        make_styled_button(run_row, "SECONDARY", "🖼 เรฟตัวละคร",
                            command=lambda: show_auto_reference_gallery()).pack(side="left", padx=4)
     if video_mode:
         settings_button = tk.Button(run_row, text="ซ่อนตั้งค่า ▴", command=toggle_settings, relief="flat", padx=8)
@@ -4645,8 +4690,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         project = state["project"]
         if project.get("audio") and os.path.normcase(project["audio"]) != os.path.normcase(path):
             # A different narration invalidates timing-dependent stages.
-            for key in ("transcribe", "plan", "storyboard", "images", "motion", "clips", "video"):
+            for key in ("transcribe", "plan", "storyboard", "images", "motion", "clips", "effects", "video"):
                 project["done"].pop(key, None)
+            project.pop("effect_selected_clips", None)
             project["scenes"] = []
             project["relink_unassigned_images"] = False
             project["images_verified"] = False
@@ -5719,9 +5765,75 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return timeline_mod.note(rows)
 
     # ── stages ──
+    def stage_monitor_chat():
+        """Bind one actual ChatGPT chat and both real apps BEFORE script analysis.
+
+        Uses the existing Chrome relay worker queue, never an extra watcher.
+        Chat creation is idempotent by project key and all ambiguous first
+        messages are held for reconciliation rather than submitted twice.
+        """
+        import hashlib
+        import socket
+        from urllib.parse import quote
+        from urllib.request import Request, urlopen
+        project = state["project"]
+        if not video_mode:
+            return
+        story = Path(state["folder"]).name
+        host = socket.gethostname().upper()
+        project_key = hashlib.sha256(
+            str(Path(state["folder"]).resolve()).casefold().encode("utf-8")).hexdigest()
+        prior = project.get("monitor_chat") or {}
+        if prior and (prior.get("story") != story or prior.get("host") != host or
+                      prior.get("project_key") != project_key):
+            raise RuntimeError("แชตติดตามเดิมผูกกับคนละเครื่องหรือเรื่อง ห้ามนำมาใช้ซ้ำ")
+        # Read the existing pair file: the relay may run in another module
+        # instance/process, so RELAY.port in a fresh import can be zero.
+        from snapgen_chrome_relay import data_dir as chrome_data_dir
+        try:
+            relay_link = json.loads((chrome_data_dir() / "chrome_relay.json").read_text(encoding="utf-8"))
+            relay_port = int(relay_link["port"])
+            relay_token = str(relay_link["token"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError("Chrome Extension ยังไม่เชื่อมต่อ กรุณาเปิด Chrome ของ Tidmunz Studio") from exc
+        if not 1000 <= relay_port <= 65535 or len(relay_token) < 12:
+            raise RuntimeError("Chrome relay pairing ไม่ถูกต้อง หยุดก่อนส่งแชต")
+        job = {
+            "type": "monitor_bootstrap",
+            "story": story, "host": host, "project_key": project_key,
+            "existing_url": prior.get("url") or "",
+        }
+        request = Request(
+            "http://127.0.0.1:" + str(relay_port) + "/job?token=" +
+                quote(relay_token, safe=""),
+            data=json.dumps(job, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        log("กำลังสร้าง/ตรวจแชตติดตามประจำเรื่อง และเลือกแอปจริง 2 ตัวใน Chrome")
+        try:
+            with urlopen(request, timeout=150) as response:
+                outcome = json.load(response)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "สถานะแชตติดตามยังยืนยันไม่ได้ ห้ามเปิดแชตใหม่ซ้ำ ให้ตรวจ Chrome/History ก่อน") from exc
+        if not outcome.get("ok") or not outcome.get("url") or not outcome.get("cid"):
+            raise RuntimeError("ยังสร้าง/ผูกแชตติดตามจริงไม่ได้: " +
+                               str(outcome.get("error") or "ไม่ทราบสาเหตุ")[:180])
+        if int(outcome.get("real_apps") or 0) != 2:
+            raise RuntimeError("ไม่พบแอปจริงครบสองตัวในแชตติดตาม ห้ามเริ่มวิเคราะห์บท")
+        project["monitor_chat"] = {
+            "url": outcome["url"], "cid": outcome["cid"],
+            "story": story, "host": host, "project_key": project_key,
+        }
+        project.setdefault("done", {})["monitor"] = True
+        save_project()
+        set_progress("monitor", 1.0, "แชตติดตามประจำเรื่องพร้อม · ผูกแอปจริงสองตัวแล้ว")
+
     def stage_auto_analysis():
         """Validate the selected original story before the shared Prompt-Ref workflow."""
         project = state["project"]
+        if video_mode and not project.get("done", {}).get("monitor"):
+            stage_monitor_chat()
         source = Path(str(project.get("script") or ""))
         audio = Path(str(project.get("audio") or ""))
         if not source.is_file() or not audio.is_file():
@@ -6420,13 +6532,31 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ui(refresh_table)
             if script_dialogues(story_script()) and not any(s.get("words") for s in segments):
                 log("⚠ ข้อความถอดเสียงนี้ไม่มีเวลาของแต่ละคำ จุดตัดบทพูดอาจคลาดได้ราว 1 วินาที")
-            scenes_so_far = []
-            plan_video(segments, float(project["duration"]), names, era, ask,
-                       horror=project.get("style_mode") == "เรื่องผี", progress=progress, out=scenes_so_far,
-                       script=story_script(), direction=project.setdefault("direction", {}),
-                       refs=attachment_names(), aspect=desired_aspect(), economy=economy_on(),
-                       clip_choice=int(project.get("clip_choice") or 0),
-                       video_model=project.get("video_model") or VIDEO_AUTO_MODEL)
+            # Preserve a fully saved plan after the speech audit detected a
+            # metadata omission; redo the audit and cinematographer pass only.
+            _prior = project.get("scenes") or []
+            _audit = project.get("speech_coverage_audit") or {}
+            _reuse_complete_plan = bool(
+                not project.get("done", {}).get("plan")
+                and _audit.get("missing")
+                and len(_prior) >= 100
+                and all(isinstance(s, dict) and s.get("prompt")
+                        and s.get("video_prompt") and s.get("clip_seconds")
+                        and s.get("start") is not None for s in _prior)
+                and abs(float(_prior[0]["start"])) < 2
+                and float(project.get("duration") or 0) - float(_prior[-1]["start"]) < 20
+            )
+            if _reuse_complete_plan:
+                scenes_so_far = _prior
+                log(f"ใช้แผนฉากเดิม {len(scenes_so_far)} ช็อต — ตรวจบทพูดซ้ำ (ไม่ส่ง GPT วางแผนใหม่)")
+            else:
+                scenes_so_far = []
+                plan_video(segments, float(project["duration"]), names, era, ask,
+                           horror=project.get("style_mode") == "เรื่องผี", progress=progress, out=scenes_so_far,
+                           script=story_script(), direction=project.setdefault("direction", {}),
+                           refs=attachment_names(), aspect=desired_aspect(), economy=economy_on(),
+                           clip_choice=int(project.get("clip_choice") or 0),
+                           video_model=project.get("video_model") or VIDEO_AUTO_MODEL)
             if video_mode:
                 speech_audit = verify_script_dialogue_coverage(story_script(), scenes_so_far)
                 project["speech_coverage_audit"] = speech_audit
@@ -6772,9 +6902,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
                 def work(job):
                     grp, first, last, refs, prompt = job
-                    # A paid sheet can be downloaded successfully but fail
-                    # during crop/save because Windows temporarily locks it.
-                    # Reuse and finish the saved sheet; never submit it again.
+                    # Paid SnapGen output can be fully saved even when cropping
+                    # or an AV/indexer lock interrupts the stage. Reuse the exact
+                    # completed sheet rather than submitting another API job.
                     existing_sheet = board_dir / f"sheet_{first:03d}-{last:03d}.png"
                     if existing_sheet.is_file():
                         from PIL import Image
@@ -7766,14 +7896,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         scenes = project["scenes"]
         duration = float(project["duration"])
         durations = segment_durations([s["start"] for s in scenes], duration)
-        effect_selected_numbers = None
-        effect_review = state.get("_premerge_effect_review") if video_mode else None
-        if callable(effect_review):
-            effect_selected_numbers = effect_review(scenes, durations, ffmpeg)
-            if effect_selected_numbers is None:
-                raise Stopped()
-            project["effect_selected_clips"] = effect_selected_numbers
+        if video_mode:
+            # Rendering requires a separate human Continue AFTER the effects
+            # checkpoint. Selecting effects never authorizes the final merge.
+            if not project.get("done", {}).get("effects") or "effect_selected_clips" not in project:
+                raise RuntimeError("ต้องเลือกเสียงเอฟเฟกต์ก่อนตัดต่อ และกด ▶ ทำต่อด้วยตัวเอง")
+            state["effect_review_pending"] = False
+            project.pop("effect_review_pending", None)
             save_project()
+        effect_selected_numbers = project.get("effect_selected_clips") if video_mode else None
         # Postprocess and clip relinking run only after the user confirms.
         finish_postprocess = state.get("_auto_video_postprocess_finalizer")
         if callable(finish_postprocess):
@@ -8950,13 +9081,37 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         assign_clips(scenes, float(project["duration"]), economy_on())
         apply_selected_video_model(project)
         slot_configs = runtime["slot_cfg_vars"]
-        dual_slots = [slot_index] + ([0 if slot_index != 0 else 1] if video_mode and len(slot_configs) >= 2 else [])
+        active_video_slots = video_slots_for_auto(slot_index, len(slot_configs)) if video_mode else (slot_index,)
+        if not active_video_slots:
+            raise RuntimeError("ไม่พบ Video Slot ที่ใช้งานได้สำหรับโฟลว์สร้างคลิป")
         saved_slots = {}
-        for slot_id in dual_slots:
+        for slot_id in active_video_slots:
             cfg = slot_configs[slot_id]
             saved_slots[slot_id] = run_on_ui(lambda c=cfg: (c["model"].get(), c["duration"].get(), c["aspect"].get(), c["resolution"].get()))
         old_async = runtime.get("_auto_video_pipeline_async")
         old_progress = runtime.get("_auto_video_progress")
+
+        def show_auto_generation_progress(slot, uuid, percent):
+            # Use the provider's real per-job status_percentage, never the
+            # overall project percentage or an estimated elapsed-time value.
+            def update():
+                receipt = (runtime.get("_auto_video_receipt_by_slot") or {}).get(slot) or {}
+                scene_number = receipt.get("scene_number")
+                if str(receipt.get("uuid") or "") != str(uuid):
+                    return
+                if not isinstance(scene_number, int) or not 1 <= scene_number <= len(scenes):
+                    return
+                try:
+                    value = int(float(percent))
+                except (ValueError, TypeError, OverflowError):
+                    return
+                if not 0 <= value <= 100:
+                    return
+                state.setdefault("clip_generation_pct_by_scene", {})[scene_number] = value
+                set_progress("clips", state.get("clip_fraction", 0),
+                             f"สร้างคลิป {scene_number}/{len(scenes)} · {value}% · "
+                             f"{len(active_video_slots)} Slot")
+            ui(update)
 
         def show_auto_upscale_progress(slot, scene_number, backend, percent):
             def update():
@@ -8966,8 +9121,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                              f"{base} · อัปสเกล 4K {shot}: {backend} {percent}%")
             ui(update)
 
+        old_generation_progress = runtime.get("_auto_video_generation_progress")
         runtime["_auto_video_pipeline_async"] = True
         runtime["_auto_video_progress"] = show_auto_upscale_progress
+        runtime["_auto_video_generation_progress"] = show_auto_generation_progress
         try:
             finalize_auto_video_postprocesses(wait_for_completion=False)  # enqueue restored upscale without blocking video submissions
             run_clips(project, scenes, todo)
@@ -8981,6 +9138,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     runtime.pop("_auto_video_progress", None)
                 else:
                     runtime["_auto_video_progress"] = old_progress
+                if old_generation_progress is None:
+                    runtime.pop("_auto_video_generation_progress", None)
+                else:
+                    runtime["_auto_video_generation_progress"] = old_generation_progress
                 def put_back():
                     for slot_id, old_cfg in saved_slots.items():
                         cfg = slot_configs[slot_id]
@@ -8993,8 +9154,35 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         # Remaking chosen shots only reports those shots; the whole story is checked by its own run.
         wanted = indices if indices is not None else range(len(scenes))
         missing = [i + 1 for i in wanted if not (scenes[i].get("clip") and os.path.isfile(scenes[i]["clip"]))]
+        if missing and video_mode and indices is None:
+            # Only deferred, provider-confirmed zero-credit capacity failures
+            # may be resubmitted after every independent scene has run.
+            # No second watcher, no speculative repeats of pending UUIDs.
+            for _round in range(5):
+                deferred = [i - 1 for i in missing
+                            if scenes[i - 1].get("clip_capacity_retry_after")
+                            and not scenes[i - 1].get("clip_uuid")
+                            and int(scenes[i - 1].get("clip_capacity_attempts") or 0) <= 5]
+                if not deferred or len(deferred) != len(missing):
+                    break
+                due = max(float(scenes[i].get("clip_capacity_retry_after") or 0) for i in deferred)
+                while time.time() < due:
+                    check_stop()
+                    remaining = max(0, due-time.time())
+                    set_progress("clips", state.get("clip_fraction", 0),
+                                 f"เซิร์ฟเวอร์แออัด · พัก {len(deferred)} ช็อต · รออีก {remaining/60:.1f} นาที")
+                    time.sleep(min(5, max(0.1, remaining)))
+                for i in deferred:
+                    scenes[i].pop("clip_capacity_retry_after", None)
+                save_project()
+                log("ครบเวลาพักเซิร์ฟเวอร์ — ลองเฉพาะช็อตที่ใบรับงานยืนยันเครดิต 0")
+                run_clips(project, scenes, deferred)
+                missing = [i + 1 for i in wanted
+                           if not (scenes[i].get("clip") and os.path.isfile(scenes[i]["clip"]))]
+                if not missing:
+                    break
         if missing:
-            raise RuntimeError(f"ยังขาดคลิปฉาก {', '.join(map(str, missing[:15]))} — กดเริ่มอีกครั้งเพื่อลองใหม่")
+            raise RuntimeError(f"ยังขาดคลิปฉาก {', '.join(map(str, missing[:15]))} — ตรวจ History/เครดิตก่อนทำต่อ")
         log(f"✓ คลิปครบ {len(wanted)} ฉาก" if indices is None else f"✓ เจนคลิปเสร็จ: ช็อต {', '.join(str(i + 1) for i in wanted)}")
 
     def make_scene_clip(scene, i, *, prepared=False, on_submitted=None, slot_override=None):
@@ -9103,10 +9291,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     log(f"ทำตัวอย่างไม่ได้: {str(exc)[:200]}")
 
     def run_clips_dual(project, scenes, todo):
-        """Run at most two charged video submissions; isolate each shot by Slot and UUID.
+        """Run up to three concurrent video submissions on distinct real Slots.
 
-        The GPT author remains serial.  A stop never interrupts an accepted provider
-        request; every in-flight result is saved before leaving the executor.
+        GPT prompt preparation remains serial. Each Slot has its own UUID and
+        download receipt. A Stop waits for in-flight jobs to persist safely.
         """
         if not todo:
             return
@@ -9115,15 +9303,28 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         ensure_story_in_history()
         ensure_continuity()
         ensure_bodies()
-        slots = (slot_index, 0 if slot_index != 0 else 1)
+        slots = video_slots_for_auto(slot_index, len(runtime.get("slot_cfg_vars") or []))
+        if len(slots) < 2:
+            return run_clips_lookahead(project, scenes, todo)
         inflight = deque()
 
         def render(scene, index, submitted, assigned_slot):
             _track_visible_job(state, "videos", index + 1, "active")
             work = deepcopy(scene)
-            work["clip"] = make_scene_clip(
-                work, index, prepared=True, on_submitted=submitted.set,
-                slot_override=assigned_slot)
+            try:
+                work["clip"] = make_scene_clip(
+                    work, index, prepared=True, on_submitted=submitted.set,
+                    slot_override=assigned_slot)
+            except Exception:
+                # Preserve the provider's accepted UUID from the isolated Slot
+                # even if its later download/moderation step fails.
+                if work.get("clip_uuid"):
+                    with state["lock"]:
+                        scene["clip_uuid"] = work["clip_uuid"]
+                        if work.get("clip_error"):
+                            scene["clip_error"] = work["clip_error"]
+                    save_project()
+                raise
             work.pop("clip_error", None)
             with state["lock"]:
                 for key in tuple(scene):
@@ -9135,11 +9336,45 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         item["scene"] = scene
             save_project()
 
+        def defer_terminal_capacity(scene, index, exc):
+            # Unknown / active receipts remain protected. This operation only
+            # unlocks an exact UUID after SnapGen says failed AND used 0 credit.
+            if not snapgen_temporarily_unavailable(exc):
+                return False
+            uid = str(scene.get("clip_uuid") or "").strip()
+            if not uid or not callable(runtime.get("run_json")):
+                return False
+            try:
+                receipt = runtime["run_json"]([
+                    "curl", "-s", "-X", "GET",
+                    "https://api.snapgen.ai/uapi/v1/history/" + uid,
+                    "-H", "x-api-key: " + runtime["api_key_var"].get().strip()],
+                    timeout=60)
+            except Exception:
+                return False
+            if not snapgen_terminal_zero_credit_capacity(receipt):
+                return False
+            with state["lock"]:
+                scene.setdefault("clip_failed_jobs", []).append({
+                    "uuid": uid, "status": "failed",
+                    "error": str(receipt["error_message"])[:300],
+                    "used_credit": 0, "verified_at": int(time.time())})
+                scene.pop("clip_uuid", None)
+                scene.pop("clip_terminal_error", None)
+                scene["clip_error"] = "เซิร์ฟเวอร์แออัด เครดิต 0 — พักช็อตนี้ 30 นาที"
+                scene["clip_capacity_retry_after"] = time.time()+30*60
+                scene["clip_capacity_attempts"] = int(scene.get("clip_capacity_attempts") or 0)+1
+            save_project()
+            log(f"ช็อต {index+1}: History ยืนยันล้มเหลวเครดิต 0 — ทำช็อตอื่นต่อ แล้วค่อยลองใหม่")
+            return True
+
         def finish(record):
-            scene, index, future = record
+            scene, index, future = record[:3]
             try:
                 future.result()
             except Exception as exc:
+                if defer_terminal_capacity(scene, index, exc):
+                    return
                 with state["lock"]:
                     scene["clip_error"] = str(exc)[:300]
                 save_project()
@@ -9160,13 +9395,23 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             except Exception as exc:
                 log(f"ทำตัวอย่างไม่ได้: {str(exc)[:200]}")
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=len(slots)) as pool:
             try:
                 for index in todo:
                     _track_visible_job(state, "videos", index + 1, "queued")
                 for n, index in enumerate(todo):
-                    if len(inflight) >= 2:
-                        finish(inflight.popleft())
+                    while len(inflight) >= len(slots):
+                        # Free whichever Slot actually completes first. FIFO
+                        # waiting would leave a third Slot idle when an older
+                        # paid request is slower than the next one.
+                        completed = next((rec for rec in inflight if rec[2].done()), None)
+                        if completed is None:
+                            wait([rec[2] for rec in inflight], timeout=0.2,
+                                 return_when=FIRST_COMPLETED)
+                            check_stop()
+                            continue
+                        inflight.remove(completed)
+                        finish(completed)
                     check_stop()
                     scene = scenes[index]
                     if not (scene.get("image") and os.path.isfile(scene["image"])):
@@ -9201,26 +9446,31 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     check_stop()
                     state["clip_label"] = (
                         f"สร้างคลิป {n + 1}/{len(todo)} (ฉากที่ {index + 1}) "
-                        f"ด้วย {clip_label(scene)} · 2 Slot")
+                        f"ด้วย {clip_label(scene)} · {len(slots)} Slot")
                     set_progress("clips", state["clip_fraction"], state["clip_label"])
                     submitted = threading.Event()
-                    assigned_slot = slots[n % 2]
+                    occupied = {record[3] for record in inflight}
+                    available = [slot for slot in slots if slot not in occupied]
+                    if not available:
+                        raise RuntimeError("ไม่มี Video Slot ว่างทั้งที่คิวควรปล่อยงานแล้ว")
+                    assigned_slot = available[0]
                     future = pool.submit(render, scene, index, submitted, assigned_slot)
                     future.add_done_callback(lambda _future, number=index + 1:
                                              _track_visible_job(state, "videos", number, None))
-                    inflight.append((scene, index, future))
+                    inflight.append((scene, index, future, assigned_slot))
                     # Do not prepare the next prompt until this request is accepted
                     # by its own Slot.  A failed submission is never retried blindly.
                     while not submitted.wait(0.1):
                         if future.done():
-                            future.result()
+                            # Reconcile terminal zero-credit failures in finish()
+                            # without aborting every independent queued shot.
                             break
                         check_stop()
                 while inflight:
                     finish(inflight.popleft())
             finally:
-                # Even when GPT fails or the user presses Stop, allow both
-                # accepted jobs to finish and persist before exiting the run.
+                # Even when GPT fails or the user presses Stop, allow every
+                # accepted job to finish and persist before exiting the run.
                 while inflight:
                     item = inflight.popleft()
                     try:
@@ -9374,11 +9624,33 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 state["effect_review_pending"] = False
         state["_premerge_effect_review"] = review_audio_effects_before_merge
 
-    STAGE_FUNCS = {"analysis": stage_auto_analysis, "context": stage_context,
+        def stage_effects():
+            # Display the real SFX selector as its own Auto stage.
+            # The monitor stops at this persisted human handoff.
+            project = state["project"]
+            scenes = project["scenes"]
+            ffmpeg = ffmpeg_path()
+            durations = segment_durations(
+                [scene["start"] for scene in scenes], float(project["duration"]))
+            state["effect_review_pending"] = True
+            project["effect_review_pending"] = True
+            save_project()
+            selected = review_audio_effects_before_merge(scenes, durations, ffmpeg)
+            if selected is None:
+                state["effect_review_pending"] = True
+                raise Stopped()
+            project["effect_selected_clips"] = selected
+            state["effect_review_pending"] = True
+            save_project()
+            log("เสียงเอฟเฟกต์เลือกแล้ว — ยังไม่ตัดต่อหรือรวมวิดีโอ รอ ▶ ทำต่อ")
+    else:
+        stage_effects = None
+
+    STAGE_FUNCS = {"monitor": stage_monitor_chat, "analysis": stage_auto_analysis, "context": stage_context,
                    "ref_characters": stage_auto_ref_characters, "transcribe": stage_transcribe,
                    "characters": stage_characters, "plan": stage_plan, "storyboard": stage_storyboard,
                    "images": stage_images, "motion": stage_motion, "clips": stage_clips,
-                   "video": stage_video, "covers": stage_covers}
+                   "effects": stage_effects, "video": stage_video, "covers": stage_covers}
 
     def render_video_selected(force=False):
         project = state["project"]
@@ -9602,6 +9874,26 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         if image_provider_choice not in (None, "gpt_web", "snapgen"):
             raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web หรือ snapgen")
         if video_mode and only == "video":
+            project = state["project"]
+            if not project.get("done", {}).get("effects"):
+                review = state.get("_premerge_effect_review")
+                if not callable(review):
+                    raise RuntimeError("ต้องเลือกเสียงเอฟเฟกต์ก่อนกดตัดต่อ")
+                scenes = project.get("scenes") or []
+                durations = segment_durations(
+                    [scene["start"] for scene in scenes], float(project["duration"]))
+                project["effect_review_pending"] = True
+                state["effect_review_pending"] = True
+                save_project()
+                chosen = review(scenes, durations, ffmpeg_path())
+                if chosen is None:
+                    log("⏸ หยุดแล้ว — ยังไม่ได้ยืนยันเสียงเอฟเฟกต์ ไม่มีการเรนเดอร์")
+                    return
+                project["effect_selected_clips"] = chosen
+                project.setdefault("done", {})["effects"] = True
+                save_project()
+                log("⏸ เลือกเสียงแล้ว — กด ▶ ทำต่ออีกครั้งเพื่อเริ่มตัดต่อ")
+                return
             render_video_selected()
             return
         project = state["project"]
@@ -9739,6 +10031,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                     if image_provider_choice is not None:
                         project["image_stage_providers"]["images"] = image_provider_choice
+                # Rebind an existing story's confirmed main chat when resuming
+                # after a project switch; never create another chat for it.
+                if video_mode and only is None and project.get("done", {}).get("monitor"):
+                    stage_monitor_chat()
                 keys = [only] if only else [k for k, _t, _w in stages]
                 if (video_mode and only is None and stages is VIDEO_STAGES
                         and project.get("auto_progress_version") != "one_page"
@@ -9799,6 +10095,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         project["done"][key] = True
                     save_project()
                     ui(refresh_stages)
+                    if key == "effects" and video_mode and not only:
+                        # Never fall through to render from effects selection.
+                        state["effect_review_pending"] = True
+                        project["effect_review_pending"] = True
+                        save_project()
+                        set_progress("effects", 1.0, "เลือกเสียงเอฟเฟกต์แล้ว · รอกด ▶ ทำต่อเพื่อตัดต่อ")
+                        log("⏸ ถึงขั้นเลือกเสียงเอฟเฟกต์แล้ว — ห้ามรวม/เรนเดอร์โดยอัตโนมัติ")
+                        return
                     if key == "plan" and review_var.get() and not only:
                         set_progress("plan", 1.0, "หยุดให้ตรวจแผน — แก้พรอมต์ได้ แล้วกดเริ่มเพื่อทำต่อ")
                         log("⏸ แผนพร้อมแล้ว ตรวจ/แก้ แล้วกด ▶ เริ่ม เพื่อสร้างรูปต่อ")

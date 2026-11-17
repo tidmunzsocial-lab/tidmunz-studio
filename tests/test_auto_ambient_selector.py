@@ -137,6 +137,8 @@ def test_merge_prompts_for_effects_before_any_video_postprocess(tmp_path):
         return None  # cancel => preserve clips and do not start rendering
     def forbidden_postprocess():
         pytest.fail("Video postprocess began before effect selection")
+    project["done"].pop("effects")
+    project.pop("effect_selected_clips")
     scope["state"]["_premerge_effect_review"] = chooser
     scope["state"]["_auto_video_postprocess_finalizer"] = forbidden_postprocess
     original_clips = [scene["clip"] for scene in project["scenes"]]

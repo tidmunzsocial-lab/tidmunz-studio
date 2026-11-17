@@ -48,7 +48,8 @@ def merge_scope(tmp_path):
     audio.write_bytes(b"narration")
     project = dict(scenes=scenes, script="story.txt", audio=str(audio), aspect="9:16", duration=4,
                    style_mode="approved style", image_count=2, images_verified=False,
-                   done={k: True for k in ("context", "transcribe", "plan", "images", "motion", "clips")})
+                   effect_selected_clips=[],
+                   done={k: True for k in ("context", "transcribe", "plan", "images", "motion", "clips", "effects")})
     state = dict(project=project, folder=str(tmp_path), busy=False, stop=False)
     logs, commands = [], []
 

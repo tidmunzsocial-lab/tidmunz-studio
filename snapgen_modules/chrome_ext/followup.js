@@ -31,7 +31,12 @@
       body:JSON.stringify({
         enabled:!!c.enabled,alarm_active:!!alarm,stop_requested:!!c.stopRequested,
         checking:running,phase:c.phase,next_at:c.nextAt||0,
-        interval_minutes:c.intervalMinutes||0,story:c.story||"",host:c.host||""
+        interval_minutes:c.intervalMinutes||0,story:c.story||"",host:c.host||"",
+        tool_state:c.lastToolMarker?"awaiting_proof":
+          c.lastResult==="dino_invoked_and_auto_advanced"?"verified_dino":
+          c.lastResult==="dino_invoked_repair_unverified"?"repair_unverified":
+          /^(no_tool_invocation|other_tool_called_dino_not_verified|tool_invocation_unverified)$/
+            .test(c.lastResult||"")?"not_verified":"not_checked"
       })
     });
   }
@@ -134,8 +139,9 @@
     const form=edit&&edit.closest("form");
     const buttons=form?[...form.querySelectorAll("button")]:[];
     const draft=String(edit&&(edit.innerText||edit.textContent)||"").trim();
-    const newer=draft.match(/^\[Tidmunz Studio \| สคริปต์ติดตามงานอัตโนมัติ \| (TMF-[0-9]{13}-[0-9]+)\]/);
-    const legacy=draft.match(/^\[Tidmunz Auto Follow-up: (TMF-[0-9]{13}-[0-9]+)\]/);
+    // Real ChatGPT app mentions precede the monitor marker in the composer.
+    const newer=draft.match(/\[Tidmunz Studio \| สคริปต์ติดตามงานอัตโนมัติ \| (TMF-[0-9]{13}-[0-9]+)\]/);
+    const legacy=draft.match(/\[Tidmunz Auto Follow-up: (TMF-[0-9]{13}-[0-9]+)\]/);
     return {
       route:location.pathname,match:location.pathname.endsWith("/c/"+cid),
       formCount:document.querySelectorAll("form").length,
@@ -157,13 +163,18 @@
       .filter(e=>e.isConnected&&e.closest("form"));
     const edit=editors.find(e=>{
       const draft=String(e.innerText||e.textContent||"").trim();
-      return draft.startsWith("[Tidmunz Studio | สคริปต์ติดตามงานอัตโนมัติ | "+marker+"]") ||
-        draft.startsWith("[Tidmunz Auto Follow-up: "+marker+"]");
+      return draft.includes("[Tidmunz Studio | สคริปต์ติดตามงานอัตโนมัติ | "+marker+"]") ||
+        draft.includes("[Tidmunz Auto Follow-up: "+marker+"]");
     });
     const form=edit&&edit.closest("form");
     const text=String(edit&&(edit.innerText||edit.textContent)||"").trim();
     if(!form || !story || !host || !text.includes("เครื่อง: "+host+"; โปรเจกต์: "+story+";"))
       return {attempted:false,reason:"not_owned_monitor_draft"};
+    // Old plain-text monitor drafts must NOT be sent as a fake bot mention.
+    const apps=[...edit.querySelectorAll("[app-mention-path]")].map(x=>x.getAttribute("app-mention-path"));
+    if(!["app://plugins_6aebd38bc5588191808c3cbd710ded69",
+          "app://asdk_app_6afac8c38ba88191afe3e6f5a07f43eb"].every(x=>apps.includes(x)))
+      return {attempted:false,reason:"real_app_mentions_missing"};
     if([...document.querySelectorAll('[data-message-author-role="user"]')]
         .some(x=>(x.innerText||x.textContent||"").includes(marker)))
       return {attempted:false,reason:"marker_already_visible"};
@@ -196,6 +207,43 @@
       })};
     }catch(_){return {found:false};}
   }
+  async function inspectToolProof(marker,cid){
+    // Read-only provider history. A sent user message is not proof of a tool
+    // call, and a tool call is not proof that Tidmunz Auto was fixed.
+    if(!location.pathname.endsWith("/c/"+cid))return {ok:false,error:"wrong_chat"};
+    try{
+      const session=await(await fetch("/api/auth/session",{cache:"no-store"})).json();
+      if(!session.accessToken)return {ok:false,error:"logged_out"};
+      const response=await fetch("/backend-api/conversation/"+cid,
+        {cache:"no-store",headers:{Authorization:"Bearer "+session.accessToken}});
+      if(!response.ok)return {ok:false,error:"history_http_"+response.status};
+      const data=await response.json();
+      const messages=Object.values(data.mapping||{})
+        .map(node=>node&&node.message).filter(Boolean)
+        .sort((a,b)=>(a.create_time||0)-(b.create_time||0));
+      const index=messages.findLastIndex(msg=>msg.author&&msg.author.role==="user"&&
+        ((msg.content&&msg.content.parts)||[]).some(x=>typeof x==="string"&&x.includes(marker)));
+      if(index<0)return {ok:false,error:"monitor_marker_not_found"};
+      const later=messages.slice(index+1);
+      const toolMessages=later.filter(msg=>
+        (msg.author&&msg.author.role==="tool") ||
+        (msg.author&&msg.author.role==="assistant"&&
+         msg.recipient&&msg.recipient!=="all"&&msg.recipient!==""));
+      const dinoConfirmed=toolMessages.some(msg=>{
+        const evidence=JSON.stringify({
+          recipient:msg.recipient,
+          author:msg.author,
+          metadata:msg.metadata,
+          content:msg.author&&msg.author.role==="assistant"?msg.content:null,
+        });
+        return /Dino[_ -]?Bot[_ -]?Tunnel|dino-bot-tunnel|asdk_app_6afac8c38ba88191afe3e6f5a07f43eb/i.test(evidence);
+      });
+      const finished=later.some(msg=>msg.author&&msg.author.role==="assistant"&&
+        msg.end_turn===true && (!msg.recipient||msg.recipient==="all"));
+      return {ok:true,finished,toolCalls:toolMessages.length,dinoConfirmed};
+    }catch(_){return {ok:false,error:"history_unreadable"};}
+  }
+
   async function tab(conf){
     if(conf.tabId){
       try{
@@ -273,6 +321,49 @@
         }
         await save(c);return;
       }
+      if(c.lastToolMarker){
+        const current=await tab(c);
+        await ready(current,c.cid);
+        let proof=null;
+        try{proof=await inPage(current.id,inspectToolProof,[c.lastToolMarker,c.cid]);}
+        catch(_){}
+        if(proof&&proof.ok&&proof.finished){
+          c.lastToolMarker="";
+          c.lastResult=proof.dinoConfirmed?"dino_bot_invoked":
+            proof.toolCalls?"other_tool_called_dino_not_verified":"no_tool_invocation";
+          if(!proof.dinoConfirmed){
+            c.lastError="GPT ไม่ยืนยันว่าเรียก Dino Bot Tunnel จริง ต้องติดตามแก้ไขต่อ";
+            c.nextAt=Math.min(c.nextAt||Date.now()+5*MIN,Date.now()+5*MIN);
+          }else{
+            // A real tool invocation alone is not evidence of a repaired Auto.
+            // The existing program's authenticated status must advance.
+            let after=null;
+            try{after=await status();}catch(_){}
+            const before=c.lastProgress||{};
+            const advanced=after && (
+              after.busy===true ||
+              Number(after.clips||0)>Number(before.clips||0) ||
+              Number(after.images||0)>Number(before.images||0) ||
+              after.effect_review_pending===true || after.complete===true
+            );
+            if(!advanced){
+              c.lastResult="dino_invoked_repair_unverified";
+              c.lastError="เรียกบอทแล้ว แต่ Auto ยังไม่ยืนยันว่ากลับมาทำงาน; ตรวจและแก้ต่อ";
+              c.nextAt=Math.min(c.nextAt||Date.now()+5*MIN,Date.now()+5*MIN);
+            }else{
+              c.lastResult="dino_invoked_and_auto_advanced";
+              c.lastError="";
+            }
+          }
+          await save(c);
+        }else{
+          if(Date.now()-(c.lastToolAt||c.lastAt||Date.now())>20*MIN){
+            c.lastResult="tool_invocation_unverified";
+            c.lastError="GPT ไม่ยืนยันการเรียกบอทภายใน 20 นาที ตรวจแชตเดิมก่อนส่งซ้ำ";
+          }
+          c.nextAt=Date.now()+2*MIN;await save(c);return;
+        }
+      }
       if(!force&&Date.now()<(c.nextAt||0))return;
       // Do not send an unbound bot name or a Tailscale link for another PC.
       if(!live.monitor_bot || !live.tailscale_url){
@@ -280,7 +371,8 @@
         c.nextAt=Date.now()+5*MIN;await save(c);return;
       }
       const s=live,now=Date.now(),m=minutes(s,c.lastProgress);
-      c.lastProgress={clips:s.clips,images:s.images,at:now};
+      c.lastProgress={clips:s.clips,images:s.images,busy:s.busy,
+                      stage:String(s.stage||""),at:now};
       if(s.complete&&c.lastResult==="finished_sent"){
         c.enabled=false;c.phase="complete";c.nextAt=0;await save(c);return;
       }
@@ -355,11 +447,24 @@
       }
       const stillEnabled=await load();
       if(!stillEnabled.enabled||stillEnabled.stopRequested)return;
-      const result=await injected.page(t.id,injected.send,[{
-        type:"chat",conversation_id:c.cid,prompt,images:[],files:[]
+      if(typeof self.tmMonitorComposeWithApps!=="function")
+        throw Error("Real ChatGPT app mention helper unavailable; plain text is forbidden");
+      const result=await inPage(t.id,self.tmMonitorComposeWithApps,[{
+        cid:c.cid,prompt,marker
       }]);
-      let confirmed=!!(result&&result.ok&&result.user_message_id);
-      if(!confirmed)confirmed=!!(await inPage(t.id,findMarker,[marker,c.cid])).found;
+      if(!result || !result.attempted || !result.appMentionsVerified){
+        c.phase="idle";c.marker="";c.nextAt=Date.now()+2*MIN;
+        c.lastError=String(result&&result.error||"Cannot select both actual apps").slice(0,200);
+        await save(c);return;
+      }
+      let confirmed=false;
+      for(let attempts=0;attempts<16;attempts++){
+        await delay(1000);
+        try{
+          const found=await inPage(t.id,findMarker,[marker,c.cid]);
+          if(found&&found.found){confirmed=true;break;}
+        }catch(_){}
+      }
       if(!confirmed){
         if(result&&result.send_state==="not_sent"){
           c.phase="idle";c.marker="";c.nextAt=Date.now()+10*MIN;
@@ -372,7 +477,12 @@
       }
       c.phase=s.complete?"complete":"idle";c.enabled=!s.complete;
       c.marker="";c.sentCount++;c.dailyCount++;c.confirmedAt=Date.now();
-      c.errors=0;c.lastResult=s.complete?"finished_sent":"sent";
+      c.errors=0;
+      // Message delivery and app selection are proven. Whether GPT actually
+      // invoked Dino's remote tool (and repaired Auto) is not proven here.
+      c.lastResult=s.complete?"finished_sent":"sent_with_real_apps_awaiting_tool_proof";
+      c.lastToolMarker=marker;
+      c.lastToolAt=Date.now();
       c.nextAt=s.complete?0:Date.now()+m*MIN;c.lastError="";await save(c);
     }catch(e){
       c=await load();
@@ -394,6 +504,129 @@
       reportState().catch(()=>{});
     }
   }
+  // Called through the program's EXISTING /job relay before story analysis.
+  // A separate, real chat is created for each project key. Never repeat a
+  // possibly sent first message just because Chrome or GPT answered slowly.
+  self.tmFollowupBootstrap=async function(job){
+    if(!injected||!self.tmMonitorComposeWithApps)
+      return {error:"Tidmunz Chrome app-mention bridge is unavailable"};
+    const projectKey=String(job.project_key||"");
+    const story=String(job.story||"").trim(),host=String(job.host||"").trim();
+    if(!/^[a-f0-9]{64}$/.test(projectKey)||!story||story.length>160||
+       !/^DESKTOP-[A-Za-z0-9-]{4,40}$/.test(host))
+      return {error:"Invalid story/device bootstrap key"};
+    const live=await status();
+    if(live.story!==story||live.host.toUpperCase()!==host.toUpperCase())
+      return {error:"Project/host changed; refusing wrong-machine chat"};
+    if(live.complete||live.effect_review_pending)
+      return {error:"Project already passed the monitor handoff"};
+    let c=await load();
+    if(c.phase==="sending"||c.phase==="uncertain")
+      return {error:"Prior monitor send has uncertain receipt; do not create a new chat"};
+    const KEY="tmMonitorStoryChats", PENDING="tmMonitorBootstrapPending";
+    const all=(await chrome.storage.local.get([KEY,PENDING]));
+    const existing=all[KEY]||{},mapped=existing[projectKey];
+    const requested=parse(job.existing_url);
+    if(mapped && (mapped.story!==story || mapped.host!==host))
+      return {error:"Saved monitor chat belongs to another machine or story"};
+    if(mapped && requested && mapped.cid!==requested.cid)
+      return {error:"Project key is bound to another chat; reconcile before continuing"};
+    if(requested && !mapped)
+      return {error:"Project has a chat URL but Chrome has no confirmed app-bound record; reconcile manually"};
+    let binding=mapped||null;
+    async function bind(entry){
+      const parsed=parse(entry.url);
+      if(!parsed)throw Error("Invalid confirmed ChatGPT conversation URL");
+      if(c.enabled && c.host===host && c.story===story && c.cid===parsed.cid)
+        return {ok:true,cid:parsed.cid,url:parsed.url,reused:true,real_apps:2};
+      if(c.phase==="sending"||c.phase==="uncertain")
+        throw Error("Old monitor send must be reconciled first");
+      c.enabled=true;c.stopRequested=false;c.phase="idle";c.marker="";
+      c.cid=parsed.cid;c.url=parsed.url;c.host=host;c.story=story;
+      c.errors=0;c.lastError="";c.lastResult="project_chat_bound";
+      c.nextAt=Date.now()+MIN;
+      await save(c);
+      await chrome.alarms.create(ALARM,{periodInMinutes:1});
+      return {ok:true,cid:parsed.cid,url:parsed.url,reused:!!entry.reused,real_apps:2};
+    }
+    if(binding){
+      const result=await bind(binding);
+      if(!mapped){
+        existing[projectKey]={url:result.url,cid:result.cid,story,host};
+        await chrome.storage.local.set({[KEY]:existing});
+      }
+      return result;
+    }
+    let pending=all[PENDING];
+    if(pending && pending.projectKey!==projectKey)
+      return {error:"Another project chat creation is awaiting confirmation; no duplicates"};
+    let t;
+    if(pending){
+      try{t=await chrome.tabs.get(pending.tabId);}
+      catch(_){return {error:"An earlier story-chat send may have succeeded; its tab is missing; manual reconciliation required"};}
+    }else{
+      const wins=await chrome.windows.getAll({windowTypes:["normal"]});
+      if(!wins.length)return {error:"Open Tidmunz Studio Chrome first"};
+      t=await chrome.tabs.create({windowId:wins[0].id,url:"https://chatgpt.com/",active:false,pinned:false});
+      await chrome.tabs.update(t.id,{autoDiscardable:false});
+      pending={projectKey,story,host,tabId:t.id,marker:"TMB-"+Date.now(),
+               attempted:false,createdAt:Date.now()};
+      await chrome.storage.local.set({[PENDING]:pending});
+    }
+    let cid=null;
+    async function discover(){
+      const tab=await chrome.tabs.get(t.id);
+      const found=parse(tab.url||"");
+      if(!found)return false;
+      cid=found.cid;
+      try{const check=await inPage(t.id,findMarker,[pending.marker,cid]);return !!(check&&check.found);}
+      catch(_){return false;}
+    }
+    if(!pending.attempted){
+      for(let attempt=0;attempt<36;attempt++){
+        try{
+          const check=await inPage(t.id,()=>{
+            return location.hostname==="chatgpt.com" && location.pathname==="/" &&
+              !!document.querySelector('[contenteditable="true"]');
+          });
+          if(check)break;
+        }catch(_){}
+        await delay(700);
+        if(attempt===35)return {error:"New ChatGPT composer not ready"};
+      }
+      const tab=await chrome.tabs.get(t.id);
+      await chrome.windows.update(tab.windowId,{state:"normal",focused:true});
+      await chrome.tabs.update(t.id,{active:true});
+      const prompt="[Tidmunz Studio | เริ่มแชตติดตามเรื่อง | "+pending.marker+"]\n"+
+        "เรื่อง: "+story+"; เครื่อง: "+host+". นี่คือแชตหลักสำหรับติดตามเรื่องนี้เท่านั้น. "+
+        "ให้ใช้ Tidmunz Studio AI Operator ร่วมกับ Dino Bot Tunnel ของเครื่องนี้จริง: "+
+        "ตรวจยืนยันเครื่องและสถานะ Auto แบบอ่านอย่างเดียวก่อน ห้ามสร้างคลิปหรือแก้ไฟล์ในการเริ่มแชต. "+
+        "เมื่อส่วนขยายส่งข้อความติดตามในรอบถัดไป จึงค่อยตรวจ แก้ไขเมื่อปลอดภัย สั่งทำต่อ และยืนยันผล. "+
+        "ห้ามใช้บอทจากเครื่องอื่น ห้ามส่งงานที่มี UUID รอผลซ้ำ และหยุดก่อนรวมวิดีโอเพื่อรอเลือกเสียง.";
+      const result=await inPage(t.id,self.tmMonitorComposeWithApps,[{prompt,marker:pending.marker}]);
+      if(!result || !result.attempted){
+        // The tab is dedicated to this project and could contain a partial
+        // app-menu draft; never create another automatically.
+        return {error:"Cannot select real apps in new chat: "+
+          String(result&&result.error||"unknown").slice(0,150)};
+      }
+      pending.attempted=true;
+      await chrome.storage.local.set({[PENDING]:pending});
+    }
+    let confirmed=false;
+    for(let i=0;i<75;i++){
+      await delay(1000);
+      if(await discover()){confirmed=true;break;}
+    }
+    if(!confirmed)
+      return {error:"Story-chat send unconfirmed; check the dedicated Chrome tab before retrying"};
+    binding={cid,url:"https://chatgpt.com/c/"+cid,story,host};
+    existing[projectKey]=binding;
+    await chrome.storage.local.set({[KEY]:existing});
+    await chrome.storage.local.remove(PENDING);
+    return await bind(binding);
+  };
+
   self.tmFollowupReport=()=>reportState().catch(()=>{});
   self.tmFollowupInit=(callbacks)=>{
     if(injected)return;
