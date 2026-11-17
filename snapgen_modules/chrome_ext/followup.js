@@ -244,19 +244,63 @@
     }catch(_){return {ok:false,error:"history_unreadable"};}
   }
 
-  async function tab(conf){
-    if(conf.tabId){
-      try{
-        const t=await chrome.tabs.get(conf.tabId);
-        if(/^https:\/\/chatgpt\.com\//.test(t.url||t.pendingUrl||""))return t;
-      }catch(_){}
+  const MONITOR_TAB="tmMonitorOwnedTabId";
+  async function safeToSwitch(t) {
+    // Never navigate away from a user's draft or a GPT response in progress.
+    try {
+      const result=await inPage(t.id,() => {
+        const input=document.querySelector('form [contenteditable="true"]');
+        const form=input && input.closest("form");
+        const hasDraft=!!(input && (input.innerText||"").trim());
+        const hasChips=!!(form && form.querySelector("[app-mention-path]"));
+        const responding=!!document.querySelector(
+          'button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="หยุดสร้าง"]');
+        return {ready:!!input,hasDraft,hasChips,responding};
+      });
+      return !!(result&&result.ready&&!result.hasDraft&&!result.hasChips&&!result.responding);
+    }catch(_){return false;}
+  }
+  async function reuseMonitorTab({blank=false, preferredId=0}={}){
+    // Only an ID explicitly created/adopted by this extension may be
+    // repurposed for a NEW project. The saved follow-up tabId can point to
+    // the user's active ChatGPT conversation and must never be hijacked.
+    const saved=(await chrome.storage.local.get(MONITOR_TAB));
+    const candidates=[saved[MONITOR_TAB]].filter(id=>Number.isInteger(id)&&id>0);
+    for (const id of candidates) {
+      let t=null;
+      try{t=await chrome.tabs.get(id);}catch(_){}
+      if(!t||!/^https:\/\/chatgpt\.com\//.test(t.url||t.pendingUrl||""))continue;
+      if(blank&&(t.url||"")!=="https://chatgpt.com/"){
+        if(!await safeToSwitch(t))
+          throw Error("แท็บติดตามเดิมยังมีข้อความร่างหรือ GPT กำลังตอบ ห้ามเปิดแท็บใหม่ซ้ำ");
+        t=await chrome.tabs.update(t.id,{url:"https://chatgpt.com/"});
+      }else if(blank && !await safeToSwitch(t)) {
+        throw Error("แท็บติดตามเดิมยังมีข้อความร่าง ห้ามเปิดแท็บใหม่ซ้ำ");
+      }
+      await chrome.storage.local.set({[MONITOR_TAB]:t.id});
+      return t;
     }
     const wins=await chrome.windows.getAll({windowTypes:["normal"]});
     if(!wins.length)throw Error("ต้องเปิด Chrome ของ Tidmunz Studio");
     const t=await chrome.tabs.create({windowId:wins[0].id,
-      url:"https://chatgpt.com/c/"+conf.cid,active:false,pinned:false});
+      url:"https://chatgpt.com/",active:false,pinned:false});
     await chrome.tabs.update(t.id,{autoDiscardable:false}).catch(()=>{});
-    conf.tabId=t.id;await save(conf);
+    await chrome.storage.local.set({[MONITOR_TAB]:t.id});
+    return t;
+  }
+  async function tab(conf){
+    // The user may have explicitly bound the existing project chat. Use
+    // that tab only for the SAME conversation, not to start a new project.
+    if(conf.tabId){
+      try{
+        const existing=await chrome.tabs.get(conf.tabId);
+        if(parse(existing.url||"")?.cid===conf.cid)return existing;
+      }catch(_){}
+    }
+    // All automatically opened monitor chats share the extension-owned tab.
+    // Image workers stay separate so parallel image jobs are not interrupted.
+    const t=await reuseMonitorTab();
+    if(conf.tabId!==t.id){conf.tabId=t.id;await save(conf);}
     return t;
   }
   async function ready(t,cid){
@@ -265,8 +309,11 @@
       try{const u=new URL(raw);return u.hostname==="chatgpt.com"&&u.pathname.endsWith("/c/"+cid);}
       catch(_){return false;}
     };
-    if(!matches(t.url||"")&&!matches(t.pendingUrl||""))
+    if(!matches(t.url||"")&&!matches(t.pendingUrl||"")){
+      if(!await safeToSwitch(t))
+        throw Error("แท็บติดตามเดิมมีข้อความร่างหรือ GPT ยังตอบอยู่ ไม่สลับแชตทิ้ง");
       await chrome.tabs.update(t.id,{url:target});
+    }
     for(let i=0;i<38;i++){
       await delay(900);
       try{
@@ -562,13 +609,15 @@
       return {error:"Another project chat creation is awaiting confirmation; no duplicates"};
     let t;
     if(pending){
-      try{t=await chrome.tabs.get(pending.tabId);}
-      catch(_){return {error:"An earlier story-chat send may have succeeded; its tab is missing; manual reconciliation required"};}
+      try{
+        t=await chrome.tabs.get(pending.tabId);
+        await chrome.storage.local.set({[MONITOR_TAB]:t.id});
+      }catch(_){return {error:"An earlier story-chat send may have succeeded; its tab is missing; manual reconciliation required"};}
     }else{
-      const wins=await chrome.windows.getAll({windowTypes:["normal"]});
-      if(!wins.length)return {error:"Open Tidmunz Studio Chrome first"};
-      t=await chrome.tabs.create({windowId:wins[0].id,url:"https://chatgpt.com/",active:false,pinned:false});
-      await chrome.tabs.update(t.id,{autoDiscardable:false});
+      // The next project must navigate our one owned monitor tab rather than
+      // append another ChatGPT tab per project or per failed bootstrap.
+      try{t=await reuseMonitorTab({blank:true});}
+      catch(e){return {error:String(e.message||e)};}
       pending={projectKey,story,host,tabId:t.id,marker:"TMB-"+Date.now(),
                attempted:false,createdAt:Date.now()};
       await chrome.storage.local.set({[PENDING]:pending});

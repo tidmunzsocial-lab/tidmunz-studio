@@ -26,45 +26,58 @@ self.tmMonitorComposeWithApps = async function (payload) {
   if (!input) return {attempted:false,error:"ChatGPT composer not available"};
   if ((input.innerText || "").trim())
     return {attempted:false,error:"ChatGPT composer contains a draft"};
-  const addButton = () => [...document.querySelectorAll("button")].find(b =>
-    /(เพิ่มไฟล์และอื่นๆ|add files and more|add files)/i.test(b.getAttribute("aria-label") || "") && visible(b));
-  async function selectFromMenu(name) {
-    const plus=addButton();
-    if (!plus) return false;
-    plus.click();
-    await sleep(400);
-    const findChoice=()=>[...document.querySelectorAll("button")].find(el => {
-      const value=(el.innerText || "").trim();
-      return visible(el) && value.startsWith(name) && value.length < name.length*3 + 12;
-    });
-    let button=findChoice();
-    if (!button && name === "Dino Bot Tunnel") {
-      // In the actual ChatGPT UI, Tidmunz is available via the Plus menu,
-      // while Dino is surfaced by typing @dino into the same real composer.
-      document.dispatchEvent(new KeyboardEvent("keydown",{
-        key:"Escape",code:"Escape",bubbles:true
-      }));
-      const paragraph=input.querySelector("p:last-child") || input;
-      const selection=window.getSelection(),range=document.createRange();
-      range.selectNodeContents(paragraph);range.collapse(false);
-      selection.removeAllRanges();selection.addRange(range);
-      input.focus();
-      if (!document.execCommand("insertText",false," @dino")) return false;
-      await sleep(600);
-      button=findChoice();
+  // ChatGPT's Plus menu may show only "Search plugins"; the real plugin
+  // mention chooser is opened by typing @name in the actual composer.
+  // Use the UI's real suggestions, verify the exact chip path, never insert
+  // a plain-text fake bot name or send on a failed selection.
+  const choices = [
+    ["Tidmunz Studio AI Operator", "app://plugins_6aebd38bc5588191808c3cbd710ded69", "@tidmunz"],
+    ["Dino Bot Tunnel", "app://asdk_app_6afac8c38ba88191afe3e6f5a07f43eb", " @dino"],
+  ];
+  function resetOwnedDraft() {
+    // Called only after the composer was confirmed empty on entry. A failed
+    // mention selection must not poison the dedicated pending tab for retry.
+    const text=(input.innerText||"").trim();
+    if (/Tidmunz Studio \|/.test(text)) return;
+    const known=/^(?:(?:Tidmunz Studio AI Operator|Dino Bot Tunnel|@tidmunz|@dino)\s*)+$/;
+    if (!known.test(text)) return;
+    const sel=window.getSelection(),range=document.createRange();
+    range.selectNodeContents(input);
+    sel.removeAllRanges();sel.addRange(range);
+    input.focus();
+    document.execCommand("delete",false);
+  }
+  function moveCaretToEnd() {
+    const paragraph=input.querySelector("p:last-child") || input;
+    const selection=window.getSelection(),range=document.createRange();
+    range.selectNodeContents(paragraph);range.collapse(false);
+    selection.removeAllRanges();selection.addRange(range);
+    input.focus();
+  }
+  async function selectActualApp(name,path,query) {
+    moveCaretToEnd();
+    if (!document.execCommand("insertText",false,query)) return false;
+    let button=null;
+    for (let attempt=0; attempt<16; attempt++) {
+      await sleep(250);
+      button=[...document.querySelectorAll("button")].find(el => {
+        const label=(el.innerText||"").trim();
+        return visible(el) && label.startsWith(name) &&
+          label.length < name.length*3+40;
+      });
+      if (button) break;
     }
     if (!button) return false;
     button.click();
-    await sleep(350);
-    return true;
+    await sleep(250);
+    return [...input.querySelectorAll("[app-mention-path]")]
+      .some(el => el.getAttribute("app-mention-path")===path);
   }
-  for (const [name,path] of expected) {
-    const ok=await selectFromMenu(name);
-    if (!ok)
-      return {attempted:false,error:"App not selectable in ChatGPT menu: "+name};
-    const actual=[...input.querySelectorAll("[app-mention-path]")].map(el => el.getAttribute("app-mention-path"));
-    if (!actual.includes(path))
-      return {attempted:false,error:"ChatGPT did not create a real app mention: "+name};
+  for (const [name,path,query] of choices) {
+    if (!await selectActualApp(name,path,query)) {
+      resetOwnedDraft();
+      return {attempted:false,error:"Real ChatGPT app unavailable in @ menu: "+name};
+    }
   }
   const apps=[...input.querySelectorAll("[app-mention-path]")].map(el => el.getAttribute("app-mention-path"));
   if (!expected.every(([,path])=>apps.includes(path)) || apps.length !== 2)

@@ -18,7 +18,7 @@ def test_composer_fallback_in_all_five_prep_send_and_verify_paths():
 
 
 def test_extension_version_bumped_to_reload_previous_worker():
-    assert json.loads(MANIFEST.read_text(encoding="utf-8"))["version"] == "1.0.53"
+    assert json.loads(MANIFEST.read_text(encoding="utf-8"))["version"] == "1.0.54"
 
 
 def test_open_page_accepts_contenteditable_without_legacy_prosemirror_role():

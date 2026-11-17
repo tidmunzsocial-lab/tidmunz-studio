@@ -1,3 +1,15 @@
+- 2026-11-17 Chrome monitor tab & real app mention fix: ChatGPT no longer
+  exposes the Tidmunz app in the old Plus-menu button list. The Tidmunz
+  Chrome extension uses native @tidmunz and @dino autocomplete in the actual
+  ChatGPT composer, validates the two exact app-mention-path chips and
+  refuses to send if either is unavailable. Project monitoring now reuses
+  exactly one extension-owned chat tab across stories, never repurposes the
+  user's active/manual tab, and refuses to navigate away from drafts or a
+  responding assistant. The two image worker tabs remain separately owned
+  for parallel image generation. Extension manifest bumped 1.0.53 -> 1.0.54.
+  Tests cover real DOM chip paths, no fake text, tab reuse, draft protection,
+  and the follow-up send/stop behavior. Existing conversations/receipts stay
+  intact and no automated duplicate retry is introduced.
 - 2026-11-17: Retroactive Auto monitoring for existing partial films: if the
   per-story monitor binding is missing or incomplete, run only the monitor
   bootstrap once BEFORE resuming the currently requested stage; preserve every

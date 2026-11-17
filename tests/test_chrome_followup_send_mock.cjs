@@ -13,10 +13,12 @@ let conf = { enabled:true, cid:CHAT, url:"https://chatgpt.com/c/"+CHAT,
 const alarmListeners = [];
 const tab = { id: 1, url:"https://chatgpt.com/c/"+CHAT, windowId:1 };
 global.self = global;
+global.self.tmMonitorComposeWithApps=function tmMonitorComposeWithApps(){};
+const localStore={tmProjectFollowup:conf};
 global.chrome = {
   storage:{ local:{
-    get: async key => ({[key]:{...conf}}),
-    set: async item => {conf={...item.tmProjectFollowup};},
+    get: async key => Object.fromEntries((Array.isArray(key)?key:[key]).map(k=>[k,localStore[k]])),
+    set: async item => {Object.assign(localStore,item);if(item.tmProjectFollowup)conf={...item.tmProjectFollowup};},
   }},
   alarms:{
     create: name => calls.alarms.push(name),
@@ -29,7 +31,15 @@ global.chrome = {
     create:async()=>tab
   },
   windows:{update:async()=>{}, getAll:async()=>[{id:1}]},
-  scripting:{ executeScript:async()=>[{result:{ok:true}}] }
+  scripting:{ executeScript:async({func,args})=>{
+    if(func===global.self.tmMonitorComposeWithApps){
+      calls.messages.push(args[0].prompt);
+      return [{result:{attempted:true,appMentionsVerified:true}}];
+    }
+    if(func.name==="findMarker")return [{result:{found:true}}];
+    if(func.name==="composer")return [{result:{ok:true}}];
+    return [{result:{ok:true}}];
+  } }
 };
 global.fetch = async url => {
   calls.urls.push(String(url));
@@ -38,6 +48,7 @@ global.fetch = async url => {
       ready:true, story:"Project One", host:"TEST-WORKSTATION",
       checked_at:"test time", busy:true, stage:"สร้างคลิป", detail:"กำลังทำ",
       images:1, clips:0, total:2, effect_review_pending:statusTerminal,
+      monitor_bot:"dino-bot-tunnel",tailscale_url:"https://testhost.example/",
       complete:false
     })};
   }

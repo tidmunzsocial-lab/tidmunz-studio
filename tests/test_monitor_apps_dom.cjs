@@ -1,80 +1,79 @@
-// Run: node tests/test_monitor_apps_dom.cjs
-// No browser/network/files changed. Real app chips must be created by UI click.
-const assert=require("assert");
-const fs=require("fs");
-const vm=require("vm");
-const path=require("path");
-const code=fs.readFileSync(path.join(__dirname,"../snapgen_modules/chrome_ext/monitor_apps.js"),"utf8");
-const APPS=[
- ["Tidmunz Studio AI Operator","app://plugins_6aebd38bc5588191808c3cbd710ded69"],
- ["Dino Bot Tunnel","app://asdk_app_6afac8c38ba88191afe3e6f5a07f43eb"],
+"use strict";
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const path = require("node:path");
+const code = fs.readFileSync(path.join(__dirname, "../snapgen_modules/chrome_ext/monitor_apps.js"), "utf8");
+const APPS = [
+  ["Tidmunz Studio AI Operator", "app://plugins_6aebd38bc5588191808c3cbd710ded69"],
+  ["Dino Bot Tunnel", "app://asdk_app_6afac8c38ba88191afe3e6f5a07f43eb"]
 ];
-async function scenario(available,atMention=false){
-  let menu=false, mentionMenu=false, sent=0;
-  const chipPaths=[], actions=[];
-  const visible={width:20,height:10};
-  const form={querySelectorAll:()=>[send]};
+async function scenario(available) {
+  const actions=[], chips=[], visible={width:20,height:10};
+  let raw="", shown="", sent=0, deleted=0;
   const last={};
-  const input={
-    innerText:"",
-    closest:x=>x==="form"?form:null,
+  const form={querySelectorAll:()=>[send]};
+  const editor={
+    get innerText() {return raw;},
     getBoundingClientRect:()=>visible,
-    querySelectorAll:q=>q==="[app-mention-path]"?chipPaths.map(p=>({getAttribute:n=>n==="app-mention-path"?p:null})):[],
-    querySelector:q=>q==="p:last-child"?last:null,
-    focus:()=>actions.push("focus"),
+    querySelectorAll: selector=>selector==="[app-mention-path]"
+      ? chips.map(path=>({getAttribute:name=>name==="app-mention-path"?path:null})):[],
+    querySelector: selector=>selector==="p:last-child"?last:null,
+    closest: selector=>selector==="form"?form:null,
+    focus:()=>actions.push("focus")
   };
-  const plus={
-    getBoundingClientRect:()=>visible,
-    getAttribute:n=>n==="aria-label"?"เพิ่มไฟล์และอื่นๆ":null,
-    innerText:"",
-    click:()=>{menu=true;actions.push("plus");}
-  };
-  const rows=APPS.map(([name,id],i)=>({
-    innerText:name+"\n"+name,
-    getBoundingClientRect:()=>((menu&&available.includes(i))||(mentionMenu&&atMention&&i===1))
-      ?visible:{width:0,height:0},
-    click:()=>{chipPaths.push(id);input.innerText+=" "+name;menu=false;mentionMenu=false;actions.push("app"+i)}
+  const rows=APPS.map(([name,uri],index)=>({
+    get innerText(){return shown && available.includes(index) &&
+      (shown==="@tidmunz"&&index===0 || shown.trim()==="@dino"&&index===1)
+      ?name+"\n"+name:"";},
+    getBoundingClientRect(){return this.innerText?visible:{width:0,height:0};},
+    click(){chips.push(uri);raw=raw.replace(/@tidmunz|@dino/g,"")+name+" ";
+      shown="";actions.push("chip"+index);}
   }));
   const send={
     disabled:false,
     getBoundingClientRect:()=>visible,
-    getAttribute:n=>n==="aria-label"?"ส่ง":n==="data-testid"?"send-button":null,
-    click:()=>{sent++;actions.push("send")}
+    getAttribute:name=>name==="aria-label"?"ส่ง":name==="data-testid"?"send-button":null,
+    click:()=>{sent++;actions.push("send");}
   };
   const document={
-    querySelectorAll:q=>q==="form [contenteditable=\"true\"]"?[input]:q==="button"?[plus,...rows]:[],
+    querySelectorAll:selector=>selector==='form [contenteditable="true"]'
+      ?[editor]:selector==="button"?[...rows,send]:[],
     createRange:()=>({selectNodeContents:()=>{},collapse:()=>{}}),
-    dispatchEvent:()=>{menu=false;return true},
-    execCommand:(_command,_show,text)=>{input.innerText+=text;
-      if(text.includes("@dino"))mentionMenu=true;return true}
+    execCommand:(cmd,_ui,text)=>{
+      if(cmd==="insertText"){raw+=text;shown=text.trim();actions.push("insert:"+text);return true;}
+      if(cmd==="delete"){raw="";chips.length=0;deleted++;return true;}
+      return false;
+    }
   };
-  const sandbox={
-    self:{},location:{hostname:"chatgpt.com",pathname:"/"},
-    document,KeyboardEvent:class {constructor(type,props){this.type=type;this.props=props;}},
+  const sandbox={self:{},document,
+    location:{hostname:"chatgpt.com",pathname:"/"},
     window:{getSelection:()=>({removeAllRanges:()=>{},addRange:()=>{}})},
-    setTimeout,Promise
-  };
+    setTimeout:(fn)=>{Promise.resolve().then(fn);return 1;},Promise};
   vm.createContext(sandbox);
   vm.runInContext(code,sandbox);
-  const result=await sandbox.self.tmMonitorComposeWithApps({
-    prompt:"[Tidmunz monitor TMB-123] ตรวจเครื่องและโปรเจกต์",
-    marker:"TMB-123"
-  });
-  return {result,chipPaths,actions,sent};
+  const result=await sandbox.self.tmMonitorComposeWithApps({prompt:"[Tidmunz Studio | TMB-123]",
+    marker:"TMB-123"});
+  return {result,chips,actions,sent,deleted,raw};
 }
 (async()=>{
   const ok=await scenario([0,1]);
-  assert.equal(ok.result.attempted,true);
   assert.equal(ok.result.appMentionsVerified,true);
-  assert.deepStrictEqual(ok.chipPaths,APPS.map(x=>x[1]));
+  assert.equal(ok.result.attempted,true);
+  assert.deepEqual(ok.chips,APPS.map(row=>row[1]));
   assert.equal(ok.sent,1);
-  const fallback=await scenario([0],true);
-  assert.equal(fallback.result.attempted,true);
-  assert.equal(fallback.result.appMentionsVerified,true);
-  assert(fallback.actions.includes("app1"));
-  const fail=await scenario([0],false);
-  assert.equal(fail.result.attempted,false);
-  assert.match(fail.result.error,/App not selectable/);
-  assert.equal(fail.sent,0);
-  console.log("PASS native Plus/at-mention two-app composer + fail-closed missing app");
-})().catch(e=>{console.error(e);process.exit(1)});
+  assert.ok(ok.actions.includes("insert:@tidmunz"));
+  assert.ok(ok.actions.includes("insert: @dino"));
+  // No app -> no false textual @bot substitution and no message is sent.
+  const missingFirst=await scenario([1]);
+  assert.equal(missingFirst.result.attempted,false);
+  assert.match(missingFirst.result.error,/Tidmunz Studio AI Operator/);
+  assert.equal(missingFirst.sent,0);
+  assert.equal(missingFirst.deleted,1);
+  const missingSecond=await scenario([0]);
+  assert.equal(missingSecond.result.attempted,false);
+  assert.match(missingSecond.result.error,/Dino Bot Tunnel/);
+  assert.equal(missingSecond.sent,0);
+  assert.equal(missingSecond.deleted,1);
+  console.log("PASS real @tidmunz/@dino chip paths; missing app fails closed and clears own draft");
+})().catch(error=>{console.error(error);process.exitCode=1;});
