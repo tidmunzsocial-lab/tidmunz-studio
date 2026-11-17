@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import re
 import os
 from pathlib import Path
 import sys
@@ -200,6 +202,89 @@ def execute(action, data=None):
     return {"accepted": bool(reply.get("ok")), "request_id": command_id, "message": entry["result"]}
 
 
+
+def recover_capacity_after_receipt():
+    """One safe, user-authorized retry after a zero-credit terminal provider failure.
+
+    Uses the application's existing command/receipt service and never resets an
+    accepted/pending UUID. A stale text label in an idle video slot is not busy.
+    """
+    status = request("/api/status")
+    state = summarize(status)
+    if not state["app_ready"] or state["auto_busy"] or state["final_ready"]:
+        raise OperatorError("Auto must be idle and incomplete")
+    title = state["story"]
+    if not title or not state["next_missing_shot"]:
+        raise OperatorError("No active unfinished project")
+    slots = status.get("slots") or []
+    if not slots or any(slot.get("busy") is not False for slot in slots):
+        raise OperatorError("A video slot is busy or its live busy-state is uncertain")
+    project_path = STORIES / title / "project.json"
+    data = project_for(title)
+    if not data or not project_path.is_file():
+        raise OperatorError("Project file unavailable")
+    if (data.get("done") or {}).get("video") or (status.get("auto") or {}).get("effect_review_pending"):
+        raise OperatorError("Project already reached a terminal/user-selection stage")
+    scenes = data.get("scenes") or []
+    index = state["next_missing_shot"] - 1
+    scene = scenes[index]
+    uid = str(scene.get("clip_uuid") or "")
+    if not re.fullmatch(r"[0-9a-fA-F-]{20,100}", uid):
+        raise OperatorError("No exact provider receipt to reconcile")
+    if not any(phrase in str(scene.get("clip_error") or "").lower()
+               for phrase in ("high traffic", "rate limit", "too many")):
+        raise OperatorError("Only provider-capacity failures can be recovered this way")
+    for j, other in enumerate(scenes):
+        if j != index and other.get("clip_uuid") and not clip_exists(other.get("clip")):
+            raise OperatorError("Another unresolved provider receipt exists")
+        if other.get("clip_upscale_status") in ("queued", "running", "failed"):
+            raise OperatorError("An upscale operation still needs reconciliation")
+    if time.time() - project_path.stat().st_mtime < 30 * 60:
+        raise OperatorError("Provider cooldown has not reached 30 minutes")
+    key = str(json.loads((DATA / "snapgen_config.json").read_text(encoding="utf-8")).get("api_key") or "")
+    if len(key) < 12:
+        raise OperatorError("No configured provider key for receipt verification")
+    req = urllib.request.Request(
+        "https://api.snapgen.ai/uapi/v1/history/" + uid,
+        headers={"x-api-key": key, "Accept": "application/json", "User-Agent": "Tidmunz Studio"})
+    try:
+        with urllib.request.urlopen(req, timeout=18) as response:
+            receipt = json.load(response)
+    except (OSError, ValueError, TimeoutError) as exc:
+        raise OperatorError("Provider history unavailable; paid retry blocked") from exc
+    if (str(receipt.get("status")) != "3" or
+            float(receipt.get("used_credit") or 0) != 0 or
+            not any(phrase in str(receipt.get("error_message") or "").lower()
+                    for phrase in ("high traffic", "rate limit", "too many"))):
+        raise OperatorError("Provider has not confirmed a zero-credit terminal capacity failure")
+    if request("/api/status").get("auto", {}).get("busy"):
+        raise OperatorError("Auto became active during receipt validation")
+    # The app is idle; archive the *exact verified* UUID to prevent duplicate
+    # billing, preserving every successful clip and all other provider receipts.
+    backup = DATA / "_recovery" / ("capacity-" + str(int(time.time())))
+    backup.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(project_path, backup / "project.before.json")
+    scene.setdefault("clip_failed_jobs", []).append({
+        "uuid": uid, "status": "failed", "error": str(receipt["error_message"])[:300],
+        "used_credit": 0, "verified_at": int(time.time())})
+    scene.pop("clip_uuid", None)
+    scene.pop("clip_error", None)
+    scene.pop("clip_terminal_error", None)
+    tmp = project_path.with_name("project.json.capacity-recovery.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, project_path)
+    # Reload from the persisted file before starting to avoid the Tk app's
+    # in-memory scene overwriting the recovered receipt and resurrecting the UUID.
+    opened = execute("auto_open", {"name": title})
+    if opened.get("accepted") is not True:
+        raise OperatorError("Project recovery saved, but application reload was not accepted")
+    fresh = request("/api/status")
+    if (fresh.get("auto") or {}).get("busy"):
+        return {"recovered_scene": index + 1, "note": "Auto already running after project reload"}
+    outcome = execute("auto_start")
+    return {"recovered_scene": index + 1, "receipt_status": "failed_zero_credit",
+            "backup": backup.name, "resume": outcome}
+
 def handle(args):
     if args.command == 'projects':
         items = []
@@ -227,6 +312,10 @@ def handle(args):
         if args.title == s['story']:
             return {'status': s, 'note': 'Already open'}
         return execute('auto_open', {'name': args.title})
+    if args.command == "recover-capacity":
+        if not args.authorize_paid:
+            raise OperatorError("Recovery requires explicit paid-work authorization")
+        return recover_capacity_after_receipt()
     if args.command == 'resume':
         if not args.authorize_paid:
             raise OperatorError('Paid Auto resume needs explicit user authorization (--authorize-paid)')
@@ -267,6 +356,8 @@ def main():
         sub.add_parser(name)
     opener = sub.add_parser("open")
     opener.add_argument("--title", required=True)
+    recovery = sub.add_parser("recover-capacity")
+    recovery.add_argument("--authorize-paid", action="store_true")
     starter = sub.add_parser("resume")
     starter.add_argument("--authorize-paid", action="store_true")
     monitor = sub.add_parser("watch")

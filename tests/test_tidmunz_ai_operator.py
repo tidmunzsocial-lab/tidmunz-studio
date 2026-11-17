@@ -77,3 +77,79 @@ def test_project_path_traversal_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(O, "STORIES", tmp_path)
     assert O.project_for("../secrets") is None
     assert O.project_for("anything/name") is None
+
+
+
+def _capacity_fixture(tmp_path, monkeypatch, *, credit=0, status="3"):
+    import io
+    import json
+    import os
+    import time
+
+    stories = tmp_path / "stories"
+    story = stories / "บท - ตัวอย่าง"
+    story.mkdir(parents=True)
+    good = story / "good.mp4"
+    good.write_bytes(b"a" * 5000)
+    scenes = [
+        {"clip": str(good)},
+        {"clip_uuid": "a" * 32, "clip_error": "High traffic. Please come back in 30 minutes."},
+    ]
+    file = story / "project.json"
+    file.write_text(json.dumps({"scenes": scenes, "done": {"images": True}}, ensure_ascii=False), encoding="utf8")
+    old = time.time() - 1900
+    os.utime(file, (old, old))
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "snapgen_config.json").write_text(json.dumps({"api_key": "an-example-local-key"}))
+    monkeypatch.setattr(O, "STORIES", stories)
+    monkeypatch.setattr(O, "DATA", data)
+    current = {"ready": True, "auto": {"title": story.name, "busy": False, "shots": []},
+               "slots": [{"status": "Video failed", "busy": False},
+                         {"status": "Background upscale (finished)", "busy": False}]}
+    monkeypatch.setattr(O, "request", lambda *args, **kwargs: current)
+    class Response(io.BytesIO):
+        def __enter__(self):return self
+        def __exit__(self, *args):self.close()
+    def history(_request, timeout):
+        return Response(json.dumps({
+            "status": status, "used_credit": credit,
+            "error_message": "The server currently is experiencing high traffic."
+        }).encode("utf8"))
+    monkeypatch.setattr(O.urllib.request, "urlopen", history)
+    actions = []
+    monkeypatch.setattr(O, "execute", lambda name, data=None:
+                        (actions.append(name) or {"accepted": True}))
+    return file, actions
+
+
+def test_capacity_recovery_uses_terminal_zero_credit_receipt_and_reload(tmp_path, monkeypatch):
+    import json
+    file, actions = _capacity_fixture(tmp_path, monkeypatch)
+    result = O.recover_capacity_after_receipt()
+    scenes = json.loads(file.read_text(encoding="utf8"))["scenes"]
+    assert result["recovered_scene"] == 2
+    assert actions == ["auto_open", "auto_start"]
+    assert scenes[0]["clip"]
+    assert not scenes[1].get("clip_uuid")
+    assert scenes[1]["clip_failed_jobs"][0]["uuid"] == "a" * 32
+
+
+@pytest.mark.parametrize("credit,status", [(20, "3"), (0, "1"), (0, "2")])
+def test_capacity_recovery_refuses_billed_or_pending_receipt(tmp_path, monkeypatch, credit, status):
+    import json
+    file, actions = _capacity_fixture(tmp_path, monkeypatch, credit=credit, status=status)
+    with pytest.raises(O.OperatorError, match="zero-credit terminal"):
+        O.recover_capacity_after_receipt()
+    assert not actions
+    assert json.loads(file.read_text(encoding="utf8"))["scenes"][1]["clip_uuid"] == "a" * 32
+
+
+def test_capacity_recovery_refuses_live_slot(tmp_path, monkeypatch):
+    file, actions = _capacity_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(O, "request", lambda *args, **kwargs: {
+        "ready": True, "auto": {"title": "บท - ตัวอย่าง", "busy": False, "shots": []},
+        "slots": [{"status": "Video failed", "busy": True}]})
+    with pytest.raises(O.OperatorError, match="slot is busy"):
+        O.recover_capacity_after_receipt()
+    assert not actions
