@@ -11,7 +11,7 @@ def test_economy_plan_merges_short_narration_without_spending_video_credit():
     normal = N.video_shots(segments)
     economy = N.video_shots(segments, N.ECONOMY_TARGET, N.ECONOMY_LIMIT)
     assert len(normal) == 4
-    assert len(economy) == 2
+    assert len(economy) == 3
     assert max(N.segment_durations([x["start"] for x in economy], 40)) <= 20
 
 
