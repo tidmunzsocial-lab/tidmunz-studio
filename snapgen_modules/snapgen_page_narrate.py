@@ -9171,36 +9171,20 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     scene = scenes[index]
                     if not (scene.get("image") and os.path.isfile(scene["image"])):
                         raise RuntimeError(f"ฉาก {index + 1} ยังไม่มีรูป")
-                    # If an accepted paid UUID survived but the MP4 did not,
-                    # never resubmit this scene until its provider receipt is
-                    # reconciled. Re-running Auto otherwise spends credits twice.
-                    if scene.get("clip_uuid") and not scene.get("clip_terminal_error") and callable(runtime.get("run_json")):
-                        try:
-                            history = runtime["run_json"]([
-                                "curl", "-s", "-X", "GET",
-                                "https://api.snapgen.ai/uapi/v1/history/" + str(scene["clip_uuid"]),
-                                "-H", "x-api-key: " + runtime["api_key_var"].get().strip()], timeout=60)
-                            detail = history.get("detail") if isinstance(history, dict) else None
-                            error = str(history.get("error_message") or
-                                        (detail.get("error_message") if isinstance(detail, dict) else "") or "") if isinstance(history, dict) else ""
-                            if "content violates moderation policies" in error.lower():
-                                scene["clip_terminal_error"] = error
-                                save_project()
-                        except Exception:
-                            pass  # Unknown result must keep the paid UUID locked.
-                    if scene.get("clip_uuid") and scene.get("clip_terminal_error"):
-                        scene.setdefault("clip_failed_jobs", []).append({
-                            "uuid": scene.pop("clip_uuid"),
-                            "error": scene.pop("clip_terminal_error")})
-                        save_project()
+                    # A provider UUID is an accepted job receipt.  Even if the
+                    # provider later reports a moderation rejection, it can
+                    # have charged credits (e.g. status=-2, used_credit=14).
+                    # Never erase this UUID and silently resubmit a paid job.
+                    # The receipt-aware operator can reconcile a confirmed
+                    # zero-credit terminal error; charged failures need review.
                     if scene.get("clip_uuid") and not (
                             scene.get("clip") and os.path.isfile(scene["clip"])):
-                        # Quarantine an unresolved paid job instead of aborting
-                        # independent shots. Its receipt stays persisted for recovery.
-                        scene["clip_error"] = (
-                            f"รอกู้ผล API เดิม UUID {scene['clip_uuid']} — ไม่ส่งสร้างซ้ำ")
+                        if not scene.get("clip_error"):
+                            scene["clip_error"] = (
+                                f"รอกู้ผล API เดิม UUID {scene['clip_uuid']} — ไม่ส่งสร้างซ้ำ")
                         save_project()
-                        log(f"ช็อต {index + 1}: {scene['clip_error']}; ข้ามไปช็อตอื่น")
+                        log(f"ช็อต {index + 1}: {scene['clip_error']}; "
+                            "พักช็อตนี้โดยเก็บ UUID/เครดิตไว้ แล้วทำช็อตอื่นต่อ")
                         continue
                     state["clip_fraction"] = n / max(1, len(todo))
                     state["clip_label"] = f"ช็อต {index + 1} ({n + 1}/{len(todo)})"

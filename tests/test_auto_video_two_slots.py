@@ -9,6 +9,7 @@ from test_video_auto_scene_provider import N, load
 
 @pytest.mark.parametrize("rejected", [False, True, "history"])
 def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path, rejected):
+    """Never resubmit an accepted UUID, even with a terminal moderation error."""
     scenes = []
     for i in range(3):
         photo = tmp_path / f"image_{i}.png"
@@ -17,7 +18,8 @@ def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path, rejected):
                        "video_prompt": f"motion-{i}"})
     project = {"scenes": scenes, "done": {}, "duration": 30}
     if rejected:
-        scenes[0].update(clip_uuid="rejected-uuid", clip_terminal_error="content violates moderation policies")
+        scenes[0].update(clip_uuid="rejected-uuid", clip_error="Moderation rejected",
+                         clip_terminal_error="content violates moderation policies")
         if rejected == "history":
             scenes[0].pop("clip_terminal_error")
     state = {"project": project, "folder": str(tmp_path),
@@ -48,7 +50,9 @@ def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path, rejected):
         from types import SimpleNamespace
         scope["runtime"].update(
             api_key_var=SimpleNamespace(get=lambda: "test-key"),
-            run_json=lambda *a, **k: {"error_message": "The content violates moderation policies and cannot be processed."})
+            run_json=lambda *a, **k: {
+                "status": -2, "used_credit": 14,
+                "error_message": "The content violates moderation policies and cannot be processed."})
 
     def submit(work, index, *, prepared, on_submitted, slot_override):
         assert prepared is True
@@ -66,16 +70,20 @@ def test_two_cloud_jobs_overlap_without_shot_mixup(tmp_path, rejected):
 
     scope["make_scene_clip"] = submit
     load(scope, "run_clips_dual")(project, scenes, [0, 1, 2])
-    assert calls == [(0, 1), (1, 0), (2, 1)]
     if rejected:
-        assert scenes[0]["clip_failed_jobs"][0]["uuid"] == "rejected-uuid"
-        assert "clip_terminal_error" not in scenes[0]
-    assert len({sc["clip"] for sc in scenes}) == 3
-    assert Path(scenes[0]["clip"]).read_bytes() == b"shot:0/slot:1"
+        assert calls == [(1, 0), (2, 1)]
+        assert scenes[0]["clip_uuid"] == "rejected-uuid"
+        assert not scenes[0].get("clip")
+        assert not scenes[0].get("clip_failed_jobs")
+        assert scenes[0]["clip_error"] == "Moderation rejected"
+    else:
+        assert calls == [(0, 1), (1, 0), (2, 1)]
+        assert Path(scenes[0]["clip"]).read_bytes() == b"shot:0/slot:1"
     assert Path(scenes[1]["clip"]).read_bytes() == b"shot:1/slot:0"
     assert Path(scenes[2]["clip"]).read_bytes() == b"shot:2/slot:1"
     saved = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
-    assert all(Path(s["clip"]).is_file() for s in saved["scenes"])
+    assert saved["scenes"][0].get("clip_uuid") == ("rejected-uuid" if rejected else None)
+    assert all(Path(s["clip"]).is_file() for s in saved["scenes"][1:])
 
 
 def test_paid_provider_receipt_precedes_second_slot_and_survives_missing_download(tmp_path):
