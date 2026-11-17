@@ -1,3 +1,14 @@
+- 2026-11-17: Retroactive Auto monitoring for existing partial films: if the
+  per-story monitor binding is missing or incomplete, run only the monitor
+  bootstrap once BEFORE resuming the currently requested stage; preserve every
+  already-completed stage and all saved images, clips, and paid receipts.
+  Do not rebind a confirmed monitor on every start. The existing Chrome
+  extension monitor_bootstrap arms its own scheduled Alarm; no extra watcher.
+  Existing legacy skip for partially-produced films was removed; scoped tests
+  were updated to cover old paid clips, targeted resumes, absent bindings,
+  valid bindings, non-video mode, and duplicate prevention.
+  Version footer now distinguishes intentional post-install code edits from
+  truly missing files. Source-only until a safe app restart following Release.
 - 2026-11-17: Follow-up routing: authenticated Chrome relay reads **this** PC's
   \`snapgen_data/followup_device_bot.json\` ({host,bot}) and current
   \`mobile_web_url.txt\`, validates exact host and access-token match, and includes

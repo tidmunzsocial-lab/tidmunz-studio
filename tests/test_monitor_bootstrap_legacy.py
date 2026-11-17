@@ -1,63 +1,82 @@
-"""Legacy in-progress films must not be blocked by new chat-app bootstrap."""
-import ast
-import os
+"""Retrospective monitor bootstrap runs once without restarting existing films."""
+import inspect
+import sys
 from pathlib import Path
 
-SOURCE = Path(__file__).parents[1] / "snapgen_modules" / "snapgen_page_narrate.py"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "snapgen_modules"))
+import snapgen_page_narrate as N
+
+STAGES = ["monitor", "analysis", "context", "characters", "plan",
+          "storyboard", "images", "motion", "clips", "effects", "video"]
 
 
-def _legacy_guard():
-    tree = ast.parse(SOURCE.read_text(encoding="utf8"))
-    found = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.If):
-            continue
-        test = ast.unparse(node.test)
-        if ("project.get('done', {}).get('monitor')" in test
-                and "project.get('done', {}).get('images')" in test
-                and "sc.get('clip')" in test):
-            if node.body and isinstance(node.body[0], ast.Assign):
-                target = node.body[0].targets[0]
-                if isinstance(target, ast.Name) and target.id == "keys":
-                    found.append(node)
-    assert len(found) == 1, "Exactly one existing-project monitor exception expected"
-    guard = ast.fix_missing_locations(ast.Module(body=[found[0]], type_ignores=[]))
-    return compile(guard, "legacy-monitor-guard", "exec")
-
-
-def _apply_guard(project, *, video_mode=True, only=None):
-    ns = {"video_mode": video_mode, "only": only, "project": project,
-          "keys": ["monitor", "analysis", "images", "motion", "clips", "video"],
-          "os": os, "log": lambda *args: None}
-    exec(_legacy_guard(), ns)
-    return ns["keys"]
-
-
-def test_in_progress_film_skips_new_monitor_stage_without_false_binding(tmp_path):
-    clip = tmp_path / "existing-clip.mp4"
-    clip.write_bytes(b"clip already delivered")
+def test_partially_produced_legacy_film_gets_monitor_first_once(tmp_path):
+    clip = tmp_path / "scene_074.mp4"
+    clip.write_bytes(b"existing paid clip")
     project = {"scenes": [{"clip": str(clip)}],
-               "done": {"analysis": True, "images": True}}
-    keys = _apply_guard(project)
-    assert "monitor" not in keys
-    assert "clips" in keys and "video" in keys
-    assert "monitor" not in project["done"]
-    assert "monitor_chat" not in project
+               "done": {"analysis": True, "context": True, "images": True}}
+    original_done = dict(project["done"])
+    keys = N.auto_resume_keys_with_monitor(project, STAGES)
+    assert keys == STAGES
+    assert N.auto_monitor_bootstrap_needed(project)
+    # Preparing the next run neither invalidates past stages nor touches clips.
+    assert project["done"] == original_done
+    assert clip.read_bytes() == b"existing paid clip"
 
 
-def test_new_film_still_requires_real_app_bootstrap():
-    assert "monitor" in _apply_guard({"scenes": [], "done": {}})
+def test_completed_monitor_is_not_run_again_with_a_targeted_resume():
+    project = {"done": {"monitor": True, "analysis": True, "images": True},
+               "monitor_chat": {"url": "https://chatgpt.com/c/abc", "cid": "abc",
+                                "host": "DESKTOP-EXAMPLE", "story": "Story",
+                                "project_key": "key"}}
+    assert not N.auto_monitor_bootstrap_needed(project)
+    assert N.auto_resume_keys_with_monitor(project, ["clips"]) == ["clips"]
+    assert N.auto_resume_keys_with_monitor(project, STAGES) == STAGES
 
 
-def test_unfinished_without_saved_clip_still_requires_monitor(tmp_path):
-    project = {"scenes": [{"clip": str(tmp_path / "missing.mp4")}],
-               "done": {"analysis": True, "images": True}}
-    assert "monitor" in _apply_guard(project)
+def test_missing_monitor_in_specific_stage_is_prepended_not_rebuilt(tmp_path):
+    project = {"done": {"analysis": True, "context": True, "images": True},
+               "scenes": [{"clip": str(tmp_path / "existing.mp4")}]}
+    assert N.auto_resume_keys_with_monitor(project, ["clips"]) == ["monitor", "clips"]
+    assert N.auto_resume_keys_with_monitor(project, ["video"]) == ["monitor", "video"]
+    assert N.auto_resume_keys_with_monitor(project, ["monitor"]) == ["monitor"]
 
 
-def test_nonvideo_or_other_stage_does_not_bypass_monitor(tmp_path):
-    clip = tmp_path / "ready.mp4"
-    clip.write_bytes(b"ready")
-    project = {"scenes": [{"clip": str(clip)}], "done": {"analysis": True, "images": True}}
-    assert "monitor" in _apply_guard(project, video_mode=False)
-    assert "monitor" in _apply_guard(project, only="clips")
+def test_untrusted_done_flag_without_chat_binding_recovers_once():
+    project = {"done": {"monitor": True, "analysis": True}, "monitor_chat": {}}
+    assert N.auto_monitor_bootstrap_needed(project)
+    assert N.auto_resume_keys_with_monitor(project, ["clips"]) == ["monitor", "clips"]
+    project["monitor_chat"] = {"url": "https://chatgpt.com/c/abc", "cid": "abc",
+                               "host": "DESKTOP-EXAMPLE", "story": "Story",
+                               "project_key": "key"}
+    assert not N.auto_monitor_bootstrap_needed(project)
+
+
+def test_new_film_runs_monitor_before_any_processing():
+    assert N.auto_resume_keys_with_monitor({"scenes": [], "done": {}}, ["analysis"]) == [
+        "monitor", "analysis"]
+
+
+def test_nonvideo_mode_is_not_changed():
+    project = {"done": {}, "monitor_chat": {}}
+    assert N.auto_resume_keys_with_monitor(project, ["clips"], video_mode=False) == ["clips"]
+    assert not N.auto_monitor_bootstrap_needed(project, video_mode=False)
+
+
+def test_resume_executes_only_new_monitor_and_skips_saved_stages():
+    source = inspect.getsource(N._build)
+    assert "keys = auto_resume_keys_with_monitor(project, keys, video_mode)" in source
+    assert 'callable(STAGE_FUNCS.get("monitor"))' in source
+    assert 'project.setdefault("done", {}).pop("monitor", None)' in source
+    assert 'if project["done"].get(key) and key != "video":' in source
+    assert "if key not in keys" not in source
+    assert "keys = [key for key in keys if key != \"monitor\"]" not in source
+    assert "stage_monitor_chat()" in source
+
+
+def test_confirmed_bootstrap_arms_existing_extension_without_new_watcher():
+    extension = (Path(__file__).resolve().parents[1] /
+                 "snapgen_modules/chrome_ext/followup.js").read_text(encoding="utf-8")
+    assert 'self.tmFollowupBootstrap=async function(job)' in extension
+    assert 'await chrome.alarms.create(ALARM,{periodInMinutes:1})' in extension
+    assert "c.enabled=true;c.stopRequested=false;" in extension

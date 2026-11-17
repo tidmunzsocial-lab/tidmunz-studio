@@ -3751,6 +3751,29 @@ def retry_structured_gpt_reply(send, *, label, valid=None, attempts=3, on_retry=
     raise RuntimeError(f"GPT ส่งข้อมูล{label}ไม่ถูกต้องหลังลอง {attempts} ครั้ง: {last}")
 
 
+def auto_monitor_bootstrap_needed(project, video_mode=True):
+    """Missing or incomplete first-time monitor binding must be set up once.
+
+    The result is deliberately independent of other done flags: an existing
+    film may have completed analysis, images, and paid clips already.
+    """
+    if not video_mode or not isinstance(project, dict):
+        return False
+    if not (project.get("done") or {}).get("monitor"):
+        return True
+    chat = project.get("monitor_chat")
+    return not (isinstance(chat, dict) and all(
+        chat.get(field) for field in ("url", "cid", "story", "host", "project_key")))
+
+
+def auto_resume_keys_with_monitor(project, keys, video_mode=True):
+    """Prepend only the missing setup, never reset or replay later stages."""
+    keys = list(keys)
+    if auto_monitor_bootstrap_needed(project, video_mode):
+        return ["monitor"] + [key for key in keys if key != "monitor"]
+    return keys
+
+
 def auto_saved_percent(project, stages):
     """Overall progress from persisted work, including partial media stages.
 
@@ -10075,10 +10098,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     project.setdefault("image_stage_providers", {}).pop("images", None)
                     if image_provider_choice is not None:
                         project["image_stage_providers"]["images"] = image_provider_choice
-                # Rebind an existing story's confirmed main chat when resuming
-                # after a project switch; never create another chat for it.
-                if video_mode and only is None and project.get("done", {}).get("monitor"):
-                    stage_monitor_chat()
                 keys = [only] if only else [k for k, _t, _w in stages]
                 if (video_mode and only is None and stages is VIDEO_STAGES
                         and project.get("auto_progress_version") != "one_page"
@@ -10086,21 +10105,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     # Legacy partial films must not unexpectedly regenerate Ref
                     # sheets or repeat Prompt-Ref analysis on resume.
                     keys = [k for k, _t, _w in LEGACY_VIDEO_STAGES]
-                # A preexisting, partially-produced film must not be blocked
-                # by newly introduced main-chat/app bootstrap.  The Chrome
-                # extension already has an active legacy follow-up channel;
-                # do not claim that the *new* two-app binding succeeded.
-                # New projects still require the real-app bootstrap normally.
-                if (video_mode and only is None
-                        and not project.get("done", {}).get("monitor")
-                        and project.get("done", {}).get("analysis")
-                        and project.get("done", {}).get("images")
-                        and any(sc.get("clip") and os.path.isfile(str(sc["clip"]))
-                                for sc in project.get("scenes") or [])):
-                    keys = [key for key in keys if key != "monitor"]
-                    log("ℹ โปรเจกต์นี้เริ่มสร้างคลิปก่อนมีขั้นผูกแชตใหม่: "
-                        "ใช้การติดตามในแชตเดิมต่อ ไม่กล่าวอ้างว่าเชื่อมแอปใหม่สำเร็จ "
-                        "และไม่บล็อกคลิปที่อยู่ระหว่างการผลิต")
+                # A legacy project may have skipped monitoring before this
+                # stage existed.  Bootstrap it once, then continue the EXACT
+                # saved stage (even if the film already has paid clips).
+                # Existing done flags remain intact: never replay Context,
+                # storyboard, image creation, or completed video submissions.
+                if video_mode and callable(STAGE_FUNCS.get("monitor")):
+                    keys = auto_resume_keys_with_monitor(project, keys, video_mode)
+                    if auto_monitor_bootstrap_needed(project):
+                        project.setdefault("done", {}).pop("monitor", None)
+                        log("ติดตั้งแชต/สคริปต์ติดตามที่ยังขาดก่อน แล้วกลับไปทำงานเดิมต่อ "
+                            "โดยไม่สร้างรูปหรือคลิปที่เสร็จแล้วซ้ำ")
                 confirmed = False
                 for key in keys:
                     current = key

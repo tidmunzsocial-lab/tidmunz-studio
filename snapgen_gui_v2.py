@@ -1126,8 +1126,13 @@ def _installed_version():
                 value=f"{version} (กำลังตรวจไฟล์)", checked=now, pending=True)
             def worker():
                 try:
-                    intact, _ = snapgen_updater.verify_installed_files(BASE_ROOT)
-                    result = version if intact else f"{version} (ไฟล์ไม่ครบ)"
+                    intact, problem = snapgen_updater.verify_installed_files(BASE_ROOT)
+                    if intact:
+                        result = version
+                    elif str(problem).startswith("installed file differs:"):
+                        result = f"{version} (ไฟล์ถูกแก้ไข)"
+                    else:
+                        result = f"{version} (ไฟล์ไม่ครบ)"
                 except Exception:
                     result = f"{version} (ตรวจไฟล์ไม่ได้)"
                 _version_display_cache.update(
