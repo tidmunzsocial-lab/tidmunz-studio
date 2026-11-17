@@ -2342,6 +2342,18 @@ FACE_SAFE_CAMERA_RULE = (
     "ไม่ต้องเปลี่ยนมุมภาพเพียงเพราะช็อตก่อนหน้าเป็นขนาดเดียวกัน; สลับแสง มุมสายตา "
     "หรือภาพแทรกแทนได้. "
 )
+# Camera choice belongs to GPT's film direction; never randomize camera angles.
+GPT_STORYBOARD_CAMERA_CHOICE = (
+    "กำกับมุมกล้องตามเนื้อเรื่อง: ให้ GPT ผู้กำกับภาพเลือกมุมกล้องแต่ละช็อตเองจากเหตุการณ์ "
+    "จุดสนใจ อารมณ์ การเคลื่อนไหว ตำแหน่งตัวละคร และความต่อเนื่องกับช็อตข้างเคียง. "
+    "ไม่จำกัดแค่มุมหน้าตรง: ใช้มุมแอบถ่ายหรือแอบมอง (observational viewpoint), "
+    "มุมแคนดิด (candid), มุมสูง (high angle), มุมก้ม, มุมเงย (low angle), "
+    "มุมด้านข้าง, มุมเฉียง, over-the-shoulder, POV หรือมุมอื่นได้ถ้ามีเหตุผลตามบท. "
+    "ไม่สุ่มมุม ไม่วนมุมตามรายการ ไม่บังคับให้ใช้ครบ และไม่เปลี่ยนมุมเพียงเพื่อไม่ให้ซ้ำ. "
+    "มุมที่เลือกต้องให้เห็นการกระทำสำคัญ รักษาใบหน้าและตัวละครตามเรฟ "
+    "ตำแหน่งซ้ายขวา ทิศทางจอ และความต่อเนื่องของแสงกับสถานที่. "
+    "คำว่าแอบถ่ายหรือแคนดิดหมายถึงวิธีวางกล้องของหนัง ไม่ใช่เพิ่มคนถือกล้องเข้าฉาก. "
+)
 _UNSAFE_CAMERA_SIZE = re.compile(
     r"(?i)\bextreme\s+wide(?:\s+establishing)?\s+shot\b"
     r"|\bwide(?:\s+establishing)?\s+shot\b"
@@ -2485,6 +2497,7 @@ def cinematographer_request(rows: list, previous: str, era: str, horror: bool) -
         "กำหนดมุมกล้อง (eye level, low angle, high angle, over-the-shoulder, POV) และเลนส์ 50mm/85mm เมื่อเห็นใบหน้าตัวละคร, "
         "แสง (ทิศทาง ความแรง สี เวลา แหล่งแสงในฉาก), องค์ประกอบ (rule of thirds, foreground, leading lines, ความลึกของฉาก), "
         "เปลี่ยนมุม/แสง/ภาพแทรกเพื่อให้ช็อตติดกันมีจังหวะ โดยไม่ต้องสลับเป็นช็อตกว้างเมื่อมีตัวละคร. "
+        + GPT_STORYBOARD_CAMERA_CHOICE
         + FACE_SAFE_CAMERA_RULE
         + ("เรื่องผี: ใช้แสงน้อย เงา พื้นที่ว่างในเฟรม มุมแอบมอง และสิ่งที่เห็นไม่ชัดเพื่อความน่ากลัว ไม่ใช้เลือดหรือความรุนแรง. " if horror else "")
         + f"ยุคของเรื่อง: {era}. "
@@ -3088,6 +3101,8 @@ def board_request(numbered: list, aspect: str, live_action: bool = True,
         + ("ภาพสมจริงแบบภาพนิ่งจากภาพยนตร์ไลฟ์แอ็กชัน ไม่ใช่การ์ตูน ไม่มีตัวหนังสือ ไม่มีตัวเลขในภาพ. " if live_action
            else "ทุกช่องใช้สไตล์ภาพเดียวกันตามที่ระบุท้ายคำสั่ง ไม่มีตัวหนังสือ ไม่มีตัวเลขในภาพ. ")
         + SCOPE_RULE
+        + GPT_STORYBOARD_CAMERA_CHOICE
+        + "ช็อตที่ GPT กำหนดมุมไว้แล้ว ให้ใช้มุมนั้นในสตอรี่บอร์ด อย่าเปลี่ยนเป็นหน้าตรงเอง. "
         + (f"ช่องท้ายสุด {empty} ช่องที่ไม่มีช็อต ให้เป็นสีดำล้วน. " if empty > 0 else "")
         + reference_rule
         + "\n\n" + lines
@@ -3115,6 +3130,7 @@ def director_request(shots: list, names: list, era: str, horror: bool = False, r
         "shots = ช็อตแรกและช็อตสุดท้ายของซีเควนซ์. blocking = ตำแหน่งและทิศทางของตัวละครในฉาก (ใครอยู่ซ้าย/ขวาจอ หันไปทางไหน). "
         "visual_plan = ลำดับภาพของซีเควนซ์แบบผู้กำกับ: ถ้าไม่มีตัวละคร เปิดด้วยภาพกว้างสร้างสถานที่ได้; "
         "ถ้ามีตัวละครให้เริ่มระดับกลางและสลับภาพใกล้/ภาพแทรกอารมณ์ โดยเห็นใบหน้าชัด. "
+        + GPT_STORYBOARD_CAMERA_CHOICE
         + FACE_SAFE_CAMERA_RULE +
         "abstract_lines = วิธีเล่าประโยคนามธรรมในซีเควนซ์นี้ด้วยภาพ (ว่างได้)."
         "\n\n" + _shot_lines(list(enumerate(shots, 1)))
@@ -6714,7 +6730,10 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         narration = (f"\nภาพนี้ประกอบคำบรรยายช่วงนี้เท่านั้น (ห้ามเพิ่มสิ่งที่บทไม่ได้พูดถึง): {scene['text']}"
                      if not video_mode and scene.get("text") else "")
         return (f"{scene['prompt']}{location}" + narration + (f"\nตัวละครในภาพ — {who}" if who else "") + state_note + ghost_note
-                + body_note + f"\n{style_text()}")
+                + body_note +
+                "\nมุมกล้อง: ยึดมุมกล้องและการจัดภาพที่ GPT ผู้กำกับภาพเลือกไว้สำหรับช็อตนี้ "
+                "อย่ากลับไปใช้มุมหน้าตรงเป็นค่าเริ่มต้น หรือเปลี่ยนมุมเองอย่างไร้เหตุผล. "
+                + f"\n{style_text()}")
 
     def shot_bodies(scene):
         """(body facts, negative) of everyone in one shot, from the story's body sheet.
@@ -10042,6 +10061,21 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     # Legacy partial films must not unexpectedly regenerate Ref
                     # sheets or repeat Prompt-Ref analysis on resume.
                     keys = [k for k, _t, _w in LEGACY_VIDEO_STAGES]
+                # A preexisting, partially-produced film must not be blocked
+                # by newly introduced main-chat/app bootstrap.  The Chrome
+                # extension already has an active legacy follow-up channel;
+                # do not claim that the *new* two-app binding succeeded.
+                # New projects still require the real-app bootstrap normally.
+                if (video_mode and only is None
+                        and not project.get("done", {}).get("monitor")
+                        and project.get("done", {}).get("analysis")
+                        and project.get("done", {}).get("images")
+                        and any(sc.get("clip") and os.path.isfile(str(sc["clip"]))
+                                for sc in project.get("scenes") or [])):
+                    keys = [key for key in keys if key != "monitor"]
+                    log("ℹ โปรเจกต์นี้เริ่มสร้างคลิปก่อนมีขั้นผูกแชตใหม่: "
+                        "ใช้การติดตามในแชตเดิมต่อ ไม่กล่าวอ้างว่าเชื่อมแอปใหม่สำเร็จ "
+                        "และไม่บล็อกคลิปที่อยู่ระหว่างการผลิต")
                 confirmed = False
                 for key in keys:
                     current = key

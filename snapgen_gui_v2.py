@@ -8065,9 +8065,11 @@ def _run_codex_prompt_refs(story_text, story_bible="", full_story=""):
         "  - Shot type (Wide, Medium, Close-up, Over-the-shoulder, POV, etc.)\n"
         "  - ห้ามกำหนดการเคลื่อนกล้องใน Prompt วิดีโอ เพราะเมนู กล้อง ของ Slot จะเป็นผู้กำหนดตอนสร้างจริง\n"
         "  - Lens/perspective (eye-level, low angle, high angle, shallow depth of field, deep focus, etc.)\n"
+        "  - ให้ GPT ผู้กำกับภาพเลือกมุมกล้องจากจังหวะเรื่องและอารมณ์แต่ละช็อตเอง: สามารถเลือกมุมแอบถ่าย/แอบมอง, candid, high angle, มุมก้ม, มุมเงย, ด้านข้าง, เฉียง, OTS หรือ POV ได้ เมื่อเหมาะกับบท\n"
+        "  - ห้ามใช้แต่มุมหน้าตรงซ้ำทุกช็อต ห้ามสุ่มหรือหมุนเวียนมุมตามลิสต์; ไม่จำเป็นต้องใช้ทุกมุม และไม่เปลี่ยนมุมแบบไร้เหตุผล ต้องรักษาการกระทำสำคัญและ continuity\n"
         "  - Composition: foreground, midground, background — แต่ละชั้นบอกว่ามีอะไร\n"
         "  - ตัวละครที่ปรากฏ: ชื่อ, ตำแหน่งในเฟรม, action/body language, สีหน้า/อารมณ์\n"
-        "  - ตัวละครหลัก (HERO) ต้องเด่นชัดกลางเฟรม ตัวประกอบต้องอยู่ชั้นหลัง/ข้าง/เบลอ\n"
+        "  - ตัวละครหลัก (HERO) ต้องเป็นจุดสนใจของภาพ แต่ไม่จำเป็นต้องอยู่ตรงกลางหรือหันหน้าเข้ากล้องเสมอ; จัดแบบ rule of thirds, มุมข้าง หรือมุมแคนดิดได้ตามบท ตัวประกอบอย่าแย่งจุดสนใจ\n"
         "  - Key props/animals/objects ที่ต้องเห็น\n"
         "  - Lighting (แสงธรรมชาติ/ไฟค่าย/แสงริบหรี่/ทิศทางแสง/อารมณ์แสง)\n"
         "  - Atmosphere/tone (muted Thai investigation-drama tone, ตึงเครียด, หม่น, มืด, ฯลฯ)\n"
@@ -8083,7 +8085,7 @@ def _run_codex_prompt_refs(story_text, story_bible="", full_story=""):
         "5. ห้ามกำหนดลักษณะภาพตัวละครเอง — อายุ สีผิว ทรงผม เสื้อผ้า ลักษณะเด่น ฯลฯ จะมาจากรูปอ้างอิงที่ผู้ใช้แนบเท่านั้น. ระบุเฉพาะชื่อตัวละครและบทบาท/อารมณ์ ที่บทกำหนด. ห้ามเขียนว่า ผิวคล้ำ ผมสั้น เสื้อสีนี้ ฯลฯ เพราะจะขัดกับรูปที่แนบ.\n"
         "6. ทุก prompt ต้องเริ่มด้วยการบอกว่าเหตุการณ์อะไรกำลังเกิดขึ้นใน shot นั้น ก่อนจะบรรยายภาพ — เพื่อให้ตรวจสอบได้ว่าตรงกับบทจริง.\n"
         "7. ทุก prompt ต้องมี shot type, lens/perspective, foreground-midground-background, สีหน้า/body language, อารมณ์, key props/animals/objects, lighting, muted Thai investigation-drama tone. ห้ามเขียน camera movement, zoom, push-in, pull-out, pan, tilt, dolly, tracking หรือ handheld ลงใน Prompt วิดีโอ เพราะให้เมนู กล้อง ของ Slot ควบคุมเอง\n"
-        "8. ตัวละครหลัก (HERO) ต้องอยู่กลางเฟรมหรือเด่นชัดที่สุดในช็อตที่ปรากฏ — ตัวประกอบต้องอยู่ชั้นหลัง/ข้าง/เบลอ ไม่ใช่ยืนเสมอกัน.\n"
+        "8. ตัวละครหลัก (HERO) ต้องเด่นเป็นจุดสนใจของช็อต แต่ไม่บังคับให้อยู่กลางเฟรมหรือหันหน้าตรงกล้อง; เลือกตำแหน่งแบบ rule of thirds มุมข้าง มุมสูง หรือมุมแอบมองได้ตามอารมณ์และเหตุการณ์ โดยตัวประกอบไม่แย่งจุดสนใจ.\n"
         "9. ทุก prompt ต้องเป็น prompt ที่เอาไปเจนรูปหรือเจนวิดีโอได้ทันที: ภาพต้องชัด วัตถุหลักต้องไม่ถูกบัง การกระทำต้องเห็นได้จริง ไม่ใช่คำเล่าเรื่องลอยๆ.\n"
         "10. ถ้าตัวละคร/สัตว์/พร็อพมีจุดจำเพาะสำคัญ เช่น ช้างงาขาด แผลเป็น ของหาย อาวุธ รอยเชือก ต้องเขียนจุดนั้นซ้ำทุก prompt ที่ตัวนั้นปรากฏ และกำกับว่าเห็นชัด ไม่ถูกคน/ฉากหน้า/เงาบัง.\n"
         "11. ตรวจคำเสี่ยงที่ทำให้เจนรูป/วิดีโอไม่ได้: หลีกเลี่ยงคำรุนแรงโจ่งแจ้ง เลือดสาด ศพเปลือย อวัยวะ gore ทรมานสัตว์ การทำร้ายเด็ก หรือคำสั่งผิดกฎหมาย; ถ้าบทมีเหตุรุนแรงให้เล่าแบบ cinematic aftermath / ร่องรอย / บรรยากาศสืบสวน แทนภาพโจ่งแจ้ง.\n"
@@ -9509,6 +9511,10 @@ def _build_prompt_ref_storyboard_image_request(story_text, preflight=None, ref_n
         "สร้าง Storyboard จำนวน 12 ช็อตพอดี โดยแต่ละช็อตต้องมีหน้าที่ต่างกันและต่อเนื่องกัน ห้ามเพิ่มช็อตซ้ำหน้าที่หรือซ้ำองค์ประกอบเพื่อให้ครบจำนวน. "
         "แต่ละช็อตต้องมีหนึ่ง action beat ที่มองเห็นได้และลำดับภาพต้องต่อเนื่องกัน. "
         "จัดทิศทางร่างกาย ศีรษะ สายตา วัตถุที่มอง และตำแหน่งกล้องให้เป็นไปได้จริง. "
+        "ให้ GPT ตัดสินใจมุมกล้องตามเหตุการณ์ อารมณ์ ความใกล้ชิดของผู้ชมและความต่อเนื่องแต่ละช็อตเอง "
+        "อย่าจัดภาพหน้าตรงซ้ำ ๆ โดยอัตโนมัติ; พิจารณามุมแอบถ่ายหรือแอบมอง, candid, high angle, "
+        "มุมก้ม, มุมเงย, มุมข้าง, มุมเฉียง, over-the-shoulder, POV และมุมอื่นได้ตามความเหมาะสม. "
+        "ไม่สุ่มมุม ไม่วนให้ครบรายการ ไม่บังคับใช้ทุกมุมและไม่เพิ่มคนถือกล้องเข้าฉาก. "
         "สร้างเป็น professional cinematic shooting storyboard sheet ภาพเดียวทรงแนวตั้งยาว อัตราส่วนรวม 9:16 แบบกริด 2 คอลัมน์. "
         "ใช้ลุค 3D cinematic previs / 3D storyboard ทุกช่องต้องดูเหมือนเรนเดอร์จาก 3D engine เดียวกันและ production pipeline เดียวกัน "
         "รักษา character model, ใบหน้า, สัดส่วน, เสื้อผ้า, environment และ material continuity ให้คงที่ครบทั้ง 12 ช่อง "
@@ -9553,6 +9559,32 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
     output_path = Path(str(output))
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("สร้าง Storyboard แล้วแต่ไม่พบไฟล์ภาพ")
+    # Keep the original Image AI output and save one browsable copy in the
+    # image workflow's own storyboard/ directory (never another story's Auto
+    # folder). Provider success is already final; copy failures must NOT
+    # submit a second paid image generation request.
+    storyboard_copy = ""
+    try:
+        board_folder = Path(EXPORT_IMAGE) / "storyboard"
+        board_folder.mkdir(parents=True, exist_ok=True)
+        destination = board_folder / output_path.name
+        if destination.resolve() != output_path.resolve():
+            if destination.exists():
+                if (destination.stat().st_size != output_path.stat().st_size or
+                        hashlib.sha256(destination.read_bytes()).digest() !=
+                        hashlib.sha256(output_path.read_bytes()).digest()):
+                    destination = board_folder / (
+                        output_path.stem + "_" +
+                        hashlib.sha256(output_path.read_bytes()).hexdigest()[:12] +
+                        output_path.suffix)
+            if not destination.exists():
+                shutil.copy2(output_path, destination)
+            storyboard_copy = str(destination.resolve())
+        else:
+            storyboard_copy = str(output_path.resolve())
+    except OSError as copy_exc:
+        log_fn("สร้าง Storyboard สำเร็จ แต่คัดลอกไปโฟลเดอร์ storyboard ไม่ได้: " +
+               str(copy_exc)[:170])
     try:
         current_run = _active_story_run()
         _remember_image_prompt_link(
@@ -9574,6 +9606,7 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
     meta = {
         "version": 2,
         "image_path": str(output_path.resolve()),
+        "storyboard_copy_path": storyboard_copy,
         "created_at": time.time(),
         "source": "prompt_ref_preflight_direct_image_then_vision_split",
         "scene_text": str(story_text or "").strip(),
