@@ -49,6 +49,25 @@ def _track_visible_job(state, kind, number, phase):
             tasks.pop(number, None)
         else:
             tasks[number] = phase
+        # A queued/retried/completed shot cannot inherit another UUID's
+        # generation percentage. It must be reported afresh by its own API.
+        if kind == "videos":
+            state.setdefault("clip_generation_pct_by_scene", {}).pop(number, None)
+
+
+def _video_job_progress_line(number, percent=None):
+    """One visible Auto row, with genuine per-shot provider progress only."""
+    if percent is None:
+        return f"วิดีโอ · ช็อต {number} · กำลังทำงาน · รอเปอร์เซ็นต์จาก API"
+    if isinstance(percent, bool):
+        return f"วิดีโอ · ช็อต {number} · กำลังทำงาน · รอเปอร์เซ็นต์จาก API"
+    try:
+        value = float(percent)
+    except (TypeError, ValueError, OverflowError):
+        return f"วิดีโอ · ช็อต {number} · กำลังทำงาน · รอเปอร์เซ็นต์จาก API"
+    if not math.isfinite(value) or not 0 <= value <= 100:
+        return f"วิดีโอ · ช็อต {number} · กำลังทำงาน · รอเปอร์เซ็นต์จาก API"
+    return f"วิดีโอ · ช็อต {number} · กำลังทำงาน · {int(value)}%"
 
 
 def story_history_seed_document(context, full_story: str, selected_part: str):
@@ -4896,7 +4915,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 queued = [n for n, phase in tasks.items() if phase == "queued"]
                 waiting = state.get("redraw_queue" if kind == "images" else "clip_redo_queue") or []
                 queued = list(dict.fromkeys(queued + [i + 1 for i in waiting]))
-                rows.extend(f"{title} · ช็อต {n} · กำลังทำงาน" for n in active)
+                if kind == "videos":
+                    provider_progress = state.get("clip_generation_pct_by_scene") or {}
+                    rows.extend(_video_job_progress_line(n, provider_progress.get(n)) for n in active)
+                else:
+                    rows.extend(f"{title} · ช็อต {n} · กำลังทำงาน" for n in active)
                 if queued:
                     rows.append(f"{title} · รอคิว {len(queued)} งาน · ถัดไปช็อต {queued[0]}")
             pending = state.get("auto_video_postprocess_pending") or []
@@ -9126,10 +9149,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     return
                 if not 0 <= value <= 100:
                     return
-                state.setdefault("clip_generation_pct_by_scene", {})[scene_number] = value
-                set_progress("clips", state.get("clip_fraction", 0),
-                             f"สร้างคลิป {scene_number}/{len(scenes)} · {value}% · "
-                             f"{len(active_video_slots)} Slot")
+                with state["lock"]:
+                    if (state.get("visible_jobs") or {}).get("videos", {}).get(scene_number) != "active":
+                        return
+                    state.setdefault("clip_generation_pct_by_scene", {})[scene_number] = value
+                # UI heartbeat displays percent beside its own shot number,
+                # not in the project's header / global progress detail.
             ui(update)
 
         def show_auto_upscale_progress(slot, scene_number, backend, percent):
