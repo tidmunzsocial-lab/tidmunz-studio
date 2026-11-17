@@ -531,10 +531,19 @@ def _write_extension(source: Path, token: str, port: int) -> None:
     """Copy the extension next to Tidmunz's data and give it this PC's port and token."""
     target = extension_dir()
     target.mkdir(parents=True, exist_ok=True)
-    for item in source.glob("*.*"):
-        destination = target / item.name
-        if not destination.is_file() or destination.read_bytes() != item.read_bytes():
-            shutil.copy2(item, destination)
+    # On startup an older desktop package must not overwrite a hotfixed/newer
+    # extension. This used to silently downgrade 1.0.54 back to 1.0.53.
+    try:
+        source_version = json.loads((source / "manifest.json").read_text(encoding="utf-8"))["version"]
+        target_version = json.loads((target / "manifest.json").read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, TypeError, KeyError):
+        source_version, target_version = "0", "0"
+    preserve_newer_extension = _version_tuple(target_version) > _version_tuple(source_version)
+    if not preserve_newer_extension:
+        for item in source.glob("*.*"):
+            destination = target / item.name
+            if not destination.is_file() or destination.read_bytes() != item.read_bytes():
+                shutil.copy2(item, destination)
     config = f"self.TZ_CONFIG = {json.dumps({'port': port, 'token': token})};\n"
     config_path = target / "config.js"
     if not config_path.is_file() or config_path.read_text(encoding="utf-8") != config:

@@ -1,3 +1,15 @@
+- 2026-11-17 v2.0.39 urgent fix: packaging v2.0.38 overwrote a 1.0.54
+  Chrome extension hotfix with old 1.0.53 source on app restart.
+  snapgen_chrome_relay._write_extension now never downgrades an already
+  newer installed extension, but still upgrades whenever the bundled
+  extension is newer. Both shipped folders contain Chrome extension
+  1.0.55, including real @app mentions and reusable one-owned-tab logic.
+  Auto bootstrap now distinguishes an uncertain OLD scheduled follow-up
+  from a separately reserved UNSENT first project chat. The reserved
+  unsent SAME project tab may safely send once; prior uncertain marker is
+  archived intact, never replayed. An attempted send or navigated pending
+  tab is never resent. Python and JS regressions cover downgrade,
+  same-version replacement, upgrade and uncertain-safe bootstrap.
 - 2026-11-17 Chrome monitor tab & real app mention fix: ChatGPT no longer
   exposes the Tidmunz app in the old Plus-menu button list. The Tidmunz
   Chrome extension uses native @tidmunz and @dino autocomplete in the actual

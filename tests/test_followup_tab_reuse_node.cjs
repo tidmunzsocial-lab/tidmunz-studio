@@ -97,5 +97,28 @@ const job=(story,char)=>({
   assert.match(blocked.error||"",/ข้อความร่าง/);
   assert.equal(created,1);
   assert.equal(tabs.get(id).url,currentUrl);
-  console.log("PASS one monitor tab reused; user chat preserved; draft blocks navigation");
+  // An OLD follow-up marked uncertain is not evidence the NEW reserved
+  // project chat sent. Recover that pending blank tab WITHOUT replaying the
+  // earlier marker and WITHOUT creating a second Chrome tab.
+  mockDraft=false;
+  // Simulate the exactly reserved UNSENT tab left by the old extension.
+  // Unlike the draft-block scenario, this is a safe retry of the SAME
+  // pending project and not a request to open an extra chat.
+  tabs.get(id).url="https://chatgpt.com/";
+  store.tmMonitorBootstrapPending={
+    projectKey:"d".repeat(64),story:"Film D",host:"DESKTOP-TESTHOST",
+    tabId:id,marker:"TMB-1700000000001",attempted:false,
+    createdAt:Date.now()
+  };
+  store.tmProjectFollowup.phase="uncertain";
+  store.tmProjectFollowup.marker="TMF-1700000000000-1";
+  store.tmProjectFollowup.lastResult="sent";
+  store.tmProjectFollowup.lastError="Previous send unconfirmed";
+  const fourth=await self.tmFollowupBootstrap(job("Film D","d"));
+  assert.equal(fourth.ok,true,JSON.stringify(fourth));
+  assert.equal(created,1,"uncertain follow-up does not duplicate bootstrap tab");
+  assert.equal(store.tmMonitorPreviousUncertain.marker,"TMF-1700000000000-1");
+  assert.equal(store.tmProjectFollowup.phase,"idle");
+  assert.equal(store.tmProjectFollowup.marker,"");
+  console.log("PASS one monitor tab reused; user chat preserved; draft blocks navigation; uncertain old follow-up safely archived");
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -568,11 +568,16 @@
     if(live.complete||live.effect_review_pending)
       return {error:"Project already passed the monitor handoff"};
     let c=await load();
-    if(c.phase==="sending"||c.phase==="uncertain")
-      return {error:"Prior monitor send has uncertain receipt; do not create a new chat"};
     const KEY="tmMonitorStoryChats", PENDING="tmMonitorBootstrapPending";
     const all=(await chrome.storage.local.get([KEY,PENDING]));
     const existing=all[KEY]||{},mapped=existing[projectKey];
+    const priorUncertain=c.phase==="sending"||c.phase==="uncertain";
+    // Old scheduled follow-up and the FIRST project-chat bootstrap have
+    // different markers/receipts. Never replay the former. The latter may
+    // resume ONLY its exact stored project and reserved tab (no new tab).
+    if(priorUncertain && !mapped &&
+       (!all[PENDING] || all[PENDING].projectKey!==projectKey))
+      return {error:"Earlier follow-up unconfirmed; no reserved chat for safe recovery"};
     const requested=parse(job.existing_url);
     if(mapped && (mapped.story!==story || mapped.host!==host))
       return {error:"Saved monitor chat belongs to another machine or story"};
@@ -586,9 +591,16 @@
       if(!parsed)throw Error("Invalid confirmed ChatGPT conversation URL");
       if(c.enabled && c.host===host && c.story===story && c.cid===parsed.cid)
         return {ok:true,cid:parsed.cid,url:parsed.url,reused:true,real_apps:2};
-      if(c.phase==="sending"||c.phase==="uncertain")
-        throw Error("Old monitor send must be reconciled first");
+      if(priorUncertain){
+        // Preserve the older uncertain follow-up receipt as audit evidence.
+        // This never resends its marker or treats it as a new chat message.
+        await chrome.storage.local.set({tmMonitorPreviousUncertain:{
+          marker:c.marker||"",cid:c.cid||"",story:c.story||"",
+          phase:c.phase,lastResult:c.lastResult||"",archivedAt:Date.now()
+        }});
+      }
       c.enabled=true;c.stopRequested=false;c.phase="idle";c.marker="";
+      c.lastToolMarker="";c.lastToolAt=0;c.lastProgress=null;
       c.cid=parsed.cid;c.url=parsed.url;c.host=host;c.story=story;
       c.errors=0;c.lastError="";c.lastResult="project_chat_bound";
       c.nextAt=Date.now()+MIN;
@@ -632,6 +644,12 @@
       catch(_){return false;}
     }
     if(!pending.attempted){
+      // Check the actual reserved tab before the FIRST send. If it has
+      // navigated to a conversation already, the send may have succeeded.
+      // Never send a second first-message under that ambiguous condition.
+      const reserved=await chrome.tabs.get(t.id);
+      if((reserved.url||"").split("?")[0]!=="https://chatgpt.com/")
+        return {error:"Reserved story tab no longer blank; reconcile original send, do not retry"};
       for(let attempt=0;attempt<36;attempt++){
         try{
           const check=await inPage(t.id,()=>{
