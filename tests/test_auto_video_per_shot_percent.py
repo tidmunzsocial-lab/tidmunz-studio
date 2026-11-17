@@ -92,3 +92,51 @@ def test_actual_uuid_routing_never_changes_the_global_stage_banner():
     on_percentage(0, "uuid-41", 98)
     assert state["clip_generation_pct_by_scene"][41] == 38
     assert "_video_job_progress_line(n, provider_progress.get(n))" in source
+
+def test_recovered_core_history_percent_routes_only_to_matching_auto_uuid():
+    # The original Veo/core poller uses history_one(); this hook must reuse
+    # its existing GET response instead of making another network request.
+    source = (Path(__file__).resolve().parents[1] / "snapgen_gui_v2.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    method = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and
+                  node.name == "_history_one_with_auto_progress")
+    responses = {
+        "uuid-41": {"status_percentage": "38.9"},
+        "uuid-43": {"detail": {"status_percentage": "72%"}},
+        "uuid-other": {"status_percentage": 55},
+        "uuid-invalid": {"status_percentage": "nan"},
+    }
+    get_calls = []
+    forwarded = []
+
+    def original_history_one(uuid):
+        get_calls.append(uuid)
+        return responses[uuid]
+
+    g = {
+        "_auto_video_receipt_by_slot": {
+            0: {"uuid": "uuid-41", "scene_number": 41},
+            1: {"uuid": "uuid-43", "scene_number": 43},
+        },
+        "_auto_video_generation_progress": lambda *args: forwarded.append(args),
+    }
+    scope = {"g": g, "_original_history_one_for_auto_progress": original_history_one}
+    exec(compile(ast.fix_missing_locations(ast.Module(
+        body=[method], type_ignores=[])), "<core_history_hook>", "exec"), scope)
+    get_with_progress = scope["_history_one_with_auto_progress"]
+
+    for uuid in responses:
+        assert get_with_progress(uuid) is responses[uuid]
+    assert get_calls == list(responses)
+    assert forwarded == [(0, "uuid-41", 38), (1, "uuid-43", 72)]
+
+    # A replaced receipt invalidates the old UUID even if another poll arrives.
+    g["_auto_video_receipt_by_slot"][0] = {"uuid": "uuid-new", "scene_number": 45}
+    get_with_progress("uuid-41")
+    assert forwarded == [(0, "uuid-41", 38), (1, "uuid-43", 72)]
+
+
+def test_global_percent_has_an_explicit_project_label():
+    source = inspect.getsource(N._build)
+    assert 'status_percent_var.set(f"ทั้งโปรเจกต์ {int(percent)}%")' in source

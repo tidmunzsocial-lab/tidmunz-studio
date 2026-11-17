@@ -4408,7 +4408,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     status_header.pack(fill="x", padx=10, pady=(5, 2))
     status_title_var = tk.StringVar(value="○ พร้อมทำงาน")
     status_detail_var = tk.StringVar(value="กำลังตรวจสถานะโปรเจกต์")
-    status_percent_var = tk.StringVar(value="0%")
+    status_percent_var = tk.StringVar(value="ทั้งโปรเจกต์ 0%")
     status_title_label = tk.Label(
         status_header, textvariable=status_title_var, bg="#F1F5F9", fg="#0F172A",
         font=("TkDefaultFont", 11, "bold"), anchor="w", justify="left")
@@ -4893,7 +4893,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             detail=description, elapsed=now - status_clock["began"],
             silent_for=now - status_clock["last_change"], percent=percent)
         status_title_var.set(title)
-        status_percent_var.set(f"{int(percent)}%")
+        status_percent_var.set(f"ทั้งโปรเจกต์ {int(percent)}%")
         if running:
             # Show the action and its detail in the same card, without repeating
             # a separate progress row or overwriting state used by the mobile API.

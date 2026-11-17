@@ -3281,6 +3281,35 @@ if callable(_core_duration_values_for_model):
         print(f"[SnapGen] LTX duration menu refresh failed: {_duration_patch_error}", flush=True)
 
 
+# Bridge the recovered core's history_one() percentage into Auto's exact
+# shot/UUID callback. This reuses the existing provider GET response, without
+# an extra poll or another paid video submission.
+_original_history_one_for_auto_progress = g.get("history_one")
+if (callable(_original_history_one_for_auto_progress)
+        and not getattr(_original_history_one_for_auto_progress, "_snapgen_per_shot_progress_wrapper", False)):
+    def _history_one_with_auto_progress(uuid, *args, **kwargs):
+        history = _original_history_one_for_auto_progress(uuid, *args, **kwargs)
+        try:
+            if isinstance(history, dict):
+                detail = history.get("detail")
+                raw_pct = history.get("status_percentage")
+                if raw_pct is None and isinstance(detail, dict):
+                    raw_pct = detail.get("status_percentage")
+                if raw_pct is not None and not isinstance(raw_pct, bool):
+                    value = float(str(raw_pct).strip().rstrip("%"))
+                    if 0 <= value <= 100:
+                        callback = g.get("_auto_video_generation_progress")
+                        if callable(callback):
+                            for slot, receipt in tuple((g.get("_auto_video_receipt_by_slot") or {}).items()):
+                                if str((receipt or {}).get("uuid") or "") == str(uuid):
+                                    callback(slot, str(uuid), int(value))
+                                    break
+        except Exception:
+            # Presentation failures must never interrupt provider polling.
+            pass
+        return history
+    _history_one_with_auto_progress._snapgen_per_shot_progress_wrapper = True
+    g["history_one"] = _history_one_with_auto_progress
 # Hosted adapters can return media_url/media_files as well as generated_video.
 # Reuse the same UUID/download flow for Vela and Seedance.
 _original_poll_and_download = g.get("poll_and_download")
