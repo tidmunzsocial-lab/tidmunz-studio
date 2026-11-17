@@ -204,6 +204,7 @@ def test_auto_model_selection_save_then_restart_load(tmp_path):
               CLIP_CHOICE_LABELS={0: "อัตโนมัติ", 10: "10 วินาที"}, clip_labels={"map": {0: "อัตโนมัติ", 10: "10 วินาที"}},
               clip_choice_var=Var(""), video_res_var=Var("720p"),
               messagebox=None, page=None, apply_selected_video_model=lambda project: None,
+              migrate_legacy_economy_default=lambda project: False,
               refresh_table=lambda: None)
     for key, value in dict(script_var="", audio_var="", aspect_var="16:9", count_var="36", subtitle_var=False,
                            economy_var=True, film_var=False, style_var="ปกติ").items():

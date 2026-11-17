@@ -1916,16 +1916,44 @@ ECONOMY_NOTE = (". โหมดประหยัด: ทุกช็อตเ�
 def pick_clip(length: float, slow_ok: bool, cheap_ok: bool = False, stretch: float = CLIP_STRETCH) -> tuple:
     """Cheapest (model, seconds, slow) whose finished clip covers ``length`` s of narration.
 
-    vela (cheap, 5 s) first when the shot allows it, then grok-lower by
-    requested seconds, plain before Slow 2x.
+    For slow-eligible shots, always choose a Slow 2x candidate first.
+    The lowest provider-billed duration that covers the narration wins;
+    never buy a full-speed video when 6s+Slow2x can cover the same shot.
+    Dialogue is not slow-eligible and retains natural lip-sync timing.
     """
-    slows = (False, True) if slow_ok else (False,)
+    slows = (True,) if slow_ok else (False,)
     options = [(VIDEO_CHEAP_MODEL, VELA_CLIP_SECONDS, slow) for slow in slows] if cheap_ok else []
     options += [(VIDEO_AUTO_MODEL, s, slow) for s in GROK_CLIP_SECONDS for slow in slows]
     for model, seconds, slow in options:
         if seconds * (2 if slow else 1) * stretch >= length - CROSSFADE:
             return model, seconds, slow
     return options[-1]
+
+
+def economy_auto_clip_choice(project: dict) -> int:
+    """Economy is auto-duration, not the old fixed 10-second setting.
+
+    A user's explicit fixed-length choice is honored only when economy is
+    switched off. Paid clips are handled separately by assign_clips().
+    """
+    if project.get("economy", True):
+        return 0
+    return int(project.get("clip_choice") or 0)
+
+
+def migrate_legacy_economy_default(project: dict) -> bool:
+    """Repair the old hidden 10s default; do not change a manually selected one.
+
+    Keep planned_clip_choice and all existing scene/image/clip receipts
+    untouched. A completed plan does NOT need to be regenerated.
+    """
+    if (project.get("economy", True) and
+            int(project.get("clip_choice") or 0) == 10 and
+            not project.get("clip_choice_explicit")):
+        project["clip_choice"] = 0
+        project["auto_duration_migrated_from_10s"] = True
+        return True
+    return False
 
 
 def clip_limit(scene: dict) -> float:
@@ -1944,9 +1972,13 @@ def assign_clips(scenes: list, duration: float, economy: bool = False, clip_choi
         scene["shot_seconds"] = length
         if scene.get("clip") and os.path.isfile(scene["clip"]):
             continue  # Completed paid assets retain their actual model/speed metadata.
+        if scene.get("clip_uuid"):
+            continue  # Provider already accepted this paid job: retain original timing until recovered.
         if scene.get("clip_fallback"):  # vela already failed here: stay on grok-lower
             scene["cheap"] = False
         spoken = bool(scene.get("dialogue"))  # dialogue: real speed, clip only trimmed, never slowed
+        if economy and not spoken:
+            scene["slow"] = True  # keep the shot design aligned with the slow-down actually rendered
         scene["clip_model"], scene["clip_seconds"], scene["clip_slow"] = pick_clip(
             length, (economy or bool(scene.get("slow"))) and not spoken, bool(scene.get("cheap")) and not spoken,
             1.0 if spoken else CLIP_STRETCH)
@@ -3947,7 +3979,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     price_line_var = tk.StringVar(value="ราคาวันนี้: กำลังอ่านจากเว็บ SnapGen ...")
     prices = {"data": None}
     clip_labels = {"map": dict(CLIP_CHOICE_LABELS)}  # seconds -> menu text; rebuilt from the website's price list
-    clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[10])
+    clip_choice_var = tk.StringVar(value=CLIP_CHOICE_LABELS[0])
     video_res_var = tk.StringVar(value="1080p")
     image_provider_var = tk.StringVar(value=GPT_WEB_LABEL)
     qwen_2k_var = tk.BooleanVar(value=False)
@@ -3961,7 +3993,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         # The selected model is authoritative for every unfinished shot, including scenery.
         # Existing completed clips are preserved to avoid consuming credits twice.
         assign_clips(project.get("scenes") or [], float(project.get("duration") or 0),
-                     bool(project.get("economy", True)), int(project.get("clip_choice") or 0),
+                     bool(project.get("economy", True)), economy_auto_clip_choice(project),
                      project.get("video_model"))
     detail_var = tk.StringVar(value="")
     credit_warning_var = tk.StringVar(value="")
@@ -4140,9 +4172,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tk.Label(options, textvariable=clip_info_var, bg=bg, fg="#1E3A8A").pack(side="left", padx=(0, 14))
 
         def economy_changed():
-            if state.get("project") is not None:
-                state["project"]["economy"] = bool(economy_var.get())
+            project = state.get("project")
+            if project is not None:
+                project["economy"] = bool(economy_var.get())
+                if project["economy"]:
+                    # When economy is checked, GPT decides shot durations and
+                    # the clip planner chooses affordable lengths with Slow 2x.
+                    project["clip_choice"] = 0
+                    project["clip_choice_explicit"] = False
+                    clip_choice_var.set(clip_labels["map"][0])
+                apply_selected_video_model(project)
                 save_project()
+                refresh_table()
         video_controls = tk.Frame(settings_parent, bg=bg)
         video_controls.pack(fill="x", padx=8, pady=(0, 2))
         checkbox_parent = video_controls
@@ -4213,6 +4254,13 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if project is not None:
                 project["clip_choice"] = next((n for n, label in clip_labels["map"].items()
                                                if label == clip_choice_var.get()), 0)
+                project["clip_choice_explicit"] = bool(project["clip_choice"])
+                if project["clip_choice"]:
+                    # Fixed duration is a conscious alternative to auto/economy.
+                    # Never silently turn off Slow 2x while the economy box
+                    # continues to appear checked.
+                    project["economy"] = False
+                    economy_var.set(False)
                 apply_selected_video_model(project)
                 save_project()  # a plan made for another length is asked about when the run starts
                 refresh_table()
@@ -4675,12 +4723,15 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             image_provider_var.set(VIDEO_AUTO_IMAGE_PROVIDER_MENU_LABELS.get(
                 project.get("storyboard_provider"), GPT_WEB_LABEL))
             if "clip_choice" not in project:
-                # A new story starts on full HD (Grok Lite 1080p, 10 s clips); a plan that already
-                # exists keeps the automatic length it was made with.
+                # Never select a paid fixed duration behind the user's back.
+                # A new story uses a variable-length, credit-saving plan.
                 fresh = not project.get("scenes") and not project.get("done", {}).get("plan")
-                project["clip_choice"] = 10 if fresh else 0
+                project["clip_choice"] = 0
                 if fresh and not project.get("video_model"):
                     project["video_model"], project["video_resolution"] = VIDEO_GROK_LITE_MODEL, "1080p"
+            if migrate_legacy_economy_default(project):
+                log("แก้ค่าเริ่มต้นเก่า 10 วินาทีเป็นโหมดประหยัดอัตโนมัติ "
+                    "เฉพาะช็อตที่ยังไม่มีคลิป — เก็บช็อต/รูป/คลิปเดิมทั้งหมด")
             video_model = str(project.get("video_model") or "auto")
             video_model_var.set(VIDEO_MODEL_LABELS.get(video_model, SEEDANCE_MODELS.get(
                 video_model, VIDEO_MODEL_LABELS["auto"])))
@@ -6617,7 +6668,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                            horror=project.get("style_mode") == "เรื่องผี", progress=progress, out=scenes_so_far,
                            script=story_script(), direction=project.setdefault("direction", {}),
                            refs=attachment_names(), aspect=desired_aspect(), economy=economy_on(),
-                           clip_choice=int(project.get("clip_choice") or 0),
+                           clip_choice=economy_auto_clip_choice(project),
                            video_model=project.get("video_model") or VIDEO_AUTO_MODEL)
             if video_mode:
                 speech_audit = verify_script_dialogue_coverage(story_script(), scenes_so_far)
@@ -6632,7 +6683,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                         f'— หยุดก่อนสร้างวิดีโอเพื่อป้องกันคำพูดผิดคนหรือหาย: {missed}')
                 if speech_audit["expected"]:
                     log(f'✓ ตรวจบทพูดกับแผนตรงกัน {speech_audit["matched"]}/{speech_audit["expected"]} ประโยค')
-            project["planned_clip_choice"] = int(project.get("clip_choice") or 0)
+            project["planned_clip_choice"] = economy_auto_clip_choice(project)
             if project["direction"]:
                 (folder / "director_plan.json").write_text(
                     json.dumps(project["direction"], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -10042,7 +10093,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             keeps_choice = chosen_model in (VIDEO_GROK_LOWER_MODEL, VIDEO_GROK_LITE_MODEL, VIDEO_MUSE_MODEL, *SEEDANCE_MODELS)
             changed_clip = bool(project.get("done", {}).get("plan") and (
                 (not keeps_choice and chosen_model != VIDEO_AUTO_MODEL)
-                or int(project.get("clip_choice") or 0) != int(project.get("planned_clip_choice") or 0)))
+                or (not economy_on() and economy_auto_clip_choice(project) != int(project.get("planned_clip_choice") or 0))))
             project.update({"clip_seconds": VIDEO_AUTO_AVG_SECONDS,
                             "video_model": chosen_model if keeps_choice else VIDEO_AUTO_MODEL})
         else:

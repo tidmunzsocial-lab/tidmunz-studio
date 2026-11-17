@@ -1,3 +1,19 @@
+- 2026-11-17 v2.0.40: Repair Auto economy ("ประหยัด สโลว์ 2x")
+  being silently defeated by the old hard-coded 10-second clip_choice,
+  including defaults in new projects and restoring old projects. GPT
+  still plans narration/shot boundaries, then an auto-duration clip
+  selector chooses the shortest supported paid 6/10/15s for each
+  Grok shot; every economy shot without spoken dialogue uses Slow 2x
+  (6s->12s, 10s->20s), while lip-synced dialogue stays normal speed.
+  The selected explicit Grok model remains fixed (no switch to Muse).
+  Previously completed clips and accepted paid UUIDs are never reassigned
+  or resubmitted; no storyboard/image/clip re-generation merely because
+  the old plan recorded fixed 10s. Migration of legacy hidden default
+  is one-time and preserves every existing asset and completed flag.
+  New explicit fixed-length choice turns off economy visibly instead
+  of silently nullifying Slow 2x. Tested provider 6 vs 10 choices, scene
+  timing, spoken dialogue, old 114-scene/72-clip preservation, and
+  pending paid UUID protection.
 - 2026-11-17 v2.0.39 urgent fix: packaging v2.0.38 overwrote a 1.0.54
   Chrome extension hotfix with old 1.0.53 source on app restart.
   snapgen_chrome_relay._write_extension now never downgrades an already
