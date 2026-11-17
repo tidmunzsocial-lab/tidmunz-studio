@@ -5,6 +5,7 @@
 // Pairing: a folder install gets port + token from config.js; the Chrome Web Store build
 // asks Tidmunz for them at /pair (Tidmunz only answers requests coming from an extension).
 try { importScripts("config.js"); } catch (e) { self.TZ_CONFIG = null; }
+try { importScripts("snapgen_web.js"); } catch (e) { self.snapgenWebJob = null; self.snapgenWebInspect = null; }
 try { importScripts("monitor_apps.js"); } catch (e) { self.tmMonitorComposeWithApps = null; }
 try { importScripts("followup.js"); } catch (e) { self.tmFollowupInit = null; }
 
@@ -108,7 +109,15 @@ async function loop() {
   async function perform(job, workerKey) {
     let result;
     try {
-      if (job.type === "monitor_bootstrap") {
+      if (job.type === "snapgen_web_image") {
+        result = typeof self.snapgenWebJob==="function"
+          ? await self.snapgenWebJob(job)
+          : {error:"SnapGen Web extension function unavailable",send_state:"not_sent"};
+      } else if (job.type === "snapgen_web_inspect") {
+        result = typeof self.snapgenWebInspect==="function"
+          ? await self.snapgenWebInspect(job)
+          : {error:"SnapGen Web inspect function unavailable",send_state:"not_sent"};
+      } else if (job.type === "monitor_bootstrap") {
         result = typeof self.tmFollowupBootstrap==="function" ?
           await self.tmFollowupBootstrap(job) :
           {error:"Story-monitor bootstrap not installed"};

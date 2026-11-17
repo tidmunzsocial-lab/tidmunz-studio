@@ -757,6 +757,8 @@ class MobileController:
                         raise ValueError("auto_start รองรับ provider เฉพาะ gpt_web หรือ snapgen")
                     return auto["start"](provider=data["provider"])
                 return auto["start"]()
+            if action == "auto_web_image_shot":
+                return auto["web_image_shot"](data.get("shot"))
             if action == "auto_stop":
                 return auto["stop"]()
             if action == "auto_repair_options":

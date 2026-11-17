@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tidmunz ChatGPT",
-  "version": "1.0.55",
+  "version": "1.0.56",
   "description": "Connects the Tidmunz Studio desktop app on this PC to your own ChatGPT tab, so the app's text and picture jobs run in ChatGPT.",
   "background": {
     "service_worker": "background.js"
@@ -14,7 +14,9 @@
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://snapgen.ai/*",
+    "https://accounts.google.com/*"
   ],
   "action": {
     "default_title": "Tidmunz ChatGPT",

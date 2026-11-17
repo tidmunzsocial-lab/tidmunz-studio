@@ -163,12 +163,14 @@ SNAPGEN_USER_AGENT = "TidmunzStudio/1.0"
 COMFYUI_URL = os.environ.get("SNAPGEN_COMFYUI_URL", "")
 GPT_WEB_LABEL = "GPT Web (Chrome เดิม)"
 SNAPGEN_LABEL = "SnapGen API · GPT Image 2.5 Lower"
+SNAPGEN_WEB_LABEL = "SnapGen Web · Grok Image (ส่วนขยาย Chrome)"
 QWEN_LABEL = "Qwen 2.1 (ComfyUI ในเครื่อง)"
 PER_STAGE_LABEL = "เลือกแยกตามขั้น (ถามครั้งละหัวข้อ)"
 IMAGE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL, "snapgen": SNAPGEN_LABEL,
                          "qwen": QWEN_LABEL, "per_stage": PER_STAGE_LABEL}
 VIDEO_AUTO_SCENE_PROVIDER_LABELS = {"gpt_web": GPT_WEB_LABEL,
-                                  "snapgen": SNAPGEN_LABEL + " · พร้อมกันสูงสุด 5 งาน"}
+                                  "snapgen": SNAPGEN_LABEL + " · พร้อมกันสูงสุด 2 งาน",
+                                  "snapgen_web": SNAPGEN_WEB_LABEL}
 VIDEO_AUTO_IMAGE_PROVIDER_LABELS = {
     "gpt_web": GPT_WEB_LABEL,
     "snapgen": SNAPGEN_LABEL,
@@ -5496,14 +5498,14 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         imgmod = runtime.get("_imgmod") or g.get("_imgmod")
         project = state["project"]
         provider = "snapgen" if api_context is not None else image_provider_for(state.get("active_image_stage", "images"))
-        if imgmod is None and provider not in ("snapgen", "qwen"):
+        if imgmod is None and provider not in ("snapgen", "qwen", "snapgen_web"):
             raise RuntimeError("ระบบสร้างรูปยังไม่พร้อม")
         identity_refs = list(refs)
         if board:
             # Image 1 = this shot's storyboard panel (layout to follow), then identity references.
-            refs = [board, *refs] if provider in ("snapgen", "qwen") else [board, *refs][:6]
+            refs = [board, *refs] if provider in ("snapgen", "qwen", "snapgen_web") else [board, *refs][:6]
         face_reference = (identity_repair or {}).get("face_reference")
-        face_ref_limit = 16 if provider in ("snapgen", "qwen") else 6
+        face_ref_limit = 5 if provider == "snapgen_web" else 16 if provider in ("snapgen", "qwen") else 6
         if face_reference and Path(face_reference).is_file() and len(refs) < face_ref_limit:
             # Keep the complete master for body/outfit, and add its face-focused crop as a separate cue.
             refs.append(face_reference)
@@ -5596,6 +5598,18 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                                high_res=bool(project.get("qwen_2k")))
                 except Exception as exc:
                     raise ImageProviderError(f"Qwen สร้างรูปไม่สำเร็จ: {exc}") from exc
+            if provider == "snapgen_web":
+                # Existing extension, NOT ChatGPT Web or the paid SnapGen API.
+                # The backend maintains one receipt for each prompt+references and
+                # refuses an ambiguous resubmission, even across app restarts.
+                try:
+                    import snapgen_web_backend
+                    log(f"{name}: SnapGen Web ผ่านส่วนขยาย · Grok Image 16:9 · แนบ {len(refs)} เรฟ")
+                    return snapgen_web_backend.generate(prompt, refs, out_dir, name, aspect)
+                except Exception as exc:
+                    # Prevent with_retries / GPT prompt repair from silently
+                    # generating a second paid Web job after an unknown send.
+                    raise ImageProviderError(f"{name}: SnapGen Web หยุดอย่างปลอดภัย: {exc}") from exc
             if provider == "snapgen":
                 signature = hashlib.sha256((prompt + "\n" + aspect).encode("utf-8") + b"".join(
                     hashlib.sha256(Path(p).read_bytes()).digest() for p in refs if Path(p).is_file())).hexdigest()
@@ -10214,10 +10228,16 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                 and snapgen_temporarily_unavailable(exc)):
                             if key == "storyboard":
                                 project["storyboard_provider"] = "gpt_web"
+                                fallback_provider = "gpt_web"
                             else:
-                                project.setdefault("image_stage_providers", {})[key] = "gpt_web"
+                                # SnapGen Web is the requested extension path;
+                                # its own receipt forbids duplicate paid sends.
+                                fallback_provider = "snapgen_web"
+                                project.setdefault("image_stage_providers", {})[key] = fallback_provider
                             save_project()
-                            log(f"SnapGen ไม่พร้อมให้บริการ — เปลี่ยน {key} ไปใช้ GPT Web และทำเฉพาะรูปที่ยังขาด")
+                            log(f"SnapGen API ไม่พร้อม — เปลี่ยน {key} ไปใช้ "
+                                f"{VIDEO_AUTO_SCENE_PROVIDER_LABELS.get(fallback_provider, GPT_WEB_LABEL)} "
+                                "และทำเฉพาะรูปที่ยังขาด")
                             STAGE_FUNCS[key]()
                         elif (video_mode and key in ("storyboard", "images") and provider == "gpt_web"
                               and ask_image_limit_fallback(key, exc)):
@@ -11221,6 +11241,54 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 start_pipeline(image_provider_choice=provider)
             return "เริ่ม / ทำต่อแล้ว ดูความคืบหน้าในหน้านี้"
 
+        def mobile_web_image_shot(shot_number) -> str:
+            """Explicit safe SnapGen Web attempt for one missing shot only."""
+            if state["busy"]:
+                raise ValueError("โปรแกรมยังทำงานอยู่ — หยุดงานเดิมก่อน")
+            project = state.get("project") or {}
+            scenes = project.get("scenes") or []
+            try:
+                number = int(shot_number)
+            except (ValueError, TypeError):
+                raise ValueError("ต้องระบุเลขช็อต")
+            if not 1 <= number <= len(scenes):
+                raise ValueError("เลขช็อตไม่อยู่ในโปรเจกต์")
+            scene = scenes[number - 1]
+            if scene.get("image") and Path(scene["image"]).is_file():
+                raise ValueError("ช็อตนี้มีรูปแล้ว ไม่ส่งซ้ำ")
+            if scene.get("clip") or scene.get("clip_uuid"):
+                raise ValueError("ช็อตนี้มีใบรับงานวิดีโออยู่ ไม่ส่งซ้ำ")
+            if number <= 75:
+                raise ValueError("ห้ามแตะช็อตที่ทำสำเร็จแล้ว")
+            state["busy"], state["stop"] = True, False
+            state["active_image_stage"] = "images"
+            choices = project.setdefault("image_stage_providers", {})
+            previous_provider = choices.get("images")
+            choices["images"] = "snapgen_web"
+            save_project()
+            ui(lambda: start_btn.config(state="disabled"))
+            log(f"SnapGen Web: เริ่มสร้างภาพช็อต {number} ผ่านส่วนขยาย ไม่ใช่ API")
+            def work():
+                try:
+                    stage_images(indices=[number - 1])
+                    log(f"✓ SnapGen Web: ช็อต {number} เสร็จและบันทึกภาพแล้ว")
+                except Exception as exc:
+                    log(f"❌ SnapGen Web ช็อต {number}: {str(exc)[:380]}")
+                    ui(detail_var.set, str(exc)[:200])
+                finally:
+                    if previous_provider is None:
+                        choices.pop("images", None)
+                    else:
+                        choices["images"] = previous_provider
+                    save_project()
+                    state["busy"] = False
+                    state.pop("auto_yes", None)
+                    state.pop("active_image_stage", None)
+                    ui(lambda: start_btn.config(state="normal", text="▶ ทำต่อ"))
+                    ui(refresh_all)
+            threading.Thread(target=work, daemon=True).start()
+            return f"เริ่ม SnapGen Web สำหรับช็อต {number} แล้ว; ไม่ส่งวิดีโอ"
+
         def mobile_stop() -> str:
             request_stop()
             return "สั่งหยุดแล้ว (หยุดหลังขั้นที่กำลังทำ)"
@@ -11304,7 +11372,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return f"เริ่มแก้เรฟช็อต {index + 1} ผ่าน {'SnapGen API' if provider == 'snapgen' else 'GPT Web (Chrome)'} แล้ว — ดูสถานะในหน้าออโต้"
 
         runtime["mobile_auto"] = {"snapshot": mobile_snapshot, "open": mobile_open,
-                                  "start": mobile_start, "stop": mobile_stop,
+                                  "start": mobile_start,
+                                  "web_image_shot": mobile_web_image_shot, "stop": mobile_stop,
                                   "repair_options": mobile_identity_options,
                                   "repair_identity": mobile_repair_identity}
     else:
