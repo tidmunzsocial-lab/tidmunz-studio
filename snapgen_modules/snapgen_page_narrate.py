@@ -5957,7 +5957,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                str(outcome.get("error") or "ไม่ทราบสาเหตุ")[:180])
         if int(outcome.get("real_apps") or 0) != 2:
             raise RuntimeError("ไม่พบแอปจริงครบสองตัวในแชตติดตาม ห้ามเริ่มวิเคราะห์บท")
-        if moved:
+        if moved or (prior.get("cid") and prior["cid"] != outcome["cid"]):
             project.setdefault("previous_monitor_chats", []).append(dict(prior))
         project["monitor_chat"] = {
             "url": outcome["url"], "cid": outcome["cid"],

@@ -127,5 +127,17 @@ const job=(story,char)=>({
   assert.equal(store.tmMonitorPreviousUncertain.marker,"TMF-1700000000000-1");
   assert.equal(store.tmProjectFollowup.phase,"idle");
   assert.equal(store.tmProjectFollowup.marker,"");
+  currentStory="Film E";
+  store.tmMonitorBootstrapPending={
+    ...job("Film E","e"),projectKey:"x".repeat(64),tabId:777,
+    marker:"TMB-1700000000002",attempted:true
+  };
+  const replaced=await self.tmFollowupBootstrap({...job("Film E","e"),wake:true,existing_url:first.url});
+  assert.equal(replaced.ok,true,JSON.stringify(replaced));
+  assert.notEqual(replaced.cid,first.cid);
+  assert.equal(store.tmMonitorPreviousBootstrap.marker,"TMB-1700000000002");
+  assert.equal(created,1,"replacement uses the existing owned monitor tab");
+  const recovered=await self.tmFollowupBootstrap({...job("Film E","e"),wake:true,existing_url:first.url});
+  assert.equal(recovered.cid,replaced.cid,"a lost reply must not create another replacement chat");
   console.log("PASS one monitor tab reused; user chat preserved; draft blocks navigation; uncertain old follow-up safely archived");
 })().catch(e=>{console.error(e);process.exitCode=1;});

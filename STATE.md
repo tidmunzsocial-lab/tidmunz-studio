@@ -1,3 +1,8 @@
+- 2026-11-18 Auto: Explicit Resume may replace an unverified saved
+  monitor chat once when local binding is missing. Archive an orphaned
+  bootstrap only when its story and host match. Journal sends before
+  clicking, and require a confirmed real-app message before arming.
+  Existing paid assets are independent of monitor chat metadata.
 - 2026-11-18 Auto: Full Resume handshakes with the Chrome monitor before
   continuing production, even if an old monitor stage flag is complete.
   GPT follow-up becomes due immediately without replaying pending sends.

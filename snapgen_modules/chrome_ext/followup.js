@@ -589,18 +589,19 @@
     const all=(await chrome.storage.local.get([KEY,PENDING]));
     const existing=all[KEY]||{},mapped=existing[projectKey];
     const priorUncertain=c.phase==="sending"||c.phase==="uncertain";
-    // Old scheduled follow-up and the FIRST project-chat bootstrap have
-    // different markers/receipts. Never replay the former. The latter may
-    // resume ONLY its exact stored project and reserved tab (no new tab).
-    if(priorUncertain && !mapped &&
-       (!all[PENDING] || all[PENDING].projectKey!==projectKey))
-      return {error:"Earlier follow-up unconfirmed; no reserved chat for safe recovery"};
     const requested=parse(job.existing_url);
+    const savedPending=all[PENDING];
+    const sameStoryPending=savedPending && savedPending.story===story &&
+      String(savedPending.host).toUpperCase()===host.toUpperCase();
+    const replacementAllowed=job.wake===true && !mapped;
+    if(priorUncertain && !mapped && !sameStoryPending &&
+       !(replacementAllowed && c.story===story && c.host===host))
+      return {error:"Earlier follow-up unconfirmed; no reserved chat for safe recovery"};
     if(mapped && (mapped.story!==story || mapped.host!==host))
       return {error:"Saved monitor chat belongs to another machine or story"};
-    if(mapped && requested && mapped.cid!==requested.cid)
+    if(mapped && requested && mapped.cid!==requested.cid && mapped.replacedCid!==requested.cid)
       return {error:"Project key is bound to another chat; reconcile before continuing"};
-    if(requested && !mapped)
+    if(requested && !mapped && !replacementAllowed)
       return {error:"Project has a chat URL but Chrome has no confirmed app-bound record; reconcile manually"};
     let binding=mapped||null;
     async function bind(entry){
@@ -640,24 +641,34 @@
       }
       return result;
     }
-    let pending=all[PENDING];
-    if(pending && pending.projectKey!==projectKey)
+    let pending=savedPending, t;
+    let replacement=Boolean(requested && replacementAllowed);
+    if(pending && pending.projectKey!==projectKey && !(replacementAllowed && sameStoryPending))
       return {error:"Another project chat creation is awaiting confirmation; no duplicates"};
-    let t;
     if(pending){
-      try{
-        t=await chrome.tabs.get(pending.tabId);
+      try{t=await chrome.tabs.get(pending.tabId);}catch(_){}
+      if(t){
         if(t.windowId!==await injected.programWindowId())
           return {error:"Reserved chat is outside the Studio Chrome window"};
         await chrome.storage.local.set({[MONITOR_TAB]:t.id});
-      }catch(_){return {error:"An earlier story-chat send may have succeeded; its tab is missing; manual reconciliation required"};}
-    }else{
+      }else{
+        if(!replacementAllowed || !sameStoryPending || pending.replacement)
+          return {error:"An earlier story-chat send may have succeeded; its tab is missing; manual reconciliation required"};
+        await chrome.storage.local.set({tmMonitorPreviousBootstrap:{
+          ...pending,archivedAt:Date.now()
+        }});
+        await chrome.storage.local.remove(PENDING);
+        pending=null;
+        replacement=true;
+      }
+    }
+    if(!pending){
       // The next project must navigate our one owned monitor tab rather than
       // append another ChatGPT tab per project or per failed bootstrap.
       try{t=await reuseMonitorTab({blank:true});}
       catch(e){return {error:String(e.message||e)};}
       pending={projectKey,story,host,tabId:t.id,marker:"TMB-"+Date.now(),
-               attempted:false,createdAt:Date.now()};
+               attempted:false,replacement,createdAt:Date.now()};
       await chrome.storage.local.set({[PENDING]:pending});
     }
     let cid=null;
@@ -694,15 +705,17 @@
         "ตรวจยืนยันเครื่องและสถานะ Auto แบบอ่านอย่างเดียวก่อน ห้ามสร้างคลิปหรือแก้ไฟล์ในการเริ่มแชต. "+
         "เมื่อส่วนขยายส่งข้อความติดตามในรอบถัดไป จึงค่อยตรวจ แก้ไขเมื่อปลอดภัย สั่งทำต่อ และยืนยันผล. "+
         "ห้ามใช้บอทจากเครื่องอื่น ห้ามส่งงานที่มี UUID รอผลซ้ำ และหยุดก่อนรวมวิดีโอเพื่อรอเลือกเสียง.";
+      pending.attempted=true;
+      await chrome.storage.local.set({[PENDING]:pending});
       const result=await inPage(t.id,self.tmMonitorComposeWithApps,[{prompt,marker:pending.marker}]);
       if(!result || !result.attempted){
-        // The tab is dedicated to this project and could contain a partial
-        // app-menu draft; never create another automatically.
+        if(result?.attempted===false){
+          pending.attempted=false;
+          await chrome.storage.local.set({[PENDING]:pending});
+        }
         return {error:"Cannot select real apps in new chat: "+
           String(result&&result.error||"unknown").slice(0,150)};
       }
-      pending.attempted=true;
-      await chrome.storage.local.set({[PENDING]:pending});
     }
     let confirmed=false;
     for(let i=0;i<75;i++){
@@ -711,7 +724,8 @@
     }
     if(!confirmed)
       return {error:"Story-chat send unconfirmed; check the dedicated Chrome tab before retrying"};
-    binding={cid,url:"https://chatgpt.com/c/"+cid,story,host};
+    binding={cid,url:"https://chatgpt.com/c/"+cid,story,host,
+             ...(requested && {replacedCid:requested.cid})};
     existing[projectKey]=binding;
     await chrome.storage.local.set({[KEY]:existing});
     await chrome.storage.local.remove(PENDING);
