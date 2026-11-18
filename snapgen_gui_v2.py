@@ -5731,6 +5731,30 @@ def _check_github_update(parent=None, status_var=None, interactive=True):
         root.after(0, checked)
     threading.Thread(target=worker, daemon=True).start()
 
+def _prepare_studio_shutdown():
+    from snapgen_local_backends import stop_all
+
+    try:
+        _save_video_work_state()
+    except Exception:
+        pass
+    try:
+        stop_all()
+    except Exception as exc:
+        print(f"[SnapGen] WARNING ปิด Local backend ไม่ครบ: {exc}", flush=True)
+
+
+def _install_staged_update(staging):
+    import snapgen_updater
+    from snapgen_local_backends import jobs_active
+
+    if _snapgen_update_busy() or jobs_active():
+        raise snapgen_updater.UpdateError("มีงานกำลังทำอยู่ กรุณารอให้งานเสร็จแล้วกดอัปเดตอีกครั้ง")
+    _prepare_studio_shutdown()
+    snapgen_updater.launch_apply(staging, BASE_ROOT, os.getpid())
+    root.destroy()
+
+
 def _download_github_update(info, parent=None, status_var=None):
     if not _manual_update_authorized[0]:
         if status_var is not None:
@@ -5793,9 +5817,7 @@ def _download_github_update(info, parent=None, status_var=None):
             def install():
                 try:
                     progress("กำลังปิดโปรแกรมและติดตั้ง...")
-                    snapgen_updater.launch_apply(staging, BASE_ROOT, os.getpid())
-                    progress_win.destroy()
-                    root.after(250, root.destroy)
+                    _install_staged_update(staging)
                 except Exception as exc:
                     if progress_win.winfo_exists():
                         progress_win.destroy()
@@ -6665,20 +6687,26 @@ def _add_settings_maintenance_buttons(settings_win):
                                 status.set(f"กำลัง Restore v{ver} จาก GitHub...")
                                 restore_button.config(state="disabled")
 
+                                def restore_failed(error):
+                                    status.set(f"Restore ไม่สำเร็จ: {error}")
+                                    messagebox.showerror("Restore ไม่สำเร็จ", error, parent=settings_win)
+                                    restore_button.config(state="normal")
+
+                                def install_restore(staging):
+                                    try:
+                                        _install_staged_update(staging)
+                                    except Exception as exc:
+                                        restore_failed(str(exc))
+
                                 def worker_restore():
                                     try:
                                         def progress(msg):
                                             root.after(0, lambda m=msg: status.set(str(m)))
                                         staging = snapgen_updater.download_and_stage(item, BASE_ROOT, progress=progress)
                                         progress(f"เตรียมติดตั้ง v{ver} แล้ว — กำลังปิดโปรแกรมเพื่อ Restore")
-                                        snapgen_updater.launch_apply(staging, BASE_ROOT, os.getpid())
-                                        root.after(250, root.destroy)
+                                        root.after(0, install_restore, staging)
                                     except Exception as exc:
-                                        root.after(0, lambda err=str(exc): (
-                                            status.set(f"Restore ไม่สำเร็จ: {err}"),
-                                            messagebox.showerror("Restore ไม่สำเร็จ", err, parent=settings_win),
-                                            restore_button.config(state="normal"),
-                                         ))
+                                        root.after(0, restore_failed, str(exc))
                                 threading.Thread(target=worker_restore, daemon=True).start()
 
                             tk.Button(btns, text="ยกเลิก", command=close_picker).pack(side="right")
@@ -17928,7 +17956,6 @@ if root:
     # Tk previously left their loaded models and reserved memory behind.
     try:
         from snapgen_local_backends import jobs_active as _local_jobs_active
-        from snapgen_local_backends import stop_all as _stop_local_backends
         _snapgen_close_started = [False]
 
         def _close_snapgen_and_backends():
@@ -17942,15 +17969,7 @@ if root:
             ):
                 return
             _snapgen_close_started[0] = True
-            try:
-                _save_video_work_state()
-            except Exception:
-                pass
-            try:
-                stopped = _stop_local_backends()
-                print(f"[SnapGen] ปิด Maestro/ComfyUI แล้ว {stopped} process — คืน RAM/VRAM ✓", flush=True)
-            except Exception as exc:
-                print(f"[SnapGen] WARNING ปิด Local backend ไม่ครบ: {exc}", flush=True)
+            _prepare_studio_shutdown()
             root.destroy()
 
         root.protocol("WM_DELETE_WINDOW", _close_snapgen_and_backends)

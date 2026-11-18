@@ -1,4 +1,5 @@
 """An update must not launch an interpreter missing its required packages."""
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -55,3 +56,17 @@ def test_setup_skips_pip_only_after_isolated_import_check():
     assert source.count(b'\r\n')==source.count(b'\n')
     assert b'"%VENV_PY%" -I -B -c "import sys, tkinter, PIL, websocket, qcloud_cos;' in source
     assert source.index(b'goto :packages_ready') < source.index(b'pip install Pillow') < source.index(b'\r\n:packages_ready\r\n')
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handles")
+def test_exited_process_does_not_block_patch_while_handle_is_open():
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                             stdin=subprocess.PIPE)
+    try:
+        assert U._pid_running(child.pid)
+        child.communicate(timeout=10)
+        # Keep the Popen object and its handle alive, as another app can.
+        assert not U._pid_running(child.pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)

@@ -1,3 +1,8 @@
+- 2026-11-18 updater: Patch and Restore use the normal Studio shutdown
+  cleanup on the GUI thread before handing off. Windows process waiting
+  checks whether the process actually exited, even if a handle is held.
+  Regression checks cover both running and exited child processes.
+  Installed update/relaunch verification remains pending.
 - 2026-11-18 Chrome 1.0.57: Select tabs inside Studio's dedicated
   Chrome without requesting Windows foreground. The extension never
   opens a browser window. Reuse the assigned worker or restored idle

@@ -363,11 +363,29 @@ def launch_apply(staging, project_root, parent_pid=None):
 def _pid_running(pid):
     if os.name == "nt":
         import ctypes
-        handle = ctypes.windll.kernel32.OpenProcess(0x100000, False, int(pid))
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        return False
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.OpenProcess(0x100000, False, int(pid))  # SYNCHRONIZE
+        if not handle:
+            if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists
+                return False
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            wait = kernel.WaitForSingleObject(handle, 0)
+            if wait == 0:  # WAIT_OBJECT_0: process exited, even if another handle still exists
+                return False
+            if wait == 0x102:  # WAIT_TIMEOUT: process is still running
+                return True
+            raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel.CloseHandle(handle)
     try:
         os.kill(int(pid), 0)
         return True
