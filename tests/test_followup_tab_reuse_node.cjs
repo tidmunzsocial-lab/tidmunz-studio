@@ -71,6 +71,11 @@ const job=(story,char)=>({
   const first=await self.tmFollowupBootstrap(job("Film A","a"));
   assert.equal(first.ok,true,JSON.stringify(first));
   assert.equal(created,1);
+  store.tmProjectFollowup.nextAt=Date.now()+600000;
+  const wake=await self.tmFollowupBootstrap({...job("Film A","a"),wake:true});
+  assert.equal(wake.cid,first.cid);
+  assert.ok(store.tmProjectFollowup.nextAt<=Date.now(),"Resume makes the existing check due");
+  assert.equal(created,1,"Resume must reuse the already bound chat");
   const id=store.tmMonitorOwnedTabId;
   assert.equal(typeof id,"number");
   assert.equal(store.tmMonitorBootstrapPending,undefined);

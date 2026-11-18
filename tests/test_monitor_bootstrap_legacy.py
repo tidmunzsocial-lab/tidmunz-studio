@@ -71,7 +71,8 @@ def test_resume_executes_only_new_monitor_and_skips_saved_stages():
     assert 'if project["done"].get(key) and key != "video":' in source
     assert "if key not in keys" not in source
     assert "keys = [key for key in keys if key != \"monitor\"]" not in source
-    assert "stage_monitor_chat()" in source
+    assert "stage_monitor_chat(wake=True)" in source
+    assert source.index("stage_monitor_chat(wake=True)") < source.index("for key in keys:", source.index("stage_monitor_chat(wake=True)"))
 
 
 def test_confirmed_bootstrap_arms_existing_extension_without_new_watcher():

@@ -606,8 +606,15 @@
     async function bind(entry){
       const parsed=parse(entry.url);
       if(!parsed)throw Error("Invalid confirmed ChatGPT conversation URL");
-      if(c.enabled && c.host===host && c.story===story && c.cid===parsed.cid)
+      if(c.enabled && c.host===host && c.story===story && c.cid===parsed.cid){
+        if(job.wake && c.phase==="idle"){
+          c.nextAt=Date.now();c.retryAt=0;c.errors=0;
+          await save(c);
+          if(!await chrome.alarms.get?.(ALARM))
+            await chrome.alarms.create(ALARM,{periodInMinutes:1});
+        }
         return {ok:true,cid:parsed.cid,url:parsed.url,reused:true,real_apps:2};
+      }
       if(priorUncertain){
         // Preserve the older uncertain follow-up receipt as audit evidence.
         // This never resends its marker or treats it as a new chat message.
@@ -620,7 +627,7 @@
       c.lastToolMarker="";c.lastToolAt=0;c.lastProgress=null;
       c.cid=parsed.cid;c.url=parsed.url;c.host=host;c.story=story;
       c.errors=0;c.retryAt=0;c.lastError="";c.lastResult="project_chat_bound";
-      c.nextAt=Date.now()+MIN;
+      c.nextAt=Date.now()+(job.wake?0:MIN);
       await save(c,{allowRestart:true});
       await chrome.alarms.create(ALARM,{periodInMinutes:1});
       return {ok:true,cid:parsed.cid,url:parsed.url,reused:!!entry.reused,real_apps:2};

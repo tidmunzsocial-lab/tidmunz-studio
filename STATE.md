@@ -1,3 +1,7 @@
+- 2026-11-18 Auto: Full Resume handshakes with the Chrome monitor before
+  continuing production, even if an old monitor stage flag is complete.
+  GPT follow-up becomes due immediately without replaying pending sends.
+  A lost tab for an uncertain old bootstrap still requires reconciliation.
 - 2026-11-18 Auto: Resume rechecks the saved monitor host. A copied
   project binds a separate chat for this machine and archives the old
   binding only after confirmation. Existing paid media stays intact.

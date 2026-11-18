@@ -5904,7 +5904,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         return timeline_mod.note(rows)
 
     # ── stages ──
-    def stage_monitor_chat():
+    def stage_monitor_chat(*, wake=False):
         """Bind one actual ChatGPT chat and both real apps BEFORE script analysis.
 
         Uses the existing Chrome relay worker queue, never an extra watcher.
@@ -5937,6 +5937,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             "type": "monitor_bootstrap",
             "story": story, "host": host, "project_key": project_key,
             "existing_url": existing_url,
+            "wake": bool(wake),
         }
         request = Request(
             "http://127.0.0.1:" + str(relay_port) + "/job?token=" +
@@ -10190,7 +10191,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
 
                     monitor_host = socket.gethostname()
                     keys = auto_resume_keys_with_monitor(project, keys, video_mode, host=monitor_host)
-                    if auto_monitor_bootstrap_needed(project, host=monitor_host):
+                    if only is None and not project.get("done", {}).get("effects"):
+                        current = "monitor"
+                        set_progress("monitor", 0.0, "กำลังเริ่มติดตาม · เรียก GPT และสกิลใน Chrome")
+                        stage_monitor_chat(wake=True)
+                    elif auto_monitor_bootstrap_needed(project, host=monitor_host):
                         project.setdefault("done", {}).pop("monitor", None)
                         log("ติดตั้งแชต/สคริปต์ติดตามที่ยังขาดก่อน แล้วกลับไปทำงานเดิมต่อ "
                             "โดยไม่สร้างรูปหรือคลิปที่เสร็จแล้วซ้ำ")
