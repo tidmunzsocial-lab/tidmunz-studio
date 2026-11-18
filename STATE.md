@@ -1,3 +1,10 @@
+- 2026-11-18 Chrome follow-up 1.0.56: Recheck the original message
+  marker after delayed confirmation or service-worker interruption.
+  Recover the receipt and check tool evidence without resending. Report
+  recovery only after the bound Auto project advances. Back off relay
+  errors, preserve manual Stop, and clear the alarm at sound selection.
+  Mock Chrome tests cover delayed confirmation and terminal cleanup.
+  Live ChatGPT and Tidmunz verification remains pending.
 - 2026-11-17 v2.0.40: Repair Auto economy ("ประหยัด สโลว์ 2x")
   being silently defeated by the old hard-coded 10-second clip_choice,
   including defaults in new projects and restoring old projects. GPT

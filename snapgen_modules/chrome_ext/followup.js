@@ -8,11 +8,9 @@
     confirmedAt:0,lastError:"",lastResult:"",lastProgress:null,tabId:0,
     marker:"",sentCount:0,day:"",dailyCount:0,story:"",host:"",errors:0,stopRequested:false,intervalMinutes:0});
   async function load(){const x=(await chrome.storage.local.get(STORE))[STORE];return Object.assign(defaults(),x||{});}
-  async function save(x){
+  async function save(x,{allowRestart=false}={}){
     const previous=(await chrome.storage.local.get(STORE))[STORE]||{};
-    if(previous.stopRequested===true && x.stopRequested!==false){
-      x.enabled=false;x.stopRequested=true;x.nextAt=0;
-    }
+    if(previous.stopRequested===true && !allowRestart && !x.stopRequested)return;
     // Persist the actual schedule, not the status of a GPT image/video job.
     if(!x.nextAt)x.intervalMinutes=0;
     else if(Number(x.nextAt)!==Number(previous.nextAt))
@@ -30,8 +28,8 @@
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
         enabled:!!c.enabled,alarm_active:!!alarm,stop_requested:!!c.stopRequested,
-        checking:running,phase:c.phase,next_at:c.nextAt||0,
-        interval_minutes:c.intervalMinutes||0,story:c.story||"",host:c.host||"",
+        checking:running,phase:c.phase,next_at:c.retryAt||c.nextAt||0,
+        interval_minutes:c.retryAt?Math.min(10,c.errors*2):c.intervalMinutes||0,story:c.story||"",host:c.host||"",
         tool_state:c.lastToolMarker?"awaiting_proof":
           c.lastResult==="dino_invoked_and_auto_advanced"?"verified_dino":
           c.lastResult==="dino_invoked_repair_unverified"?"repair_unverified":
@@ -41,7 +39,7 @@
     });
   }
   async function finishFollowup(c,phase,reason){
-    c.enabled=false;c.stopRequested=true;c.phase=phase;c.nextAt=0;
+    c.enabled=false;c.stopRequested=true;c.phase=phase;c.nextAt=0;c.retryAt=0;
     c.lastError=reason||"";
     await save(c);await chrome.alarms.clear(ALARM);
     reportState().catch(()=>{});
@@ -60,7 +58,7 @@
     if(!Number.isInteger(port)||port<1000||port>65535||!token)
       throw Error("Tidmunz Chrome relay is not connected");
     const url="http://127.0.0.1:"+port+"/monitor/status?token="+encodeURIComponent(token);
-    const response=await fetch(url,{cache:"no-store"});
+    const response=await fetch(url,{cache:"no-store",signal:globalThis.AbortSignal?.timeout(10000)});
     if(!response.ok)throw Error("Tidmunz project status unavailable (HTTP "+response.status+")");
     const s=await response.json();
     if(!s.ready||!s.story||!s.host)throw Error("Tidmunz Auto is not ready");
@@ -335,10 +333,12 @@
   async function tick(force=false){
     if(running)return;
     running=true;
-    let c=await load();
+    let c;
     reportState().catch(()=>{});
     try{
+      c=await load();
       if(!c.enabled||!c.cid||!injected)return;
+      if(!force&&Date.now()<(c.retryAt||0))return;
       // Always check the terminal stage before any next message, even if nextAt is in the future.
       const live=await status();
       if(!c.story||!c.host||live.story!==c.story||live.host!==c.host){
@@ -354,17 +354,22 @@
         await finishFollowup(c,"complete","");
         return;
       }
-      if(c.phase==="uncertain")return;
-      if(c.phase==="sending"&&c.marker){
+      if(["sending","uncertain"].includes(c.phase)&&c.marker){
+        if(!force&&c.phase==="uncertain"&&Date.now()<(c.nextAt||0))return;
         const t=await tab(c);
         await ready(t,c.cid);
         const check=await inPage(t.id,findMarker,[c.marker,c.cid]);
-        if(!check.found){
-          c.phase="uncertain";c.enabled=false;
-          c.lastError="รอบก่อนอาจส่งสำเร็จแล้วแต่ตรวจไม่พบ: หยุดส่งซ้ำ";
-        }else{
+        if(check&&check.found){
+          c.lastToolMarker=c.marker;c.lastToolAt=c.lastAt||Date.now();
           c.phase="idle";c.marker="";c.confirmedAt=Date.now();
-          c.nextAt=Date.now()+15*MIN;c.lastResult="recovered_confirmation";
+          c.sentCount++;c.dailyCount++;c.errors=0;c.lastError="";
+          c.nextAt=Date.now()+5*MIN;c.lastResult="recovered_confirmation";
+        }else if(Date.now()-(c.lastAt||0)>=20*MIN){
+          await finishFollowup(c,"uncertain","ยังยืนยันข้อความเดิมไม่ได้ ต้องตรวจในแชทก่อนส่งใหม่");
+          return;
+        }else{
+          c.phase="uncertain";c.nextAt=Date.now()+2*MIN;
+          c.lastError="กำลังตรวจข้อความเดิมอีกครั้ง";
         }
         await save(c);return;
       }
@@ -387,8 +392,9 @@
             let after=null;
             try{after=await status();}catch(_){}
             const before=c.lastProgress||{};
-            const advanced=after && (
-              after.busy===true ||
+            const advanced=after && after.story===c.story && after.host===c.host && (
+              (before.busy===false && after.busy===true) ||
+              (after.stage && after.stage!==before.stage) ||
               Number(after.clips||0)>Number(before.clips||0) ||
               Number(after.images||0)>Number(before.images||0) ||
               after.effect_review_pending===true || after.complete===true
@@ -411,6 +417,7 @@
           c.nextAt=Date.now()+2*MIN;await save(c);return;
         }
       }
+      if(c.errors||c.retryAt){c.errors=0;c.retryAt=0;await save(c);}
       if(!force&&Date.now()<(c.nextAt||0))return;
       // Do not send an unbound bot name or a Tailscale link for another PC.
       if(!live.monitor_bot || !live.tailscale_url){
@@ -464,12 +471,13 @@
             }catch(_){}
           }
           if(!observed){
-            c.phase="uncertain";c.enabled=false;
+            c.phase="uncertain";c.nextAt=Date.now()+2*MIN;
             c.lastError="กดส่งข้อความติดตามแล้วแต่ยังไม่ยืนยัน ต้องตรวจในแชทก่อนส่งรอบใหม่";
             await save(c);return;
           }
           c.phase=s.complete?"complete":"idle";c.enabled=!s.complete;
           c.marker="";c.sentCount++;c.dailyCount++;c.confirmedAt=Date.now();
+          c.lastToolMarker=owned;c.lastToolAt=Date.now();
           c.lastResult=s.complete?"finished_sent":"sent_from_saved_draft";
           c.nextAt=s.complete?0:Date.now()+m*MIN;c.lastError="";
           await save(c);return;
@@ -488,6 +496,11 @@
       await chrome.windows.update(curr.windowId,{state:"normal",focused:true});
       await chrome.tabs.update(t.id,{active:true});
       const lastCheck=await status();
+      if(lastCheck.story!==c.story||lastCheck.host!==c.host){
+        await finishFollowup(c,"wrong_project","The selected machine or story changed; follow-up stopped");
+        return;
+      }
+      if(lastCheck.complete){await finishFollowup(c,"complete","");return;}
       if(lastCheck.effect_review_pending){
         await finishFollowup(c,"awaiting_effect_selection","");
         return;
@@ -517,8 +530,8 @@
           c.phase="idle";c.marker="";c.nextAt=Date.now()+10*MIN;
           c.lastError=String(result.error||"ข้อความยังไม่ส่ง").slice(0,200);
         }else{
-          c.phase="uncertain";c.enabled=false;
-          c.lastError="ไม่สามารถยืนยันการส่ง หยุดเพื่อไม่ส่งข้อความซ้ำ";
+          c.phase="uncertain";c.nextAt=Date.now()+2*MIN;
+          c.lastError="ยังยืนยันการส่งไม่ได้ จะตรวจข้อความเดิมอีกครั้ง";
         }
         await save(c);return;
       }
@@ -532,13 +545,16 @@
       c.lastToolAt=Date.now();
       c.nextAt=s.complete?0:Date.now()+m*MIN;c.lastError="";await save(c);
     }catch(e){
+      if(!c)return;
       c=await load();
+      if(!c.enabled||c.stopRequested)return;
       if(c.phase==="sending"){
-        c.phase="uncertain";c.enabled=false;
+        c.phase="uncertain";c.nextAt=Date.now()+2*MIN;
         c.lastError="เกิดข้อผิดพลาดหลังเริ่มส่ง ต้องตรวจแชทก่อน: "+String(e.message||e).slice(0,150);
       }else{
         c.errors=(c.errors||0)+1;
-        c.lastError=String(e.message||e).slice(0,200);c.nextAt=Date.now()+10*MIN;
+        c.lastError=String(e.message||e).slice(0,200);
+        c.retryAt=Date.now()+Math.min(10,c.errors*2)*MIN;
         if(c.errors>=5){
           await finishFollowup(c,"blocked",c.lastError);
           return;
@@ -602,9 +618,9 @@
       c.enabled=true;c.stopRequested=false;c.phase="idle";c.marker="";
       c.lastToolMarker="";c.lastToolAt=0;c.lastProgress=null;
       c.cid=parsed.cid;c.url=parsed.url;c.host=host;c.story=story;
-      c.errors=0;c.lastError="";c.lastResult="project_chat_bound";
+      c.errors=0;c.retryAt=0;c.lastError="";c.lastResult="project_chat_bound";
       c.nextAt=Date.now()+MIN;
-      await save(c);
+      await save(c,{allowRestart:true});
       await chrome.alarms.create(ALARM,{periodInMinutes:1});
       return {ok:true,cid:parsed.cid,url:parsed.url,reused:!!entry.reused,real_apps:2};
     }
@@ -699,7 +715,8 @@
     if(injected)return;
     injected={page:callbacks.inPage,send:callbacks.pageSend,getLink:callbacks.getLink};
     load().then(async c=>{
-      if(c.enabled)await chrome.alarms.create(ALARM,{periodInMinutes:1});
+      if(c.enabled&&!(await chrome.alarms.get?.(ALARM)))
+        await chrome.alarms.create(ALARM,{periodInMinutes:1});
       await reportState();
     }).catch(()=>{});
     chrome.alarms.onAlarm.addListener(a=>{if(a.name===ALARM)tick().catch(()=>{});});
@@ -727,8 +744,9 @@
           if(c.phase==="sending"||c.phase==="uncertain")
             return {ok:false,error:"มีรอบส่งเดิมที่ยังยืนยันไม่ได้ ต้องตรวจแชทก่อน"};
           c.enabled=true;c.cid=parsed.cid;c.url=parsed.url;c.nextAt=Date.now()+MIN;
-      c.host=s.host;c.story=s.story;c.stopRequested=false;c.errors=0;
-          c.phase="idle";c.lastError="";await save(c);
+      c.host=s.host;c.story=s.story;c.stopRequested=false;c.errors=0;c.retryAt=0;
+          c.lastToolMarker="";c.lastToolAt=0;c.lastProgress=null;
+          c.phase="idle";c.lastError="";await save(c,{allowRestart:true});
       chrome.alarms.create(ALARM,{periodInMinutes:1});
       return {ok:true,nextAt:c.nextAt};
         }
@@ -739,19 +757,23 @@
         }
         if(msg.type==="tm_followup_reconcile"){
           const c=await load();
-          if(c.phase!=="uncertain"||!c.marker)return {ok:false,error:"ไม่มีข้อความค้างให้ตรวจ"};
+          if(c.enabled||c.phase!=="uncertain"||!c.marker)return {ok:false,error:"ไม่มีข้อความค้างให้ตรวจ"};
+          const live=await status();
+          if(live.host!==c.host||live.story!==c.story||live.complete||live.effect_review_pending)
+            return {ok:false,error:"โปรเจกต์เดิมไม่พร้อมติดตาม"};
           const t=await tab(c);
           await ready(t,c.cid);
           const check=await inPage(t.id,findMarker,[c.marker,c.cid]);
           if(!check.found)return {ok:false,error:"ยังไม่ยืนยันข้อความรอบก่อน ห้ามส่งซ้ำ"};
-          c.phase="idle";c.enabled=true;c.marker="";c.lastError="";
+          c.lastToolMarker=c.marker;c.lastToolAt=c.lastAt||Date.now();
+          c.phase="idle";c.enabled=true;c.stopRequested=false;c.marker="";c.lastError="";
           c.confirmedAt=Date.now();c.nextAt=Date.now()+5*MIN;
-      await save(c);chrome.alarms.create(ALARM,{periodInMinutes:1});
+      await save(c,{allowRestart:true});chrome.alarms.create(ALARM,{periodInMinutes:1});
       return {ok:true};
         }
         if(msg.type==="tm_followup_now"){
           const c=await load();
-          if(!c.enabled||c.phase!=="idle")return {ok:false,error:"ยังไม่พร้อมส่ง"};
+          if(!c.enabled||!["idle","uncertain"].includes(c.phase))return {ok:false,error:"ยังไม่พร้อมตรวจ"};
           c.nextAt=Date.now();await save(c);tick(true).catch(()=>{});
           return {ok:true};
         }

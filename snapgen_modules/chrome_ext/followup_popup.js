@@ -17,13 +17,13 @@ async function refresh(){
   $("clips").textContent=Number.isInteger(s.clips)?s.clips+"/"+s.total:"—";
   $("bar").style.width=Number.isInteger(s.clips)?((s.clips/s.total)*100).toFixed(1)+"%":"0%";
   $("stage").textContent=(s.busy===true?"กำลังทำ":s.busy===false?"พักอยู่":"ไม่ทราบ");
-  $("follow").textContent=c.phase==="uncertain"?"หยุด—ตรวจข้อความ":c.phase==="complete"?"เสร็จ":
+  $("follow").textContent=c.phase==="uncertain"?(c.enabled?"กำลังตรวจข้อความเดิม":"หยุดตรวจข้อความ"):c.phase==="complete"?"เสร็จ":
      c.enabled?"เปิดใช้งาน":"ยังไม่เปิด";
-  $("next").textContent=c.enabled?fmtDate(c.nextAt):"—";
+  $("next").textContent=c.enabled?fmtDate(c.retryAt||c.nextAt):"—";
   $("start").disabled=!!c.enabled || c.phase==="sending" || c.phase==="uncertain";
   $("stop").disabled=!c.enabled;
-  $("now").disabled=!c.enabled || c.phase!=="idle";
-  $("verify").disabled=c.phase!=="uncertain";
+  $("now").disabled=!c.enabled || !["idle","uncertain"].includes(c.phase);
+  $("verify").disabled=!!c.enabled || c.phase!=="uncertain";
   if(!$("chatUrl").value&&c.url)$("chatUrl").value=c.url;
   if(c.lastError)notice(c.lastError,true);
   else if(s.error)notice("อ่านสถานะโปรเจกต์ไม่ได้: "+s.error,true);
@@ -44,7 +44,7 @@ async function action(type,extra={}){
  try{
   const r=await rpc(type,extra);
   if(!r||!r.ok)throw Error(r&&r.error||"ไม่สำเร็จ");
-  notice(type==="start"?"เปิดรอบติดตามแล้ว":type==="stop"?"หยุดติดตามแล้ว":"ส่งตรวจรอบนี้แล้ว");
+  notice(type==="start"?"เปิดรอบติดตามแล้ว":type==="stop"?"หยุดติดตามแล้ว":"เริ่มตรวจรอบนี้แล้ว");
   await refresh();
  }catch(e){notice(String(e.message||e),true);}
 }

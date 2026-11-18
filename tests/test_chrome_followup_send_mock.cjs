@@ -7,6 +7,8 @@ const src = fs.readFileSync(path.join(__dirname, "..", "snapgen_modules", "chrom
 const CHAT = "11111111-1111-1111-1111-111111111111";
 const calls = { messages: [], urls: [], alarms: [], cleared: [] };
 let statusTerminal = false;
+let proofChecked = false;
+let markerVisible = false;
 let conf = { enabled:true, cid:CHAT, url:"https://chatgpt.com/c/"+CHAT,
   host:"TEST-WORKSTATION", story:"Project One", phase:"idle",
   nextAt:0, stopRequested:false, sentCount:0, dailyCount:0 };
@@ -36,7 +38,11 @@ global.chrome = {
       calls.messages.push(args[0].prompt);
       return [{result:{attempted:true,appMentionsVerified:true}}];
     }
-    if(func.name==="findMarker")return [{result:{found:true}}];
+    if(func.name==="findMarker")return [{result:{found:markerVisible}}];
+    if(func.name==="inspectToolProof"){
+      proofChecked=true;
+      return [{result:{ok:true,finished:true,dinoConfirmed:true}}];
+    }
     if(func.name==="composer")return [{result:{ok:true}}];
     return [{result:{ok:true}}];
   } }
@@ -80,12 +86,31 @@ async function waitUntil(predicate, ms=3500) {
   assert.ok(predicate(), "timeout waiting for followup state");
 }
 (async()=>{
+  markerVisible=true;
   await waitUntil(()=>conf.sentCount===1);
+  markerVisible=false;
   assert.equal(calls.messages.length,1, "one verified message only");
   assert.ok(calls.messages[0].includes("Project One"));
   assert.ok(calls.urls.some(url=>url.includes("/status?token=test-only")),
     "the extension queue check must authenticate to the local relay");
   assert.ok(conf.enabled, "follow-up remains running before human-review stage");
+  // Simulate a service worker restarting with an unconfirmed later message.
+  const pending = "TMF-1234567890123-2";
+  Object.assign(localStore.tmProjectFollowup,{
+    phase:"sending",marker:pending,nextAt:0,lastAt:Date.now()
+  });
+  for(const alarm of alarmListeners)alarm({name:"tm-project-followup"});
+  await waitUntil(()=>conf.phase==="uncertain");
+  assert.equal(conf.enabled,true,"keep the alarm for read-only rechecks");
+  assert.equal(calls.messages.length,1,"never resend an unconfirmed message");
+  markerVisible=true;
+  localStore.tmProjectFollowup.nextAt=0;
+  for(const alarm of alarmListeners)alarm({name:"tm-project-followup"});
+  await waitUntil(()=>conf.lastResult==="recovered_confirmation");
+  assert.equal(conf.lastToolMarker,pending);
+  for(const alarm of alarmListeners)alarm({name:"tm-project-followup"});
+  await waitUntil(()=>proofChecked && conf.lastResult==="dino_invoked_repair_unverified");
+  assert.equal(calls.messages.length,1,"recover the receipt without a second send");
   statusTerminal=true;
   for(const alarm of alarmListeners)alarm({name:"tm-project-followup"});
   await waitUntil(()=>conf.phase==="awaiting_effect_selection");
