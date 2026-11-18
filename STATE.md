@@ -1,3 +1,7 @@
+- 2026-11-18 Auto: Resume rechecks the saved monitor host. A copied
+  project binds a separate chat for this machine and archives the old
+  binding only after confirmation. Existing paid media stays intact.
+  Live project verification awaits deployment.
 - 2026-11-18 updater: Patch and Restore use the normal Studio shutdown
   cleanup on the GUI thread before handing off. Windows process waiting
   checks whether the process actually exited, even if a handle is held.

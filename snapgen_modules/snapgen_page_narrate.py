@@ -3783,7 +3783,7 @@ def retry_structured_gpt_reply(send, *, label, valid=None, attempts=3, on_retry=
     raise RuntimeError(f"GPT ส่งข้อมูล{label}ไม่ถูกต้องหลังลอง {attempts} ครั้ง: {last}")
 
 
-def auto_monitor_bootstrap_needed(project, video_mode=True):
+def auto_monitor_bootstrap_needed(project, video_mode=True, *, host=None):
     """Missing or incomplete first-time monitor binding must be set up once.
 
     The result is deliberately independent of other done flags: an existing
@@ -3795,13 +3795,31 @@ def auto_monitor_bootstrap_needed(project, video_mode=True):
         return True
     chat = project.get("monitor_chat")
     return not (isinstance(chat, dict) and all(
-        chat.get(field) for field in ("url", "cid", "story", "host", "project_key")))
+        chat.get(field) for field in ("url", "cid", "story", "host", "project_key"))
+        and (host is None or str(chat["host"]).casefold() == host.casefold()))
 
 
-def auto_resume_keys_with_monitor(project, keys, video_mode=True):
+def monitor_resume_binding(folder, host, prior):
+    """A copied project gets a separate local chat and preserves its old binding."""
+    folder = Path(folder)
+    path_key = str(folder.resolve()).casefold()
+    legacy_key = hashlib.sha256(path_key.encode("utf-8")).hexdigest()
+    local_key = hashlib.sha256(f"{host.casefold()}\n{path_key}".encode("utf-8")).hexdigest()
+    if not prior:
+        return legacy_key, "", False
+    if prior.get("story") != folder.name or not prior.get("host"):
+        raise RuntimeError("แชตติดตามเดิมไม่ตรงกับเรื่องนี้")
+    if str(prior["host"]).casefold() != host.casefold():
+        return local_key, "", True
+    if prior.get("project_key") not in (legacy_key, local_key):
+        raise RuntimeError("แชตติดตามเดิมผูกกับโปรเจกต์อื่น")
+    return prior["project_key"], prior.get("url") or "", False
+
+
+def auto_resume_keys_with_monitor(project, keys, video_mode=True, *, host=None):
     """Prepend only the missing setup, never reset or replay later stages."""
     keys = list(keys)
-    if auto_monitor_bootstrap_needed(project, video_mode):
+    if auto_monitor_bootstrap_needed(project, video_mode, host=host):
         return ["monitor"] + [key for key in keys if key != "monitor"]
     return keys
 
@@ -5894,12 +5912,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         story = Path(state["folder"]).name
         host = socket.gethostname().upper()
-        project_key = hashlib.sha256(
-            str(Path(state["folder"]).resolve()).casefold().encode("utf-8")).hexdigest()
         prior = project.get("monitor_chat") or {}
-        if prior and (prior.get("story") != story or prior.get("host") != host or
-                      prior.get("project_key") != project_key):
-            raise RuntimeError("แชตติดตามเดิมผูกกับคนละเครื่องหรือเรื่อง ห้ามนำมาใช้ซ้ำ")
+        project_key, existing_url, moved = monitor_resume_binding(state["folder"], host, prior)
         # Read the existing pair file: the relay may run in another module
         # instance/process, so RELAY.port in a fresh import can be zero.
         from snapgen_chrome_relay import data_dir as chrome_data_dir
@@ -5914,7 +5928,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         job = {
             "type": "monitor_bootstrap",
             "story": story, "host": host, "project_key": project_key,
-            "existing_url": prior.get("url") or "",
+            "existing_url": existing_url,
         }
         request = Request(
             "http://127.0.0.1:" + str(relay_port) + "/job?token=" +
@@ -5934,6 +5948,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                str(outcome.get("error") or "ไม่ทราบสาเหตุ")[:180])
         if int(outcome.get("real_apps") or 0) != 2:
             raise RuntimeError("ไม่พบแอปจริงครบสองตัวในแชตติดตาม ห้ามเริ่มวิเคราะห์บท")
+        if moved:
+            project.setdefault("previous_monitor_chats", []).append(dict(prior))
         project["monitor_chat"] = {
             "url": outcome["url"], "cid": outcome["cid"],
             "story": story, "host": host, "project_key": project_key,
@@ -10162,8 +10178,11 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 # Existing done flags remain intact: never replay Context,
                 # storyboard, image creation, or completed video submissions.
                 if video_mode and callable(STAGE_FUNCS.get("monitor")):
-                    keys = auto_resume_keys_with_monitor(project, keys, video_mode)
-                    if auto_monitor_bootstrap_needed(project):
+                    import socket
+
+                    monitor_host = socket.gethostname()
+                    keys = auto_resume_keys_with_monitor(project, keys, video_mode, host=monitor_host)
+                    if auto_monitor_bootstrap_needed(project, host=monitor_host):
                         project.setdefault("done", {}).pop("monitor", None)
                         log("ติดตั้งแชต/สคริปต์ติดตามที่ยังขาดก่อน แล้วกลับไปทำงานเดิมต่อ "
                             "โดยไม่สร้างรูปหรือคลิปที่เสร็จแล้วซ้ำ")

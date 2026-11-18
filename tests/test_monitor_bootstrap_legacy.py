@@ -65,7 +65,7 @@ def test_nonvideo_mode_is_not_changed():
 
 def test_resume_executes_only_new_monitor_and_skips_saved_stages():
     source = inspect.getsource(N._build)
-    assert "keys = auto_resume_keys_with_monitor(project, keys, video_mode)" in source
+    assert "keys = auto_resume_keys_with_monitor(project, keys, video_mode, host=monitor_host)" in source
     assert 'callable(STAGE_FUNCS.get("monitor"))' in source
     assert 'project.setdefault("done", {}).pop("monitor", None)' in source
     assert 'if project["done"].get(key) and key != "video":' in source
@@ -80,3 +80,18 @@ def test_confirmed_bootstrap_arms_existing_extension_without_new_watcher():
     assert 'self.tmFollowupBootstrap=async function(job)' in extension
     assert 'await chrome.alarms.create(ALARM,{periodInMinutes:1})' in extension
     assert "c.enabled=true;c.stopRequested=false;" in extension
+def test_resume_rebinds_copied_project_without_reusing_the_original_chat(tmp_path):
+    prior = {"url": "https://chatgpt.com/c/abc", "cid": "abc",
+             "host": "DESKTOP-OLD", "story": tmp_path.name, "project_key": "old"}
+    project = {"done": {"monitor": True, "images": True},
+               "monitor_chat": prior, "scenes": [{"clip_uuid": "accepted"}]}
+    assert N.auto_resume_keys_with_monitor(project, ["clips"], host="DESKTOP-NEW") == ["monitor", "clips"]
+    key, url, moved = N.monitor_resume_binding(tmp_path, "DESKTOP-NEW", prior)
+    assert (url, moved) == ("", True)
+    assert N.monitor_resume_binding(tmp_path, "DESKTOP-NEW", prior) == (key, "", True)
+    current = {**prior, "host": "DESKTOP-NEW", "project_key": key}
+    assert N.monitor_resume_binding(tmp_path, "desktop-new", current) == (key, current["url"], False)
+    assert N.auto_resume_keys_with_monitor({**project, "monitor_chat": current},
+                                          ["clips"], host="desktop-new") == ["clips"]
+    assert project["monitor_chat"]["host"] == "DESKTOP-OLD"
+    assert project["scenes"][0]["clip_uuid"] == "accepted"
