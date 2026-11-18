@@ -20,6 +20,7 @@ const chrome={
   alarms:{create:async()=>{},clear:async()=>true,get:async()=>null,
     onAlarm:{addListener:()=>{}}},
   tabs:{
+    query:async({windowId})=>[...tabs.values()].filter(tab=>tab.windowId===windowId),
     get:async id=>{if(!tabs.has(id))throw Error("No tab");return {...tabs.get(id)};},
     create:async option=>{const tab={id:nextId++,windowId:1,active:option.active,url:option.url};
       tabs.set(tab.id,tab);created++;return {...tab};},
@@ -57,6 +58,7 @@ const context={chrome,self,fetch,console,Date,Promise,URL,
   setTimeout:(fn)=>{Promise.resolve().then(fn);return 1;}};
 vm.runInNewContext(code,context,{filename:"followup.js"});
 self.tmFollowupInit({
+  programWindowId:async()=>1,
   getLink:async()=>({port:8766,token:"unit-test"}),
   pageSend:()=>{throw Error("Unexpected send in tab reuse test");},
   inPage:async()=>{throw Error("scripting.executeScript must be used");}

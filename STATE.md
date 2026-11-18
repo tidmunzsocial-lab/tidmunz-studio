@@ -1,3 +1,9 @@
+- 2026-11-18 Chrome 1.0.57: Select tabs inside Studio's dedicated
+  Chrome without requesting Windows foreground. The extension never
+  opens a browser window. Reuse the assigned worker or restored idle
+  worker tab, and reuse an open exact monitor conversation. Do not choose
+  a window arbitrarily when the profile has multiple normal windows.
+  Windows focus and embedded ChatGPT submission need live verification.
 - 2026-11-18 Chrome follow-up 1.0.56: Recheck the original message
   marker after delayed confirmation or service-worker interruption.
   Recover the receipt and check tool evidence without resending. Report

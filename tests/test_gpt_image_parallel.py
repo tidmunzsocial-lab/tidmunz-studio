@@ -354,20 +354,22 @@ def test_gpt_scene_stops_after_one_compact_retry_if_chatgpt_still_rejects_length
 
 
 def test_worker_tabs_allocate_distinct_ids_and_protect_both_lanes():
-    code = SOURCE[SOURCE.index('function isWorkerTab('):SOURCE.index('async function waitLoaded(')]
+    code = SOURCE[SOURCE.index('async function programWindowId('):SOURCE.index('async function waitLoaded(')]
     data = run_node(code + r'''
 let next=20;
 const saved={},removed=[],tabs=new Map();
-global.chrome={storage:{local:{get:async keys=>Object.fromEntries(keys.filter(k=>k in saved).map(k=>[k,saved[k]])),
+global.chrome={storage:{local:{get:async key=>({[key]:saved[key]}),
 set:async values=>Object.assign(saved,values)}},windows:{getAll:async()=>[{id:1}]},tabs:{
 get:async id=>tabs.get(id),query:async()=>[...tabs.values()],
 create:async props=>{const tab={id:next++,...props,autoDiscardable:false};tabs.set(tab.id,tab);return tab;},
 update:async(id,props)=>Object.assign(tabs.get(id),props),remove:async id=>{removed.push(id);tabs.delete(id);}}};
 Promise.all([workerTab('workerTabId'),workerTab('workerTabId2')]).then(async ids=>{
-await pruneWorkerTabs(ids[0]);console.log(JSON.stringify({ids,saved,removed}));});
+await workerTab(ids[0]===saved.workerTabId?'workerTabId':'workerTabId2');
+console.log(JSON.stringify({ids,saved,removed,tabCount:tabs.size}));});
 ''')
     assert len(set(data['ids'])) == 2
     assert data['removed'] == []
+    assert data['tabCount'] == 2
     assert set(data['saved'].values()) == set(data['ids'])
 
 

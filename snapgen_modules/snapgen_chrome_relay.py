@@ -63,25 +63,38 @@ def chrome_exe() -> str | None:
 # Set by the ChatGPT page of the main window: it pulls the program's Chrome inside itself, so the window
 # starts out of sight instead of popping up as a second browser.
 INSIDE_PROGRAM = False
+_program_chrome_lock = threading.Lock()
+_program_chrome_launch_at: float | None = None
 
 
 def open_program_chrome(url: str = "https://chatgpt.com/") -> bool:
-    """Open (or bring forward) Tidmunz's own Chrome window."""
-    chrome = chrome_exe()
-    if not chrome:
-        return False
-    profile = program_chrome_profile()
-    profile.mkdir(parents=True, exist_ok=True)
-    import subprocess
-    # A minimized or covered Chrome window normally pauses its tabs: ChatGPT then never finishes loading
-    # (no composer) and pictures crawl. These switches keep the program's window working in the background.
-    keep_working = ["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
-                    "--disable-background-timer-throttling"]
-    out_of_sight = ["--window-position=-20000,-20000"] if INSIDE_PROGRAM else []
-    subprocess.Popen([chrome, f"--user-data-dir={profile}", "--profile-directory=Default", *keep_working,
-                      *out_of_sight, "--new-window", url],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
-    return True
+    """Reuse Studio's Chrome or launch its dedicated profile once."""
+    global _program_chrome_launch_at
+    with _program_chrome_lock:
+        if INSIDE_PROGRAM:
+            if _program_chrome_launch_at is not None and time.monotonic() - _program_chrome_launch_at < 30:
+                return True
+            from snapgen_chatgpt_embed import chrome_windows, program_chrome_pids
+
+            pids = program_chrome_pids()
+            if pids and chrome_windows(pids):
+                return True
+        chrome = chrome_exe()
+        if not chrome:
+            return False
+        profile = program_chrome_profile()
+        profile.mkdir(parents=True, exist_ok=True)
+        import subprocess
+        # Keep ChatGPT running while Studio parks the window out of view.
+        keep_working = ["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+                        "--disable-background-timer-throttling"]
+        out_of_sight = ["--window-position=-20000,-20000"] if INSIDE_PROGRAM else []
+        subprocess.Popen([chrome, f"--user-data-dir={profile}", "--profile-directory=Default", *keep_working,
+                          *out_of_sight, "--new-window", url],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        if INSIDE_PROGRAM:
+            _program_chrome_launch_at = time.monotonic()
+        return True
 
 
 def extension_dir() -> Path:

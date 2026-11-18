@@ -32,7 +32,7 @@ global.chrome = {
     get:async()=>tab, update:async()=>tab, query:async()=>[],
     create:async()=>tab
   },
-  windows:{update:async()=>{}, getAll:async()=>[{id:1}]},
+  windows:{update:async()=>{throw Error("Chrome window must stay unfocused");}, getAll:async()=>[{id:1}]},
   scripting:{ executeScript:async({func,args})=>{
     if(func===global.self.tmMonitorComposeWithApps){
       calls.messages.push(args[0].prompt);
@@ -66,6 +66,7 @@ global.fetch = async url => {
 vm.runInThisContext(src, {filename:"followup.js"});
 assert.equal(typeof self.tmFollowupInit, "function");
 self.tmFollowupInit({
+  programWindowId:async()=>1,
   getLink:async()=>({port:8766,token:"test-only"}),
   inPage:async(tabId, func, args)=>{
     assert.equal(tabId,1);

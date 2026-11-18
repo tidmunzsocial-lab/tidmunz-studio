@@ -59,7 +59,7 @@ def test_failed_job_keeps_its_page_and_draft_for_inspection(failed, expected_res
     code = SOURCE[SOURCE.index("let account ="):SOURCE.index("// ── the ChatGPT tab")]
     data = run_node(code + r'''
 let running=false, taken=0, resets=0;
-const sleep=async()=>{}, badge=()=>{}, isWorkerTab=()=>false, workerTab=async()=>7;
+const sleep=async()=>{}, badge=()=>{}, idleWorkerUrl=()=>"https://chatgpt.com/", workerTab=async()=>7;
 global.setTimeout=()=>1; global.clearTimeout=()=>{};
 global.fetch=()=>new Promise(()=>{});
 global.chrome={storage:{local:{get:async()=>({workerTabId:7})}},tabs:{query:async()=>[],update:async()=>{resets++;}},runtime:{
@@ -125,3 +125,35 @@ async function inPage(_id,fn){
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')
     assert data["result"]["text"] == "OK" and data["reloads"] == 0
+
+def test_worker_reuses_assigned_tab_and_never_creates_a_browser_window():
+    code = SOURCE[SOURCE.index("async function programWindowId("):SOURCE.index("async function waitLoaded(")]
+    assert run_node(code + r"""
+const assert = require('node:assert/strict');
+let windows = [{id:8}], created=0, saved={workerTabId:99};
+const restored = {id:20,windowId:8,pinned:true,url:'https://chatgpt.com/#tidmunz-workerTabId'};
+const tabs = new Map([[restored.id, restored]]);
+global.chrome={
+ windows:{getAll:async()=>windows},
+ tabs:{
+   query:async({windowId})=>[...tabs.values()].filter(t=>t.windowId===windowId),
+   get:async id=>{if(!tabs.has(id))throw Error('No tab with id');return tabs.get(id);},
+   create:async opts=>{assert.equal(opts.windowId,8);created++;const t={...opts,id:21};tabs.set(t.id,t);return t;},
+   update:async()=>{},
+ },
+ storage:{local:{get:async key=>({[key]:saved[key]}),set:async obj=>Object.assign(saved,obj)}},
+};
+(async()=>{
+ assert.equal(await workerTab(),20);
+ assert.equal(await workerTab(),20);
+ assert.equal(created,0);
+ assert.equal(await workerTab('workerTabId2'),21);
+ assert.equal(created,1);
+ windows.push({id:9});
+ await assert.rejects(workerTab(),/หลายหน้าต่าง/);
+ windows=[];
+ await assert.rejects(workerTab(),/ยังไม่พบ/);
+ assert.equal(created,1);
+ console.log(JSON.stringify({created}));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""") == {"created": 1}

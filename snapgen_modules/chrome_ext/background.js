@@ -116,13 +116,7 @@ async function loop() {
         result = {error: "ChatGPT image queue is cooling down — message not sent", provider_status: 429,
                   send_state: "not_sent", retry_after: Math.ceil((imagePauseUntil - Date.now()) / 1000)};
       } else {
-        try {
-          result = await runJob(job, workerKey, pauseImages);
-        } catch (e) {
-          if (!/No current window/i.test(String(e && e.message || e))) throw e;
-          await ensureWindow();
-          result = await runJob(job, workerKey, pauseImages);
-        }
+        result = await runJob(job, workerKey, pauseImages);
         // GPT answered with a question/text but no picture: tell it once, in the same chat, to draw now.
         // A policy refusal is left alone so the program can reword the prompt.
         if (job.type === "image" && result && result.done && !(result.images || []).length &&
@@ -139,18 +133,12 @@ async function loop() {
     if (job.type !== "monitor_bootstrap" && (!result || !result.error)) {
       try {
         const saved = (await chrome.storage.local.get(workerKey))[workerKey];
-        if (saved) await chrome.tabs.update(saved, {url: "https://chatgpt.com/"});
+        if (saved) await chrome.tabs.update(saved, {url: idleWorkerUrl(workerKey)});
       } catch (e) {}
     }
     if (job.type === "image") account.checked = 0;
   }
   try {
-    // Clean up worker tabs left by older extension builds before waiting for the next job.
-    try {
-      const saved = (await chrome.storage.local.get("workerTabId")).workerTabId;
-      const tabs = await chrome.tabs.query({});
-      if (saved || tabs.some(isWorkerTab)) await workerTab();
-    } catch (e) {}
     for (;;) {
       if (active.size >= 2) await Promise.race([...active.values()].map(item => item.promise));
       let job = null;
@@ -194,32 +182,19 @@ async function loop() {
 }
 
 // ── the ChatGPT tab ──
-// A window for the work tab when the profile has none left (Chrome keeps running for the extension).
-async function ensureWindow() {
-  const wins = await chrome.windows.getAll();
-  if (wins.length) return;
-  const win = await chrome.windows.create({url: "https://chatgpt.com/", type: "normal", focused: false, populate: true});
-  const tab = win && win.tabs && win.tabs.find(t => Number.isInteger(t.id));
-  if (tab) {
-    try { await chrome.tabs.update(tab.id, {pinned: true, autoDiscardable: false}); } catch (e) {}
-    try { await chrome.storage.local.set({workerTabId: tab.id}); } catch (e) {}
-  } else {
-    try { await chrome.storage.local.remove("workerTabId"); } catch (e) {}
-  }
+// Studio owns the Chrome window. An extension has no reliable way to tell
+// which window Studio embedded if this profile has several open.
+async function programWindowId() {
+  const windows = await chrome.windows.getAll({windowTypes: ["normal"]});
+  if (windows.length !== 1)
+    throw new Error(windows.length
+      ? "Chrome ของ Tidmunz มีหลายหน้าต่าง กรุณาเหลือหน้าต่างที่อยู่ใน Studio"
+      : "ยังไม่พบหน้าต่าง Chrome ของ Tidmunz Studio");
+  return windows[0].id;
 }
 
-function isWorkerTab(tab) {
-  return /^https:\/\/chatgpt\.com\//.test(tab.url || tab.pendingUrl || "") &&
-    tab.pinned === true && tab.autoDiscardable === false;
-}
-
-async function pruneWorkerTabs(keepId) {
-  let tabs = [];
-  try { tabs = await chrome.tabs.query({}); } catch (e) { return; }
-  const saved = await chrome.storage.local.get(["workerTabId", "workerTabId2"]);
-  const keep = new Set([keepId, saved.workerTabId, saved.workerTabId2]);
-  await Promise.all(tabs.filter(tab => !keep.has(tab.id) && isWorkerTab(tab))
-    .map(tab => chrome.tabs.remove(tab.id).catch(() => {})));
+function idleWorkerUrl(workerKey) {
+  return "https://chatgpt.com/#tidmunz-" + workerKey;
 }
 
 async function workerTab(workerKey = "workerTabId") {
@@ -228,51 +203,25 @@ async function workerTab(workerKey = "workerTabId") {
   workerTab.pending = new Promise(resolve => { release = resolve; });
   await previous;
   try {
-    const assigned = await chrome.storage.local.get(["workerTabId", "workerTabId2"]);
-    const saved = assigned[workerKey];
-    const otherIds = new Set(Object.entries(assigned).filter(([key]) => key !== workerKey).map(([, id]) => id));
-    let id = null;
+    const windowId = await programWindowId();
+    const saved = (await chrome.storage.local.get(workerKey))[workerKey];
+    let tab = null;
     if (saved) {
-      try {
-        const tab = await chrome.tabs.get(saved);
-        if (tab && /^https:\/\/chatgpt\.com\//.test(tab.url || tab.pendingUrl || "")) id = tab.id;
-      } catch (e) {}
+      try { tab = await chrome.tabs.get(saved); } catch (_) {}
     }
-    if (id === null) {
-      // A previous extension build may have been reloaded: session storage is cleared but its
-      // pinned, non-discardable worker tab survives. Adopt one and close only matching worker tabs.
-      let tabs = [];
-      try { tabs = await chrome.tabs.query({}); } catch (e) {}
-      const oldWorkers = tabs.filter(tab => isWorkerTab(tab) && !otherIds.has(tab.id)).sort((a, b) =>
-        Number(b.active) - Number(a.active) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
-      if (oldWorkers.length) id = oldWorkers[0].id;
+    if (!tab || tab.windowId !== windowId ||
+        !/^https:\/\/chatgpt\.com\//.test(tab.pendingUrl || tab.url || "")) {
+      const idleUrl = idleWorkerUrl(workerKey);
+      const tabs = await chrome.tabs.query({windowId});
+      tab = tabs.find(candidate => candidate.pinned &&
+        (candidate.pendingUrl || candidate.url) === idleUrl);
+      if (!tab) tab = await chrome.tabs.create({windowId, url: idleUrl,
+                                               active: false, pinned: true});
     }
-    if (id === null) {
-      let tab;
-      try {
-        // Name the window: the program's Chrome window sits inside Tidmunz, and Chrome may not count it as the
-        // "current" window, so a tab without a windowId fails with "No current window" although a window is open.
-        const wins = await chrome.windows.getAll({windowTypes: ["normal"]});
-        const where = wins.length ? {windowId: wins[0].id} : {};
-        tab = await chrome.tabs.create({url: "https://chatgpt.com/", active: false, pinned: true, ...where});
-      } catch (e) {
-        if (!/No current window/i.test(String(e && e.message || e))) throw e;
-        // The service worker can stay connected after the profile's last window closed.
-        // Open a window in this extension's profile before sending anything to ChatGPT.
-        const win = await chrome.windows.create({
-          url: "https://chatgpt.com/", type: "normal", focused: false, incognito: false, populate: true,
-        });
-        tab = win && win.tabs && win.tabs[0];
-        if (!tab || !Number.isInteger(tab.id))
-          throw new Error("Cannot open ChatGPT work tab — open the program's Chrome window, then try again");
-        await chrome.tabs.update(tab.id, {pinned: true});
-      }
-      id = tab.id;
-    }
+    const id = tab.id;
     // Chrome's memory saver must not unload (and reload) the work tab in the middle of a job.
     try { await chrome.tabs.update(id, {autoDiscardable: false}); } catch (e) {}
     await chrome.storage.local.set({[workerKey]: id});
-    await pruneWorkerTabs(id);
     return id;
   } finally { release(); }
 }
@@ -287,13 +236,15 @@ async function waitLoaded(tabId, limitMs) {
   }
 }
 
-// Chrome can refuse to navigate the work tab ("Navigation rejected": a leave-site prompt, a stuck or
-// discarded page). Then drop that tab and open a fresh one, so one bad tab never fails every job.
+// Reload the assigned tab. Allocate a replacement only if it no longer exists.
 async function freshTab(tabId, url, workerKey = "workerTabId") {
-  try { await chrome.tabs.remove(tabId); } catch (e) {}
-  try { await chrome.storage.local.remove(workerKey); } catch (e) {}
-  const id = await workerTab(workerKey);
-  await chrome.tabs.update(id, {url});
+  let tab;
+  try { tab = await chrome.tabs.get(tabId); } catch (error) {
+    if (!/no tab with id/i.test(String(error))) throw error;
+  }
+  const id = tab ? tab.id : await workerTab(workerKey);
+  if (tab && tab.url === url && !tab.pendingUrl) await chrome.tabs.reload(id);
+  else await chrome.tabs.update(id, {url});
   return id;
 }
 
@@ -396,16 +347,10 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
       imageSendTail = new Promise(resolve => { release = resolve; });
       await previous;
       try {
-        const tab = await chrome.tabs.get(tabId);
-        await chrome.windows.update(tab.windowId, {state: "normal", focused: true});
         await chrome.tabs.update(tabId, {active: true});
         started = await inPage(tabId, pageSend, [job]);
       } finally { release(); }
     } else {
-      // Text insertion also needs the foreground document, not merely editor.focus().
-      const tab = await chrome.tabs.get(tabId);
-      if (chrome.windows && chrome.windows.update)
-        await chrome.windows.update(tab.windowId, {state: "normal", focused: true});
       if (chrome.tabs.update) await chrome.tabs.update(tabId, {active: true});
       started = await inPage(tabId, pageSend, [job]);
     }
@@ -482,9 +427,6 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
               send_state: "not_sent"};
     }
     try {
-      const tab = await chrome.tabs.get(tabId);
-      if (chrome.windows && chrome.windows.update)
-        await chrome.windows.update(tab.windowId, {state: "normal", focused: true});
       if (chrome.tabs.update) await chrome.tabs.update(tabId, {active: true});
       started = await inPage(tabId, pageSend, [job]);
     } catch (e) {
@@ -1050,4 +992,4 @@ loop();
 
 // Follow-up is optional and never starts another watcher or video job.
 if(self.tmFollowupInit) self.tmFollowupInit({inPage, pageSend:pageSend,
-  getLink:async()=>{if(!link)link=await pair();return link;}});
+  getLink:async()=>{if(!link)link=await pair();return link;}, programWindowId});

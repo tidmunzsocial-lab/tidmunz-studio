@@ -730,7 +730,7 @@ global.chrome={windows:{update:async()=>{focused=true;}},tabs:{
  get:async()=>({status:'complete',url:LOCATION,windowId:1}),update:async()=>{active=true;}}};
 function pageNodes(){} function pageSend(){} function pageVerifyDelivery(){} function pagePoll(){}
 async function inPage(_id,fn,args){
- if(fn.name==='pageSend'){if(!focused||!active)throw Error('text send lacks foreground focus');
+ if(fn.name==='pageSend'){if(focused||!active)throw Error('text send must select a tab without raising its window');
  sends++;return {error:'prompt was not confirmed',send_state:'unknown'};}
  if(fn.name==='pageVerifyDelivery')return {state:'sent',user_message_id:'new-user'};
  if(fn.name==='pagePoll'){polls++;polledCid=args[1].cid;return {done:true,text:'new reply'};}

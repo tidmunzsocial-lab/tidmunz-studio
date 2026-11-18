@@ -25,7 +25,6 @@ WS_THICKFRAME = 0x00040000
 WS_SYSMENU = 0x00080000
 WS_MINIMIZEBOX = 0x00020000
 WS_MAXIMIZEBOX = 0x00010000
-SW_RESTORE = 9
 SW_SHOW = 5
 SW_SHOWNOACTIVATE = 4
 GWL_EXSTYLE = -20
@@ -130,7 +129,7 @@ class EmbeddedChrome:
         return user32.GetAncestor(self.host.winfo_id(), GA_ROOT)
 
     def attach(self, hwnd: int) -> None:
-        user32.ShowWindow(hwnd, SW_RESTORE)  # a maximized window would not follow the page's size
+        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
         self.old_style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
         self.old_exstyle = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         user32.SetWindowLongPtrW(hwnd, GWL_STYLE, (self.old_style & ~FRAME_STYLES) | WS_POPUP)

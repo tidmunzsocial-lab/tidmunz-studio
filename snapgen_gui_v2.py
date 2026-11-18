@@ -14670,6 +14670,10 @@ def _install_better_bridge_manager():
         row2 = tk.Frame(win)
         row2.pack(fill="x", padx=14, pady=(16, 0))
         def open_program_chrome():
+            page = g.get("chatgpt_page")
+            if page is not None:
+                page.show()
+                return
             if not snapgen_chrome_relay.open_program_chrome():
                 messagebox.showerror("ส่วนขยาย ChatGPT", "ไม่พบ Google Chrome ในเครื่องนี้", parent=win)
 

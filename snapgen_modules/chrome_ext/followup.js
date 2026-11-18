@@ -258,7 +258,8 @@
       return !!(result&&result.ready&&!result.hasDraft&&!result.hasChips&&!result.responding);
     }catch(_){return false;}
   }
-  async function reuseMonitorTab({blank=false, preferredId=0}={}){
+  async function reuseMonitorTab({blank=false}={}){
+    const windowId=await injected.programWindowId();
     // Only an ID explicitly created/adopted by this extension may be
     // repurposed for a NEW project. The saved follow-up tabId can point to
     // the user's active ChatGPT conversation and must never be hijacked.
@@ -267,7 +268,7 @@
     for (const id of candidates) {
       let t=null;
       try{t=await chrome.tabs.get(id);}catch(_){}
-      if(!t||!/^https:\/\/chatgpt\.com\//.test(t.url||t.pendingUrl||""))continue;
+      if(!t||t.windowId!==windowId||!/^https:\/\/chatgpt\.com\//.test(t.url||t.pendingUrl||""))continue;
       if(blank&&(t.url||"")!=="https://chatgpt.com/"){
         if(!await safeToSwitch(t))
           throw Error("แท็บติดตามเดิมยังมีข้อความร่างหรือ GPT กำลังตอบ ห้ามเปิดแท็บใหม่ซ้ำ");
@@ -278,9 +279,7 @@
       await chrome.storage.local.set({[MONITOR_TAB]:t.id});
       return t;
     }
-    const wins=await chrome.windows.getAll({windowTypes:["normal"]});
-    if(!wins.length)throw Error("ต้องเปิด Chrome ของ Tidmunz Studio");
-    const t=await chrome.tabs.create({windowId:wins[0].id,
+    const t=await chrome.tabs.create({windowId,
       url:"https://chatgpt.com/",active:false,pinned:false});
     await chrome.tabs.update(t.id,{autoDiscardable:false}).catch(()=>{});
     await chrome.storage.local.set({[MONITOR_TAB]:t.id});
@@ -289,12 +288,16 @@
   async function tab(conf){
     // The user may have explicitly bound the existing project chat. Use
     // that tab only for the SAME conversation, not to start a new project.
+    const windowId=await injected.programWindowId();
     if(conf.tabId){
       try{
         const existing=await chrome.tabs.get(conf.tabId);
-        if(parse(existing.url||"")?.cid===conf.cid)return existing;
+        if(existing.windowId===windowId&&parse(existing.url||"")?.cid===conf.cid)return existing;
       }catch(_){}
     }
+    const sameChat=(await chrome.tabs.query({windowId,url:"https://chatgpt.com/*"}))
+      .find(t=>parse(t.pendingUrl||t.url||"")?.cid===conf.cid);
+    if(sameChat)return sameChat;
     // All automatically opened monitor chats share the extension-owned tab.
     // Image workers stay separate so parallel image jobs are not interrupted.
     const t=await reuseMonitorTab();
@@ -492,8 +495,6 @@
       const prompt=message(s,marker,m);
       c.phase="sending";c.marker=marker;c.lastAt=now;c.lastError="";
       await save(c);
-      const curr=await chrome.tabs.get(t.id);
-      await chrome.windows.update(curr.windowId,{state:"normal",focused:true});
       await chrome.tabs.update(t.id,{active:true});
       const lastCheck=await status();
       if(lastCheck.story!==c.story||lastCheck.host!==c.host){
@@ -639,6 +640,8 @@
     if(pending){
       try{
         t=await chrome.tabs.get(pending.tabId);
+        if(t.windowId!==await injected.programWindowId())
+          return {error:"Reserved chat is outside the Studio Chrome window"};
         await chrome.storage.local.set({[MONITOR_TAB]:t.id});
       }catch(_){return {error:"An earlier story-chat send may have succeeded; its tab is missing; manual reconciliation required"};}
     }else{
@@ -677,8 +680,6 @@
         await delay(700);
         if(attempt===35)return {error:"New ChatGPT composer not ready"};
       }
-      const tab=await chrome.tabs.get(t.id);
-      await chrome.windows.update(tab.windowId,{state:"normal",focused:true});
       await chrome.tabs.update(t.id,{active:true});
       const prompt="[Tidmunz Studio | เริ่มแชตติดตามเรื่อง | "+pending.marker+"]\n"+
         "เรื่อง: "+story+"; เครื่อง: "+host+". นี่คือแชตหลักสำหรับติดตามเรื่องนี้เท่านั้น. "+
@@ -713,7 +714,7 @@
   self.tmFollowupReport=()=>reportState().catch(()=>{});
   self.tmFollowupInit=(callbacks)=>{
     if(injected)return;
-    injected={page:callbacks.inPage,send:callbacks.pageSend,getLink:callbacks.getLink};
+    injected={page:callbacks.inPage,send:callbacks.pageSend,getLink:callbacks.getLink,programWindowId:callbacks.programWindowId};
     load().then(async c=>{
       if(c.enabled&&!(await chrome.alarms.get?.(ALARM)))
         await chrome.alarms.create(ALARM,{periodInMinutes:1});
