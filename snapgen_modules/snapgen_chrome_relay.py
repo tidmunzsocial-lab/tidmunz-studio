@@ -548,11 +548,27 @@ def _write_extension(source: Path, token: str, port: int) -> None:
     # extension. This used to silently downgrade 1.0.54 back to 1.0.53.
     try:
         source_version = json.loads((source / "manifest.json").read_text(encoding="utf-8"))["version"]
-        target_version = json.loads((target / "manifest.json").read_text(encoding="utf-8"))["version"]
+        target_manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+        target_version = target_manifest["version"]
     except (OSError, ValueError, TypeError, KeyError):
         source_version, target_version = "0", "0"
     preserve_newer_extension = _version_tuple(target_version) > _version_tuple(source_version)
-    if not preserve_newer_extension:
+    # 1.0.60 is the separately maintained SnapGen Web build. Its worker
+    # already loads followup.js, so upgrade that component in place while
+    # retaining its generation handlers and extra host permissions.
+    preserve_snapgen_web = (source_version == "1.0.61"
+                            and target_version in {"1.0.60", "1.0.61"}
+                            and (target / "snapgen_web.js").is_file())
+    if preserve_snapgen_web:
+        monitor = source / "followup.js"
+        installed_monitor = target / monitor.name
+        if not installed_monitor.is_file() or monitor.read_bytes() != installed_monitor.read_bytes():
+            shutil.copy2(monitor, installed_monitor)
+        if target_version != source_version:
+            target_manifest["version"] = source_version
+            (target / "manifest.json").write_text(
+                json.dumps(target_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    elif not preserve_newer_extension:
         for item in source.glob("*.*"):
             destination = target / item.name
             if not destination.is_file() or destination.read_bytes() != item.read_bytes():

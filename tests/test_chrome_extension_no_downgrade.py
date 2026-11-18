@@ -42,3 +42,22 @@ def test_same_version_updates_file_content(monkeypatch, tmp_path):
     monkeypatch.setattr(relay, "extension_dir", lambda: installed)
     relay._write_extension(bundled, "test-only-token", 8766)
     assert (installed / "followup.js").read_text() == "patched"
+
+def test_monitor_upgrade_preserves_installed_snapgen_web(monkeypatch, tmp_path):
+    bundled, installed = tmp_path / "bundle", tmp_path / "extension"
+    _mock_manifest(bundled, "1.0.61", "replacement-monitor")
+    _mock_manifest(installed, "1.0.60", "previous-monitor")
+    manifest = installed / "manifest.json"
+    manifest.write_text(json.dumps({"version": "1.0.60",
+                                    "host_permissions": ["https://snapgen.ai/*"]}))
+    (installed / "snapgen_web.js").write_text("installed-web")
+    (installed / "background.js").write_text("installed-worker")
+    (bundled / "background.js").write_text("bundled-worker")
+    monkeypatch.setattr(relay, "extension_dir", lambda: installed)
+    for _ in range(2):
+        relay._write_extension(bundled, "test-only-token", 8766)
+        assert json.loads(manifest.read_text()) == {
+            "version": "1.0.61", "host_permissions": ["https://snapgen.ai/*"]}
+        assert (installed / "followup.js").read_text() == "replacement-monitor"
+        assert (installed / "background.js").read_text() == "installed-worker"
+        assert (installed / "snapgen_web.js").read_text() == "installed-web"

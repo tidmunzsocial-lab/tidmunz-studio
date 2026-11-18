@@ -1,3 +1,6 @@
+- 2026-11-18 v2.0.44: The 1.0.61 monitor upgrades an installed 1.0.60
+  SnapGen Web extension without replacing its worker or permissions.
+  The relay reloads the newer on-disk version through its normal path.
 - 2026-11-18 Auto: Explicit Resume may replace an unverified saved
   monitor chat once when local binding is missing. Archive an orphaned
   bootstrap only when its story and host match. Journal sends before

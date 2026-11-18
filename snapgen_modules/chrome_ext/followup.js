@@ -735,7 +735,12 @@
   self.tmFollowupReport=()=>reportState().catch(()=>{});
   self.tmFollowupInit=(callbacks)=>{
     if(injected)return;
-    injected={page:callbacks.inPage,send:callbacks.pageSend,getLink:callbacks.getLink,programWindowId:callbacks.programWindowId};
+    const programWindowId=callbacks.programWindowId || (async()=>{
+      const windows=await chrome.windows.getAll({windowTypes:["normal"]});
+      if(windows.length!==1)throw Error("ต้องมีหน้าต่าง Chrome ของ Tidmunz Studio หนึ่งหน้าต่าง");
+      return windows[0].id;
+    });
+    injected={page:callbacks.inPage,send:callbacks.pageSend,getLink:callbacks.getLink,programWindowId};
     load().then(async c=>{
       if(c.enabled&&!(await chrome.alarms.get?.(ALARM)))
         await chrome.alarms.create(ALARM,{periodInMinutes:1});
