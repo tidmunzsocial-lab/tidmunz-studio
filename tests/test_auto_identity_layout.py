@@ -93,7 +93,7 @@ def check_groups(hidden_tk):
     scope = dict(vars(N), tk=tk, box=box, table_tools=tools, bg="white", video_mode=True, state={"project": {}})
     names = ["regenerate_selected", "edit_current_selected", "repair_identity_selected", "edit_prompt", "refine_selected",
              "use_scene_image", "remake_clips_selected", "fix_problem_selected", "edit_video_prompt",
-             "reslow_selected", "start_pipeline", "open_path"]
+              "reslow_selected", "start_pipeline", "open_path", "start_covers_only"]
     for name in names: scope[name] = lambda *a, name=name, **kw: events.append((name, kw))
     node = next(n for n in ast.walk(TREE) if isinstance(n, ast.If) and any(
         isinstance(child, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "action_groups" for t in child.targets)
@@ -104,9 +104,15 @@ def check_groups(hidden_tk):
     assert [g.cget("text") for g in groups] == ["รูปภาพ", "วิดีโอ"]
     for group in groups:
         buttons = group.winfo_children()
-        assert len(buttons) == 6
-        assert {(b.grid_info()["row"], b.grid_info()["column"]) for b in buttons} == {(r,c) for r in range(2) for c in range(3)}
+        expected = 7 if group.cget("text") == "วิดีโอ" else 6
+        assert len(buttons) == expected
+        coords = {(b.grid_info()["row"], b.grid_info()["column"]) for b in buttons}
+        desired = {(i // 4, i % 4) for i in range(7)} if expected == 7 else {(r,c) for r in range(2) for c in range(3)}
+        assert coords == desired
         assert group.winfo_reqheight() < 130
+    cover_button = groups[1].winfo_children()[6]
+    assert cover_button.cget("text") == "สร้างหน้าปก"
+    assert cover_button.cget("bg").lower() == "#dc2626"
     groups[0].winfo_children()[2].invoke(); groups[1].winfo_children()[1].invoke()
     assert [e[0] for e in events] == ["repair_identity_selected", "fix_problem_selected"]
     button = groups[1].winfo_children()[2]

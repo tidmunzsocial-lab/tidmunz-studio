@@ -926,8 +926,7 @@ VIDEO_STAGES = (
     ("motion", "พรอมต์วิดีโอ", 5),
     ("clips", "สร้างคลิปวิดีโอ", 36),
     ("effects", "เลือกเสียงเอฟเฟกต์", 1),
-    ("video", "ตัดต่อ", 3),
-    ("covers", "สร้างหน้าปก YouTube", 5),
+    ("video", "ตัดต่อ", 8),
 )
 # Preserve the original visual progress scale for existing unfinished films.
 # New one-page runs explicitly use the expanded stage scale.
@@ -941,8 +940,7 @@ LEGACY_VIDEO_STAGES = (
     ("motion", "พรอมต์วิดีโอ", 5),
     ("clips", "สร้างคลิปวิดีโอ", 43),
     ("effects", "เลือกเสียงเอฟเฟกต์", 1),
-    ("video", "ตัดต่อ", 5),
-    ("covers", "สร้างหน้าปก YouTube", 5),
+    ("video", "ตัดต่อ", 10),
 )
 # Every plan, storyboard and fix: the picture shows only what the script says at that moment.
 SCOPE_RULE = ("ขอบเขต (ห้ามออกนอกบท): ภาพต้องแสดงเฉพาะสิ่งที่คำบรรยาย/บทช่วงนั้นพูดถึง — ตัวละคร สถานที่ เวลา "
@@ -4577,6 +4575,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 ("ทำสโลว์", lambda: reslow_selected(), "ทำสโลว์ 2× จากคลิปที่มีอยู่ ไม่ส่งสร้างวิดีโอใหม่"),
                 ("รวมวิดีโอ", lambda: start_pipeline(only="video"), "รวมคลิปที่มีอยู่กับเสียงเป็นวิดีโอ ไม่สร้างรูปหรือคลิปใหม่"),
                 ("เปิดวิดีโอ", lambda: open_path((state["project"] or {}).get("last_video")), "เปิดวิดีโอที่รวมเสร็จล่าสุด"),
+                ("สร้างหน้าปก", lambda: start_covers_only(), "สร้างภาพปกเปล่า 5 รูป ไม่มีข้อความ ไม่สปอยล์"),
             )),
         )
         for column, (title, buttons) in enumerate(action_groups):
@@ -4584,10 +4583,17 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             group.grid(row=0, column=column, sticky="nsew", padx=(0, 6))
             table_tools.grid_columnconfigure(column, weight=1, uniform="actions")
             for n, (label, command, hint) in enumerate(buttons):
-                button = tk.Button(group, text=label, command=command, relief="flat", bg="#E2E8F0",
-                                   fg="#0F172A", font=("TkDefaultFont", 9), padx=3, pady=3, cursor="hand2")
-                button.grid(row=n // 3, column=n % 3, sticky="ew", padx=2, pady=2)
-                group.grid_columnconfigure(n % 3, weight=1, uniform="buttons")
+                is_cover = title == "วิดีโอ" and label == "สร้างหน้าปก"
+                columns = 4 if title == "วิดีโอ" else 3  # no additional row on compact screens
+                button = tk.Button(group, text=label, command=command, relief="flat",
+                                   bg="#DC2626" if is_cover else "#E2E8F0",
+                                   fg="#FFFFFF" if is_cover else "#0F172A",
+                                   activebackground="#B91C1C" if is_cover else "#CBD5E1",
+                                   activeforeground="#FFFFFF" if is_cover else "#0F172A",
+                                   font=("TkDefaultFont", 9, "bold") if is_cover else ("TkDefaultFont", 9),
+                                   padx=3, pady=3, cursor="hand2")
+                button.grid(row=n // columns, column=n % columns, sticky="ew", padx=2, pady=2)
+                group.grid_columnconfigure(n % columns, weight=1, uniform="buttons")
                 button.bind("<Enter>", lambda e, text=hint: action_hint.set(text))
                 button.bind("<FocusIn>", lambda e, text=hint: action_hint.set(text))
         tk.Label(box, textvariable=action_hint, bg=bg, fg="#475569", anchor="w").pack(fill="x", padx=10)
@@ -8180,84 +8186,123 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         log(f"✓ วิดีโอเสร็จ: {final}")
 
     def stage_covers():
-        """Generate exactly five distinct project covers AFTER the final merge.
-
-        GPT designs from the actual story data, images attach same-project references,
-        and the Thai title is rendered locally to avoid incorrect AI text.
-        Every completed cover has its own receipt and is safe to resume.
-        """
+        """Optional artwork stage, never gated by final video render."""
         if not video_mode:
             return
         from snapgen_auto_covers import (
-            COVER_COUNT, cover_brief, cover_design_request, cover_reference_files,
-            draw_title, story_title, validate_designs,
+            COVER_COUNT, COVER_RULES_VERSION, cover_brief, cover_design_request,
+            cover_reference_files, save_cover_only, validate_designs,
         )
         project = state["project"]
         folder = Path(state["folder"])
-        final = Path(str(project.get("last_video") or ""))
-        if not final.is_file() or final.stat().st_size <= 0:
-            raise RuntimeError("ต้องรวมวิดีโอให้เสร็จก่อนสร้างหน้าปก")
         out_dir = folder / "covers"
-        out_dir.mkdir(parents=True, exist_ok=True)
         source_dir = out_dir / "_sources"
-        source_dir.mkdir(exist_ok=True)
+        source_dir.mkdir(parents=True, exist_ok=True)
         refs = cover_reference_files(project, folder)
         if not refs:
-            raise RuntimeError("ยังไม่มีภาพเรฟตัวละครในโฟลเดอร์โปรเจกต์ Auto — หยุดก่อนสร้างหน้าปกผิดคน")
+            raise RuntimeError("ยังไม่มีรูปเรฟตัวละครช่วงต้น–กลางเรื่อง")
         designs = project.get("cover_designs")
-        if not isinstance(designs, list) or len(designs) != COVER_COUNT:
+        if (project.get("cover_design_version") != COVER_RULES_VERSION
+                or not isinstance(designs, list) or len(designs) != COVER_COUNT):
             check_stop()
-            set_progress("covers", 0, "GPT วิเคราะห์บทและออกแบบหน้าปก YouTube 5 แบบ")
-            answer = gpt_look(cover_design_request(
-                cover_brief(project, folder, story_script())))
-            designs = validate_designs(answer)
+            set_manual_progress("สร้างหน้าปก", "GPT อ่านต้น–กลางเรื่องเพื่อออกแบบภาพปกไม่สปอยล์")
+            designs = validate_designs(gpt_look(cover_design_request(
+                cover_brief(project, folder, story_script()))))
             project["cover_designs"] = designs
+            project["cover_design_version"] = COVER_RULES_VERSION
             save_project()
-        previous_stage = state.get("active_image_stage")
+        old_stage = state.get("active_image_stage")
         state["active_image_stage"] = "covers"
         try:
             sources = project.setdefault("cover_image_sources", {})
+            source_versions = project.setdefault("cover_source_versions", {})
             outputs = project.setdefault("cover_images", {})
+            output_versions = project.setdefault("cover_image_versions", {})
             for i, concept in enumerate(designs, 1):
                 check_stop()
                 key = str(i)
                 picture = out_dir / f"cover_{i:02d}.jpg"
-                if str(outputs.get(key) or "") == str(picture) and picture.is_file() and picture.stat().st_size > 20_000:
-                    log(f"✓ หน้าปก {i}/{COVER_COUNT}: มีอยู่แล้ว — ไม่ส่งสร้างซ้ำ")
+                if (output_versions.get(key) == COVER_RULES_VERSION
+                        and str(outputs.get(key) or "") == str(picture)
+                        and picture.is_file() and picture.stat().st_size > 20_000):
+                    log(f"✓ ภาพปก {i}/{COVER_COUNT}: มีอยู่แล้ว ไม่ส่งซ้ำ")
                     continue
-                set_progress("covers", (i - 1) / COVER_COUNT, f"สร้างหน้าปก YouTube {i}/{COVER_COUNT}")
-                src = Path(str(sources.get(key) or ""))
-                if not src.is_file():
+                set_manual_progress("สร้างหน้าปก", f"สร้างภาพปก {i}/{COVER_COUNT} · ไม่มีข้อความ")
+                src = Path(str(sources.get(key) or "")) if source_versions.get(key) == COVER_RULES_VERSION else None
+                if src is None or not src.is_file():
                     prompt = (
-                        f"{concept}\n\nPHOTOREALISTIC CINEMATIC LIVE-ACTION YOUTUBE THUMBNAIL, "
-                        "16:9 landscape. Keep identities and clothes appropriate to this story and attached reference images. "
-                        "Detailed professional theatrical key art, attractive colors, lifelike facial anatomy, "
-                        "characters natural-sized and occupying only the RIGHT HALF of the composition; "
-                        "LEFT 45 PERCENT is a clean atmospheric NEGATIVE SPACE for a large Thai title added later. "
-                        "No words, no logos, no invented face moles, boils or beauty marks. "
-                        "Never cover the faces with foreground objects. No collage or multiple character duplicates. "
-                        + "\nStory title: " + story_title(project, folder)
+                        f"{concept}\n\n"
+                        "Photorealistic cinematic Thai live-action promotional art, landscape 16:9. "
+                        "Unusually captivating expressive movie-poster photography, strong focal point, "
+                        "rich complementary colors, dramatic cinematic light, authentic emotion, not bland. "
+                        "EVERY VISIBLE CHARACTER must have BOTH EYES OPEN, fully visible eyes, "
+                        "natural direct gaze, no sleeping, blinking, closed or hidden eyes. "
+                        "Illustrate ONLY exciting events from the EARLY or MIDDLE of the supplied story. "
+                        "Absolutely NEVER depict the ending, resolution, climax outcome, final transformation, "
+                        "final fate or last scenes. Do not reveal secrets, no spoilers. "
+                        "NO TEXT, NO TITLE, NO LETTERS, NO LABELS, NO LOGO, NO WATERMARK, NO TYPOGRAPHY. "
+                        "Use the WHOLE frame for visual impact, no blank side reserved for text. "
+                        "Match the character identity, faces and costumes of the original reference sheets; "
+                        "no invented people, duplicate characters or extra skin markings."
                     )
-                    result = make_image(prompt, refs[:4], out_dir / "_sources",
-                                        f"cover_{i:02d}", "16:9",
+                    result = make_image(prompt, refs[:4], source_dir,
+                                        f"cover_{i:02d}_plain_v2", "16:9",
                                         identity=True, fresh_chat=True)
                     src = Path(str(result))
                     if not src.is_file():
-                        raise RuntimeError(f"GPT ไม่ส่งไฟล์หน้าปกที่ {i} กลับมา")
+                        raise RuntimeError(f"ไม่พบไฟล์ภาพปก {i} หลังสร้าง")
                     sources[key] = str(src)
+                    source_versions[key] = COVER_RULES_VERSION
                     save_project()
-                draw_title(src, picture, story_title(project, folder))
+                save_cover_only(src, picture)
                 outputs[key] = str(picture)
+                output_versions[key] = COVER_RULES_VERSION
                 save_project()
-                log(f"✓ หน้าปก YouTube {i}/{COVER_COUNT}: {picture.name}")
-            if len([p for p in outputs.values() if Path(str(p)).is_file()]) < COVER_COUNT:
+                log(f"✓ ภาพปก {i}/{COVER_COUNT}: {picture.name} · ไม่มีข้อความ")
+            if sum(bool(output_versions.get(str(i)) == COVER_RULES_VERSION
+                        and Path(str(outputs.get(str(i)) or "")).is_file())
+                   for i in range(1, COVER_COUNT + 1)) != COVER_COUNT:
                 raise RuntimeError("หน้าปกยังไม่ครบ 5 รูป")
-            set_progress("covers", 1.0, "หน้าปก YouTube 5 รูปเสร็จแล้ว")
+            set_manual_progress("สร้างหน้าปก", "ภาพปกเปล่าครบ 5 รูป")
         finally:
-            if previous_stage is None:
+            if old_stage is None:
                 state.pop("active_image_stage", None)
             else:
-                state["active_image_stage"] = previous_stage
+                state["active_image_stage"] = old_stage
+
+    def start_covers_only():
+        """Manual red cover button: no automatic video steps or forced merge."""
+        if not video_mode or state["busy"]:
+            return
+        project = state.get("project") or {}
+        if not project.get("script") or not state.get("folder"):
+            messagebox.showinfo("สร้างหน้าปก", "เปิดโปรเจกต์ที่มีบทก่อน", parent=page)
+            return
+        state["busy"], state["stop"] = True, False
+        state.pop("last_error", None)
+        state["auto_yes"] = True
+        start_btn.config(state="disabled")
+        set_manual_progress("สร้างหน้าปก", "เตรียมสร้างภาพหน้าปกเปล่า 5 รูป")
+        log("▶ สร้างหน้าปกแยกจากการตัดต่อและทำวิดีโอ")
+        def worker():
+            try:
+                stage_covers()
+                project.setdefault("done", {})["covers"] = True
+                save_project()
+                log("✓ หน้าปกเปล่าครบ 5 รูป · โฟลเดอร์ covers")
+            except Stopped:
+                log("⏸ หยุดสร้างหน้าปก · ไฟล์ที่เสร็จแล้วอยู่ในโฟลเดอร์")
+            except Exception as exc:
+                state["last_error"] = str(exc)
+                log(f"❌ สร้างหน้าปก: {exc}")
+                ui(detail_var.set, str(exc)[:230])
+            finally:
+                save_project()
+                state["busy"] = False
+                state.pop("auto_yes", None)
+                ui(lambda: start_btn.config(state="normal", text="▶ ทำต่อ"))
+                ui(refresh_all)
+        threading.Thread(target=worker, daemon=True).start()
 
     def update_preview():
         """Video mode, after each clip: clips made so far from shot 1 + their narration → a watchable MP4.
@@ -9828,11 +9873,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             try:
                 stage_video(force=force)
                 project["done"]["video"] = True
-                save_project()  # Preserve the finished film even if GPT cover generation later fails.
-                if video_mode:
-                    stage_covers()
-                    project["done"]["covers"] = True
-                set_progress("video", 1, "วิดีโอและหน้าปกเสร็จแล้ว — กดเปิดโฟลเดอร์งาน")
+                save_project()
+                set_progress("video", 1, "วิดีโอเสร็จแล้ว — หน้าปกสร้างแยกด้วยปุ่มสีแดง")
             except Stopped:
                 log("⏸ หยุดแล้ว — ส่วนที่ทำเสร็จเก็บไว้ กดอัปเดตเฉพาะที่แก้เพื่อทำต่อ")
             except Exception as exc:

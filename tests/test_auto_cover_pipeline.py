@@ -24,9 +24,8 @@ def make_project(tmp_path):
     refs = tmp_path / "refs"
     refs.mkdir()
     Image.new("RGB", (96, 96), (100, 70, 50)).save(refs / "มฆมานพ.png")
-    video = tmp_path / "final_movie.mp4"
-    video.write_bytes(b"nonempty completed local test video")
-    return {"script": "บท - มฆมานพ.docx", "last_video": str(video),
+    # No completed video is necessary: the cover button must work standalone.
+    return {"script": "บท - มฆมานพ.docx",
             "context": {"characters": [
                 {"name": "มฆมานพ", "visual_identity": "human Thai villager, not a deity"}]},
             "scenes": [{"text": "มฆมานพในหมู่บ้าน", "characters": ["มฆมานพ"]}]}
@@ -40,7 +39,7 @@ def test_five_automated_covers_are_saved_in_project_then_resume_without_api(tmp_
         calls["gpt"] += 1
         return {"covers": [
             {"prompt": "Photorealistic cinematic Thai film. Historical human village "
-                       f"key art concept {i}, carefully framed right-side cast and empty left area."}
+                       f"key art concept {i}, expressive open eyes, full frame without words."}
             for i in range(5)
         ]}
     def image(prompt, refs, output_dir, name, aspect, **kwargs):
@@ -48,7 +47,9 @@ def test_five_automated_covers_are_saved_in_project_then_resume_without_api(tmp_
         assert aspect == "16:9"
         assert refs and all(str(tmp_path / "refs") in p for p in refs)
         assert kwargs.get("fresh_chat") is True
-        assert "LEFT 45 PERCENT" in prompt
+        assert "BOTH EYES OPEN" in prompt
+        assert "NO TEXT" in prompt
+        assert "NEVER depict the ending" in prompt
         folder = Path(output_dir)
         assert folder.is_dir()
         file = folder / f"{name}.png"
@@ -61,7 +62,7 @@ def test_five_automated_covers_are_saved_in_project_then_resume_without_api(tmp_
           "gpt_look": designs, "make_image": image,
           "story_script": lambda: "กาลครั้งหนึ่งมฆมานพยังเป็นมนุษย์",
           "log": calls["log"].append, "check_stop": lambda: None,
-          "set_progress": lambda *args: None, "save_project": save}
+          "set_manual_progress": lambda *args: None, "save_project": save}
     stage = nested_stage(ns)
     stage()
     assert calls["gpt"] == 1
@@ -91,5 +92,5 @@ def test_no_reference_stops_before_gpt_generation(tmp_path):
           "state": {"folder": str(tmp_path), "project": project},
           "gpt_look": lambda _: pytest.fail("GPT call before refs"),
           "save_project": lambda: None}
-    with pytest.raises(RuntimeError, match="ภาพเรฟ"):
+    with pytest.raises(RuntimeError, match="เรฟ"):
         nested_stage(ns)()
