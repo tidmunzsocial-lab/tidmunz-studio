@@ -915,8 +915,7 @@ STAGES = (
 )
 # Slot 2 auto mode: the same pipeline, plus one AI video clip per scene.
 VIDEO_STAGES = (
-    ("monitor", "สร้างแชตติดตามเรื่องและเรียกบอทจริง", 1),
-    ("analysis", "วิเคราะห์บท", 1),
+    ("analysis", "วิเคราะห์บท", 2),
     ("context", "สร้าง Context", 5),
     ("ref_characters", "สร้างตัวละคร", 8),
     ("transcribe", "ฟังเสียง", 6),
@@ -931,14 +930,13 @@ VIDEO_STAGES = (
 # Preserve the original visual progress scale for existing unfinished films.
 # New one-page runs explicitly use the expanded stage scale.
 LEGACY_VIDEO_STAGES = (
-    ("monitor", "สร้างแชตติดตามเรื่องและเรียกบอทจริง", 1),
     ("context", "วิเคราะห์บท", 4),
     ("transcribe", "ฟังเสียง", 6),
     ("plan", "วางแผนฉาก", 5),
     ("storyboard", "สตอรี่ชีต", 5),
     ("images", "สร้างรูปฉาก", 20),
     ("motion", "พรอมต์วิดีโอ", 5),
-    ("clips", "สร้างคลิปวิดีโอ", 43),
+    ("clips", "สร้างคลิปวิดีโอ", 44),
     ("effects", "เลือกเสียงเอฟเฟกต์", 1),
     ("video", "ตัดต่อ", 10),
 )
@@ -960,7 +958,7 @@ DEFAULT_STYLE = "ภาพสมจริงแบบภาพยนตร์ �
 STYLES = {
     "ปกติ": {"prompt": "", "still": False},
     "เรื่องผี": {
-        "prompt": ("ภาพถ่ายสมจริงแบบภาพยนตร์สยองขวัญไทย โทนสีมืด หม่น อึมครึม สีซีดอมเขียวเทา แสงน้อย เงาเข้ม "
+        "prompt": ("ภาพถ่ายสมจริงแบบภาพยนตร์สยองขวัญไทย โทนสีมืด หม่น อึมครึม คงสีสันตามภาพต้นฉบับ ไม่ย้อมเขียวหรือกดความอิ่มสี แสงน้อย เงาเข้ม "
                    "บรรยากาศน่ากลัววังเวง มีหมอกหรือความมืดรอบภาพ ไม่มีตัวหนังสือหรือคำบรรยายในภาพ"),
         "still": False,
         "zoom_only": True,  # slow zoom in / out at one steady speed, no pans
@@ -973,17 +971,11 @@ STYLES = {
 STEADY_ZOOM_PER_SECOND = 0.01
 STEADY_ZOOM_MAX = 0.15
 
-# Old horror-film look, applied after zoom/pan: faded warm tone, moving grain, light flicker, dark corners.
-# Kept light: horror pictures are already dark, so it lifts the shadows a little instead of darkening.
-FILM_LOOK = ("eq=eval=frame:saturation=0.6:contrast=0.96:gamma=1.12:brightness='0.03+0.025*(random(0)-0.5)',"
-             "colorbalance=rm=0.05:gm=0.02:bm=-0.05:rh=0.03:bh=-0.03,"
+# Keep the source image colors: film texture only, never add green/gray tint.
+FILM_LOOK = ("eq=eval=frame:brightness='0.025*(random(0)-0.5)',"
              "noise=alls=24:allf=t+u,vignette=angle=PI/7")
-# Same look, cheaper: the static colour grade runs once on the still (before zoompan) instead of on
-# every 1080p frame; only the per-frame brightness flicker, grain and vignette stay per frame.
-FILM_GRADE = ("eq=saturation=0.6:contrast=0.96:gamma=1.12:brightness=0.03,"
-              "colorbalance=rm=0.05:gm=0.02:bm=-0.05:rh=0.03:bh=-0.03")
-FILM_FRAME = ("eq=eval=frame:brightness='0.025*(random(0)-0.5)',"
-              "noise=alls=24:allf=t+u,vignette=angle=PI/7")
+FILM_GRADE = ""
+FILM_FRAME = FILM_LOOK
 
 # Thai ghosts GPT often does not know. Looks follow common Thai folklore and
 # are phrased for film (no gore words) so image models do not refuse.
@@ -2093,7 +2085,7 @@ def zoompan_filter(motion: str, frames: int, width: int, height: int, steady: bo
         z, x, y = f"1+0.15*{progress}", centre_x, centre_y
     big_w, big_h = width * 2, height * 2
     return (
-        (FILM_GRADE + "," if film else "") +
+        (FILM_GRADE + "," if film and FILM_GRADE else "") +
         f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase,crop={big_w}:{big_h},"
         f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps={FPS},"
         + (FILM_FRAME + "," if film else "") + "format=yuv420p"
@@ -3843,7 +3835,7 @@ def auto_saved_percent(project, stages):
     if stages is VIDEO_STAGES and project.get("auto_progress_version") != "one_page":
         # Monitoring and SFX review are new user handoffs. Preserve historical
         # percent for unfinished legacy projects, rather than moving it back.
-        stages = tuple((key, title, weight + (2 if key == "clips" else 0))
+        stages = tuple((key, title, weight + (1 if key == "clips" else 0))
                        for key, title, weight in LEGACY_VIDEO_STAGES
                        if key not in ("monitor", "effects"))
     done = project.get("done") or {}
@@ -4461,6 +4453,9 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         tools_menu = tk.Menubutton(run_row, text="เครื่องมือ ▾", relief="flat", padx=8)
         menu = tk.Menu(tools_menu, tearoff=False)
         menu.add_command(label="เปิดโฟลเดอร์งาน", command=lambda: open_path(state.get("folder")))
+        menu.add_command(label="เปิดโฟลเดอร์หน้าปก", command=lambda: open_path(
+            Path(state["folder"]) / "หน้าปก") if state.get("folder")
+            else messagebox.showinfo("หน้าปก", "เปิดโปรเจกต์ก่อน", parent=page))
         menu.add_separator()
         menu.add_command(label="เริ่มประวัติ GPT ใหม่…", command=lambda: reset_history())
         tools_menu.config(menu=menu)
@@ -4593,6 +4588,12 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                                    font=("TkDefaultFont", 9, "bold") if is_cover else ("TkDefaultFont", 9),
                                    padx=3, pady=3, cursor="hand2")
                 button.grid(row=n // columns, column=n % columns, sticky="ew", padx=2, pady=2)
+                if is_cover:
+                    def enforce_cover_red(btn=button):
+                        if btn.winfo_exists():
+                            btn.configure(bg="#DC2626", fg="#FFFFFF",
+                                          activebackground="#B91C1C", activeforeground="#FFFFFF")
+                    button.after(1600, enforce_cover_red)
                 group.grid_columnconfigure(n % columns, weight=1, uniform="buttons")
                 button.bind("<Enter>", lambda e, text=hint: action_hint.set(text))
                 button.bind("<FocusIn>", lambda e, text=hint: action_hint.set(text))
@@ -4702,6 +4703,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             return
         folder = project_folder_for(export_root() / work_dir_name, script, text)
         folder.mkdir(parents=True, exist_ok=True)
+        if video_mode:
+            (folder / "หน้าปก").mkdir(exist_ok=True)
         try:
             project = json.loads((folder / "project.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -4796,6 +4799,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
             if not quiet:
                 messagebox.showerror("เล่าภาพ", f"เปิดโปรเจกต์ไม่ได้ (ไม่มี project.json): {exc}", parent=page)
             return False
+        if video_mode:
+            (folder / "หน้าปก").mkdir(exist_ok=True)
         show_project(folder, project)
         log(f"เปิดโปรเจกต์เดิม: {folder.name} — ทำต่อ/แก้ฉากได้เลย")
         return True
@@ -5976,8 +5981,6 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
     def stage_auto_analysis():
         """Validate the selected original story before the shared Prompt-Ref workflow."""
         project = state["project"]
-        if video_mode and not project.get("done", {}).get("monitor"):
-            stage_monitor_chat()
         source = Path(str(project.get("script") or ""))
         audio = Path(str(project.get("audio") or ""))
         if not source.is_file() or not audio.is_file():
@@ -8195,7 +8198,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
         )
         project = state["project"]
         folder = Path(state["folder"])
-        out_dir = folder / "covers"
+        out_dir = folder / "หน้าปก"
         source_dir = out_dir / "_sources"
         source_dir.mkdir(parents=True, exist_ok=True)
         refs = cover_reference_files(project, folder)
@@ -8289,7 +8292,7 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                 stage_covers()
                 project.setdefault("done", {})["covers"] = True
                 save_project()
-                log("✓ หน้าปกเปล่าครบ 5 รูป · โฟลเดอร์ covers")
+                log("✓ หน้าปกเปล่าครบ 5 รูป · โฟลเดอร์ หน้าปก")
             except Stopped:
                 log("⏸ หยุดสร้างหน้าปก · ไฟล์ที่เสร็จแล้วอยู่ในโฟลเดอร์")
             except Exception as exc:
@@ -10223,24 +10226,8 @@ def _build(g: dict, root: tk.Misc, page: tk.Misc, box: tk.Misc, mode: str = "ima
                     # Legacy partial films must not unexpectedly regenerate Ref
                     # sheets or repeat Prompt-Ref analysis on resume.
                     keys = [k for k, _t, _w in LEGACY_VIDEO_STAGES]
-                # A legacy project may have skipped monitoring before this
-                # stage existed.  Bootstrap it once, then continue the EXACT
-                # saved stage (even if the film already has paid clips).
-                # Existing done flags remain intact: never replay Context,
-                # storyboard, image creation, or completed video submissions.
-                if video_mode and callable(STAGE_FUNCS.get("monitor")):
-                    import socket
-
-                    monitor_host = socket.gethostname()
-                    keys = auto_resume_keys_with_monitor(project, keys, video_mode, host=monitor_host)
-                    if only is None and not project.get("done", {}).get("effects"):
-                        current = "monitor"
-                        set_progress("monitor", 0.0, "กำลังเริ่มติดตาม · เรียก GPT และสกิลใน Chrome")
-                        stage_monitor_chat(wake=True)
-                    elif auto_monitor_bootstrap_needed(project, host=monitor_host):
-                        project.setdefault("done", {}).pop("monitor", None)
-                        log("ติดตั้งแชต/สคริปต์ติดตามที่ยังขาดก่อน แล้วกลับไปทำงานเดิมต่อ "
-                            "โดยไม่สร้างรูปหรือคลิปที่เสร็จแล้วซ้ำ")
+                # Project follow-up is optional and can still be invoked through the
+                # installed ChatGPT extension; it must never gate Auto production.
                 confirmed = False
                 for key in keys:
                     current = key

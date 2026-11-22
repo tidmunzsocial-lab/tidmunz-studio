@@ -70,7 +70,7 @@ def test_five_automated_covers_are_saved_in_project_then_resume_without_api(tmp_
     assert len(project["cover_images"]) == 5
     for idx in range(1, 6):
         out = Path(project["cover_images"][str(idx)])
-        assert out.parent == tmp_path / "covers"
+        assert out.parent == tmp_path / "หน้าปก"
         assert out.is_file()
         with Image.open(out) as im:
             assert im.size == (1920, 1080)

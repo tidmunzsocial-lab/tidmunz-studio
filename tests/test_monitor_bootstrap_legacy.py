@@ -63,16 +63,13 @@ def test_nonvideo_mode_is_not_changed():
     assert not N.auto_monitor_bootstrap_needed(project, video_mode=False)
 
 
-def test_resume_executes_only_new_monitor_and_skips_saved_stages():
+def test_auto_resume_does_not_force_monitor_but_preserves_existing_stages():
     source = inspect.getsource(N._build)
-    assert "keys = auto_resume_keys_with_monitor(project, keys, video_mode, host=monitor_host)" in source
-    assert 'callable(STAGE_FUNCS.get("monitor"))' in source
-    assert 'project.setdefault("done", {}).pop("monitor", None)' in source
+    assert "keys = auto_resume_keys_with_monitor(project, keys, video_mode, host=monitor_host)" not in source
+    assert 'callable(STAGE_FUNCS.get("monitor"))' not in source
+    assert "stage_monitor_chat(wake=True)" not in source
     assert 'if project["done"].get(key) and key != "video":' in source
     assert "if key not in keys" not in source
-    assert "keys = [key for key in keys if key != \"monitor\"]" not in source
-    assert "stage_monitor_chat(wake=True)" in source
-    assert source.index("stage_monitor_chat(wake=True)") < source.index("for key in keys:", source.index("stage_monitor_chat(wake=True)"))
 
 
 def test_confirmed_bootstrap_arms_existing_extension_without_new_watcher():

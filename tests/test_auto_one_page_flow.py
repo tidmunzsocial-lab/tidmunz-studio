@@ -5,8 +5,8 @@ from test_video_auto_scene_provider import N
 
 def test_one_page_auto_exposes_context_and_character_stages_before_audio():
     keys = [key for key, _title, _weight in N.VIDEO_STAGES]
-    assert keys[:5] == ["monitor", "analysis", "context", "ref_characters", "transcribe"]
-    assert keys.index("monitor") < keys.index("analysis")
+    assert keys[:4] == ["analysis", "context", "ref_characters", "transcribe"]
+    assert "monitor" not in keys
     assert keys.index("clips") < keys.index("effects") < keys.index("video")
     assert keys.index("ref_characters") < keys.index("images")
     assert sum(weight for _key, _title, weight in N.VIDEO_STAGES) == 100

@@ -6,10 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 EXT = ROOT / "snapgen_modules" / "chrome_ext"
 
 
-def test_monitor_stage_precedes_analysis_and_effects_precede_render():
+def test_optional_monitor_is_not_an_auto_prerequisite_and_effects_precede_render():
     stages = N.VIDEO_STAGES
     keys = [key for key, _label, _weight in stages]
-    assert keys.index("monitor") < keys.index("analysis")
+    assert "monitor" not in keys
+    assert keys[0] == "analysis"
     assert keys.index("clips") < keys.index("effects") < keys.index("video")
     assert sum(weight for _, _, weight in stages) == 100
     assert sum(weight for _, _, weight in N.LEGACY_VIDEO_STAGES) == 100
