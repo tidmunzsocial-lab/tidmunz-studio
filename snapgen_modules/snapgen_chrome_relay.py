@@ -556,14 +556,30 @@ def _write_extension(source: Path, token: str, port: int) -> None:
     # 1.0.60 is the separately maintained SnapGen Web build. Its worker
     # already loads followup.js, so upgrade that component in place while
     # retaining its generation handlers and extra host permissions.
-    preserve_snapgen_web = (source_version == "1.0.61"
-                            and target_version in {"1.0.60", "1.0.61"}
+    preserve_snapgen_web = (not preserve_newer_extension
+                            and source_version in {"1.0.61", "1.0.63"}
+                            and target_version in {"1.0.60", "1.0.61", "1.0.62", "1.0.63"}
                             and (target / "snapgen_web.js").is_file())
     if preserve_snapgen_web:
         monitor = source / "followup.js"
         installed_monitor = target / monitor.name
         if not installed_monitor.is_file() or monitor.read_bytes() != installed_monitor.read_bytes():
             shutil.copy2(monitor, installed_monitor)
+        if source_version == "1.0.63":
+            from snapgen_chrome_reply_upgrade import upgrade_worker
+            installed_worker = target / "background.js"
+            try:
+                old_worker = installed_worker.read_text(encoding="utf-8")
+                patched_worker = upgrade_worker(old_worker, (source / "background.js").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # Do not mark an incompatible optional worker upgraded or overwrite its handlers.
+                print("[Chrome] Optional worker layout differs; keeping its existing version.", flush=True)
+                source_version = target_version
+                patched_worker = old_worker = None
+            if patched_worker != old_worker:
+                tmp = installed_worker.with_suffix(".js.upgrade")
+                tmp.write_text(patched_worker, encoding="utf-8")
+                tmp.replace(installed_worker)
         if target_version != source_version:
             target_manifest["version"] = source_version
             (target / "manifest.json").write_text(

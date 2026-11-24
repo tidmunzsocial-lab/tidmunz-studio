@@ -444,7 +444,7 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
   const state = {before: started.before, oldPointers: started.oldPointers, sentAt: Date.now(),
                  cid: started.conversation_id || job.conversation_id || null, idle: 0,
                  dom_before: started.dom_before || [], dom_mode: Boolean(started.dom_mode),
-                 user_message_id: started.user_message_id || null};
+                 user_message_id: started.user_message_id || null, existing_chat: Boolean(job.conversation_id)};
   let deadline = Date.now() + (job.type === "chat" ? CHAT_JOB_LIMIT_MS : JOB_LIMIT_MS);
   const hardDeadline = state.sentAt + JOB_LIMIT_MS;
   let throttles = 0;
@@ -454,7 +454,7 @@ async function runJob(job, workerKey = "workerTabId", onRateLimit = () => {}) {
     let result = null;
     try {
       const tab = await chrome.tabs.get(tabId);
-      if (tab.status !== "complete") continue;  // reloading: look again when it is back
+      if (tab.discarded) continue;  // a live ChatGPT document may keep loading in the background
       result = await inPage(tabId, pagePoll, [job.type, state]);
     } catch (e) {
       continue;  // the page was navigating; the conversation keeps the answer
@@ -862,11 +862,45 @@ async function pagePoll(kind, state) {
   const busy = [...document.querySelectorAll("form button, button[data-testid]")].some(b =>
     b.getAttribute("data-testid") === "stop-button" ||
     /^(stop|หยุด|停止|detener|arrêter|stopp)/i.test((b.getAttribute("aria-label") || "").trim()));
-  const match = location.pathname.match(/\/c\/([0-9a-f-]{20,})/);
-  const cid = state.cid || (match ? match[1] : null);
+  const match = location.pathname.match(/^\/c\/([^/?#]+)\/?$/);
+  const cid = match ? match[1] : null;
+  if (state.cid && cid !== state.cid) return {done: false, cid: state.cid, idle: state.idle || 0};
   const idle = busy ? 0 : (state.idle || 0) + 1;
   const elapsed = (Date.now() - state.sentAt) / 1000;
   if (!cid || elapsed < 6) return {done: false, cid, idle};
+
+  // Current ChatGPT renderer: completed turn, real assistant cursor, matching
+  // conversation, and fresh user/assistant IDs. Do not rely on legacy role
+  // attributes or a transient accessibility announcement to read final text.
+  if (kind === "chat" && !busy) {
+    const prior = new Set([...(state.before || []), ...(state.dom_before || [])]);
+    const users = [...document.querySelectorAll('[data-user-message-bubble]')];
+    const user = users[users.length - 1];
+    const unit = user && user.closest('[data-chatgpt-search-message-ids]');
+    const userIds = ((unit && unit.getAttribute('data-chatgpt-search-message-ids')) || '')
+      .match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig) || [];
+    const freshUser = user && (userIds.length
+      ? userIds.some(id => !prior.has(id) && (!state.user_message_id || id === state.user_message_id))
+      : (state.existing_chat ? prior.size > 0 : users.length === 1 && !prior.size));
+    const turns = [...document.querySelectorAll('[data-talvt-turn-state]')]
+      .filter(t => t.querySelector('[data-response-body]'));
+    const turn = turns[turns.length - 1];
+    if (freshUser && turn && !busy && turn.getAttribute('data-talvt-turn-state') === 'complete') {
+      const body = turn.querySelector('[data-response-body]');
+      const candidates = [...body.querySelectorAll('[data-chatgpt-selection-message-id][data-chatgpt-selection-conversation-id]')];
+      const reply = candidates[candidates.length - 1];
+      const id = reply && reply.getAttribute('data-chatgpt-selection-message-id');
+      const replyCid = reply && reply.getAttribute('data-chatgpt-selection-conversation-id');
+      if (id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) &&
+          replyCid === cid && !prior.has(id) && (user.compareDocumentPosition(reply) & 4)) {
+        const codes = [...reply.querySelectorAll('pre code')];
+        const code = codes.length ? (codes[codes.length - 1].textContent || '').trim() : '';
+        const text = (/^[{\[]/.test(code) ? code : (reply.innerText || reply.textContent || '')).trim();
+        if (text && !/unable to load (?:this )?(?:message|response)|ไม่สามารถโหลดคำตอบนี้/i.test(text))
+          return {done: true, text, images: [], conversation_id: cid, message_id: id, source: "chatgpt_page_current_complete"};
+      }
+    }
+  }
 
   let domUnsure = false;
   if (kind === "chat" && state.user_message_id) {
@@ -918,9 +952,16 @@ async function pagePoll(kind, state) {
     if (state.api_read_at && Date.now() - state.api_read_at < 20000) return {done: false, cid, idle};
   }
 
-  const token = (await (await fetch("/api/auth/session")).json()).accessToken;
-  const auth = {headers: {Authorization: "Bearer " + token}};
-  const response = await fetch(`/backend-api/conversation/${cid}`, {...auth, cache: "no-store"});
+  let token, auth, response;
+  try {
+    token = (await (await fetch("/api/auth/session", {signal: AbortSignal.timeout(8000)})).json()).accessToken;
+    if (!token) return {error: "ChatGPT session is not available", provider_status: 401};
+    auth = {headers: {Authorization: "Bearer " + token}};
+    response = await fetch(`/backend-api/conversation/${cid}`, {...auth, cache: "no-store", signal: AbortSignal.timeout(12000)});
+  } catch (e) {
+    // Read-only recovery: a slow fetch must never trap the response poller or resend a prompt.
+    return {done: false, cid, idle, api_read_at: Date.now()};
+  }
   if (!response.ok) {
     if (response.status === 429) {
       const raw = response.headers && response.headers.get("Retry-After");
@@ -933,7 +974,7 @@ async function pagePoll(kind, state) {
             provider_status: response.status};
   }
   const data = await response.json();
-  const nodes = Object.entries(data.mapping || {}).filter(([id, n]) => n.message && !state.before.includes(id))
+  const nodes = Object.entries(data.mapping || {}).filter(([id, n]) => n.message && !(state.before || []).includes(id))
     .map(([, n]) => n.message).sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
   const skip = new Set(state.oldPointers || []);
   const pointers = [];
